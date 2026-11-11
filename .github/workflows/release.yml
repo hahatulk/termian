@@ -1,0 +1,322 @@
+name: Release Termian Tauri (Windows x64, macOS Silicon)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'tauri/**'
+      - '.github/workflows/release.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'tauri/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional stable SemVer override (for example 1.2.0)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: termian-release
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Calculate release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      changelog: ${{ steps.version.outputs.changelog }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - name: Fetch release tags
+        run: git fetch --force --tags origin
+      - name: Check version calculator
+        run: node --test tauri/scripts/release-version.test.cjs
+      - name: Calculate version and changelog
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version || '' }}
+        run: |
+          args=(--github-output "$GITHUB_OUTPUT")
+          if [[ -n "$REQUESTED_VERSION" ]]; then
+            args+=(--version "$REQUESTED_VERSION")
+          fi
+          node tauri/scripts/release-version.cjs "${args[@]}"
+
+  build:
+    name: Tauri ${{ matrix.label }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows x64
+            platform: win
+            arch: x64
+            extension: exe
+          - os: macos-15
+            label: macOS Apple Silicon
+            platform: mac
+            arch: arm64
+            extension: dmg
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 65
+    # Keep native macOS deployment settings identical in cargo test and DMG build,
+    # so compiled dependencies can be reused instead of recompiling twice.
+    env:
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'mac' && '11.0' || '' }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: tauri
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: tauri/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+      - uses: swatinem/rust-cache@v2
+        with:
+          # Cargo is invoked from tauri/src, but its real output is tauri/dist/.cargo.
+          # Without the -> target mapping the previous cache never stored Rust objects.
+          workspaces: tauri/src -> ../dist/.cargo
+          cache-targets: true
+          cache-on-failure: true
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Test JavaScript UI and bundle
+        run: |
+          npm run check:web
+          npm test
+      - name: Test Rust backend using production profile (reuse compiled dependencies)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/tauri/dist/.cargo
+        run: |
+          npm run build:web
+          if [[ "${{ matrix.platform }}" == 'mac' ]]; then
+            # Match Tauri's explicit DMG target: release/ and
+            # aarch64-apple-darwin/release/ are otherwise separate Cargo caches.
+            cargo test --release --lib --target aarch64-apple-darwin --manifest-path src/Cargo.toml --locked
+          else
+            cargo test --release --lib --manifest-path src/Cargo.toml --locked
+          fi
+      - name: Configure release version
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: node scripts/set-version.mjs "$RELEASE_VERSION"
+      - name: Build Windows portable EXE and NSIS installer
+        if: matrix.platform == 'win'
+        env:
+          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
+        run: |
+          node scripts/tauri-cli.mjs build --no-bundle --config src/tauri.release.conf.json
+          # Copies the portable EXE, then bundles the per-user NSIS installer.
+          node scripts/publish-windows.mjs
+      - name: Build and verify signed Apple Silicon DMG
+        if: matrix.platform == 'mac'
+        env:
+          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          # Without an Apple Developer certificate use Tauri's ARM64 ad-hoc
+          # code signature; fully trusted downloads require notarization.
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
+            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              [[ -n "${!name}" ]] || { echo "::error::Missing $name for Apple Developer signing/notarization"; exit 1; }
+            done
+          else
+            if [[ -n "$APPLE_CERTIFICATE" || -n "$APPLE_CERTIFICATE_PASSWORD" || -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
+              echo '::error::Partial Apple signing credentials: set APPLE_SIGNING_IDENTITY and all Developer ID/notarization secrets, or remove them for ad-hoc signing.'
+              exit 1
+            fi
+            # GitHub Actions exports absent secrets as empty environment variables.
+            # Tauri attempts PKCS#12 import whenever APPLE_CERTIFICATE exists,
+            # even when its value is empty. Remove all signing/notary secrets
+            # from the build process for a genuine ad-hoc signature.
+            unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
+            echo 'Apple Developer certificate not configured: using ad-hoc signing (not notarized).'
+          fi
+          # Compile once; transient hdiutil failures should retry bundling only.
+          # Request both app and dmg to retain the .app for codesign/spctl.
+          node scripts/tauri-cli.mjs build --no-bundle --target aarch64-apple-darwin --config src/tauri.release.conf.json
+          bundle_log="$(mktemp)"
+          trap 'rm -f "$bundle_log"' EXIT
+          for attempt in 1 2 3; do
+            if node scripts/tauri-cli.mjs bundle --bundles app,dmg --target aarch64-apple-darwin --config src/tauri.release.conf.json 2>&1 | tee "$bundle_log"; then
+              break
+            fi
+            if ! grep -Eqi 'hdiutil: .*failed - Resource busy' "$bundle_log"; then
+              echo '::error::macOS bundling failed for a reason other than a transient hdiutil Resource busy error.'
+              exit 1
+            fi
+            if (( attempt == 3 )); then
+              echo '::error::macOS hdiutil Resource busy after three bundling attempts.'
+              exit 1
+            fi
+            echo "::warning::hdiutil was busy during DMG creation (attempt $attempt/3); retrying only the bundling step."
+            sleep "$((attempt * 15))"
+          done
+          app="dist/.cargo/aarch64-apple-darwin/release/bundle/macos/termian.app"
+          [[ -d "$app" ]] || { echo "::error::Missing termian.app in DMG build"; exit 1; }
+          codesign --verify --deep --verbose=2 "$app"
+          codesign -dv --verbose=2 "$app" 2>&1 | grep -E 'Signature=|Authority=|TeamIdentifier=' || true
+          if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
+            # A Developer ID DMG must also pass Gatekeeper; a valid code
+            # signature alone does not prove Apple's notarization succeeded.
+            spctl --assess --verbose --type execute "$app"
+          fi
+          node scripts/publish-mac.mjs
+      - name: Sign auto-update package
+        # Pull requests cannot read secrets and are never published.
+        if: github.event_name != 'pull_request'
+        env:
+          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || { echo '::error::Missing TAURI_SIGNING_PRIVATE_KEY secret: releases must ship signed auto-update packages.'; exit 1; }
+          node scripts/updater-artifacts.mjs
+      - name: Verify exact release asset in dist
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
+          EXTENSION: ${{ matrix.extension }}
+        run: |
+          set -euo pipefail
+          expected=("termian-${RELEASE_VERSION}-${PLATFORM}-${ARCH}.${EXTENSION}")
+          if [[ "$PLATFORM" == 'win' ]]; then
+            expected+=("termian-${RELEASE_VERSION}-${PLATFORM}-${ARCH}-setup.exe")
+          fi
+          for asset in "${expected[@]}"; do
+            [[ -s "dist/$asset" ]] || { echo "Missing Tauri release artifact in dist/: $asset"; exit 1; }
+          done
+      # The artifact service sometimes times out (CreateArtifact) after a
+      # successful build: retry the upload instead of failing the whole job.
+      - name: Upload release artifacts
+        id: upload1
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            tauri/dist/termian-*.${{ matrix.extension }}
+            tauri/dist/termian-*.app.tar.gz
+            tauri/dist/termian-*.sig
+          if-no-files-found: error
+          retention-days: 14
+      - name: Wait before retrying artifact upload
+        if: steps.upload1.outcome == 'failure'
+        run: sleep 60
+      - name: Retry artifact upload
+        id: upload2
+        if: steps.upload1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            tauri/dist/termian-*.${{ matrix.extension }}
+            tauri/dist/termian-*.app.tar.gz
+            tauri/dist/termian-*.sig
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+      - name: Wait before the last artifact upload attempt
+        if: steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        run: sleep 120
+      - name: Last artifact upload attempt
+        id: upload3
+        if: steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
+        continue-on-error: false
+        uses: actions/upload-artifact@v4
+        with:
+          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
+          path: |
+            tauri/dist/termian-*.${{ matrix.extension }}
+            tauri/dist/termian-*.app.tar.gz
+            tauri/dist/termian-*.sig
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: true
+
+  publish:
+    name: Publish Tauri GitHub release
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tauri/scripts
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: termian-${{ needs.prepare.outputs.version }}-*
+          path: release-assets
+          merge-multiple: true
+      - name: Require both desktop platforms and no extra files
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          expected=(
+            "termian-${RELEASE_VERSION}-mac-arm64.app.tar.gz"
+            "termian-${RELEASE_VERSION}-mac-arm64.app.tar.gz.sig"
+            "termian-${RELEASE_VERSION}-mac-arm64.dmg"
+            "termian-${RELEASE_VERSION}-win-x64.exe"
+            "termian-${RELEASE_VERSION}-win-x64.exe.sig"
+            "termian-${RELEASE_VERSION}-win-x64-setup.exe"
+            "termian-${RELEASE_VERSION}-win-x64-setup.exe.sig"
+          )
+          mapfile -t actual < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "${#actual[@]}" -eq "${#expected[@]}" ]] || { printf "Unexpected release assets:\n%s\n" "${actual[*]}"; exit 1; }
+          for asset in "${expected[@]}"; do
+            [[ -s "release-assets/$asset" ]] || { echo "Missing: $asset"; exit 1; }
+          done
+      - name: Write auto-update manifest
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          RELEASE_NOTES: ${{ needs.prepare.outputs.changelog }}
+          REPOSITORY: ${{ github.repository }}
+        run: node tauri/scripts/updater-manifest.mjs release-assets "$RELEASE_VERSION" "$RELEASE_TAG" "$REPOSITORY" "$RELEASE_NOTES"
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
+          name: Termian ${{ needs.prepare.outputs.version }}
+          body: ${{ needs.prepare.outputs.changelog }}
+          generate_release_notes: true
+          prerelease: true
+          fail_on_unmatched_files: true
+          files: release-assets/*

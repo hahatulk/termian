@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: hb-service-ab1bb2b0.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "The hb-service command is provided by homebridge-config-ui-x", n = "hb-service", a = [{ description: "Rebuild UI", name: "rebuild", options: [{ description: "Rebuild all npm modules (use after updating Node.js)", name: "--all" }] }, { description: "Update Node.js", name: "update-node", args: [{ name: "version", isOptional: true }] }], s = [{ description: "Display help for command", name: ["--help", "-h"] }, { description: "Output the version number", name: ["--version", "-v"] }, { description: "The name of the homebridge service to install or control", name: ["--service-name", "-S"], args: [{ name: "service name" }] }, { description: "The port to set to the Homebridge UI when installing as a service", name: "--port", args: [{ name: "port" }] }, { description: "The user account the Homebridge service will be installed as (Linux, macOS only)", name: "--user", args: [{ name: "user" }] }, { name: ["--plugin-path", "-P"], args: [{ name: "path" }] }, { name: ["--user-storage-path", "-U"], args: [{ name: "path" }] }, { name: ["--no-timestamp", "-T"] }, { name: "--gid", args: [{ name: "number" }] }, { name: "--uid", args: [{ name: "number" }] }, { name: "--docker" }, { name: "--allow-root" }, { name: "--stdout" }, { name: "--strict-plugin-resolution" }], i = { description: e, name: n, subcommands: a, options: s };
+export {
+  i as default,
+  e as description,
+  n as name,
+  s as options,
+  a as subcommands
+};

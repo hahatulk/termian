@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: yo-31f7c461.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const n = "Yeoman generator", o = "yo", e = [{ name: "generator", suggestions: [{ description: "Running sanity checks on your system", name: "doctor" }, { description: "To enable shell completion for the yo command", name: "completion" }], isOptional: true, isCommand: true }], i = [{ description: "Print info and generator's options and usage", name: "--help" }, { description: "Overwrite files that already exist", name: ["-f", "--force"] }, { description: "Print version", name: "--version" }, { description: "Disable color", name: "--no-color" }, { description: "Enable anonymous tracking", name: "--insight" }, { description: "Disable anonymous tracking", name: "--no-insight" }, { description: "Print available generators", name: "--generators" }, { description: "Disable lookup of globally-installed generators", name: "--local-only" }], s = { description: n, name: o, args: e, options: i };
+export {
+  e as args,
+  s as default,
+  n as description,
+  o as name,
+  i as options
+};

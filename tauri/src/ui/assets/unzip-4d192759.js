@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: unzip-4d192759.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Extract compressed files in a ZIP archive", t = "unzip", i = [{ name: "file", template: ["filepaths"] }], a = [{ description: "List the contents of a zip file without extracting", name: "-l", args: [{ name: "file", template: ["filepaths"] }] }, { name: "-c", args: [{ name: "file", template: ["filepaths"] }] }, { description: "Extract a zip file created in windows, containing files with non-ascii (chinese) filenames", name: "-0", args: [{ name: "gbk" }, { name: "file", template: ["filepaths"] }] }, { name: "-d", args: [{ name: "destination", template: ["folders"] }] }], n = { description: e, name: t, args: i, options: a };
+export {
+  i as args,
+  n as default,
+  e as description,
+  t as name,
+  a as options
+};

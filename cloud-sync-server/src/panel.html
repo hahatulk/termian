@@ -1,0 +1,198 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Termian Sync</title>
+<style>
+:root{--bg:#131626;--card:#1c2035;--line:#2c3150;--text:#f2f3f5;--muted:#9ea5b3;--accent:#3dcc94;--warn:#f0bc6b;--err:#ec706f;color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:880px;margin:0 auto;padding:32px 16px 48px}
+h1{margin:0;font-size:20px;font-weight:600}
+h2{margin:0 0 12px;font-size:15px;font-weight:600}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:20px}
+.sub{color:var(--muted);font-size:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px 20px;margin-bottom:16px}
+form{display:flex;gap:8px;flex-wrap:wrap}
+input{flex:1 1 260px;min-width:0;height:38px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--text);font:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:-1px}
+button{height:38px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:#292e48;color:var(--text);font:inherit;cursor:pointer;white-space:nowrap}
+button:hover{background:#343a5c}
+button.primary{background:var(--accent);border-color:var(--accent);color:#0c2a1e;font-weight:600}
+button:disabled{opacity:.5;cursor:default}
+.msg{margin-top:10px;font-size:13px;min-height:20px}
+.msg.err{color:var(--err)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px}
+.kv{padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.kv span{display:block;color:var(--muted);font-size:12px}
+.kv b{display:block;font-weight:500;overflow-wrap:anywhere}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:6px 0;border-bottom:1px solid var(--line)}
+td:last-child{text-align:right;font-variant-numeric:tabular-nums}
+tr.zero td{color:var(--muted)}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.row h2{margin:0}
+#collections{margin-top:12px}
+.note{color:var(--muted);font-size:12px;margin:10px 0 0}
+.warn{color:var(--warn)}
+ul.help{margin:0;padding-left:18px;color:var(--muted);font-size:13px}
+ul.help li{margin:4px 0}
+[hidden]{display:none!important}
+@media(max-width:520px){main{padding:20px 16px}.card{padding:14px}}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div><h1>Termian Sync</h1><div class="sub">Локальная панель сервера синхронизации</div></div>
+    <button type="button" id="logout" hidden>Выйти</button>
+  </header>
+
+  <section class="card" id="login">
+    <h2>Вход паролем шифрования</h2>
+    <form id="unlock" autocomplete="off">
+      <input id="passphrase" type="password" placeholder="Пароль шифрования из настроек «Своё облако»" autocomplete="current-password" required>
+      <button class="primary" type="submit">Открыть</button>
+    </form>
+    <div class="msg" id="login-msg" role="status"></div>
+    <p class="note">Пароль проверяется расшифровкой снимка в памяти сервера и нигде не сохраняется. После серии неверных попыток вход временно блокируется.</p>
+  </section>
+
+  <div id="dashboard" hidden>
+    <section class="card">
+      <div class="row"><h2>Сервер</h2><button type="button" id="refresh">Обновить</button></div>
+      <div class="grid" id="server"></div>
+    </section>
+
+    <section class="card" id="snapshot-card">
+      <div class="row"><h2>Снимок</h2><button class="primary" type="button" id="export">Выгрузить данные (JSON)</button></div>
+      <div class="grid" id="snapshot"></div>
+      <table id="collections" aria-label="Содержимое снимка"></table>
+      <p class="note warn">Выгруженный файл не зашифрован: в нём пароли, приватные ключи и адреса хостов. Храните его в защищённом месте и удалите после использования.</p>
+    </section>
+    <section class="card" id="empty" hidden>
+      <h2>Снимок</h2>
+      <p class="note">На сервере ещё нет снимка. Нажмите «Отправить» в клиенте Termian.</p>
+    </section>
+
+    <section class="card">
+      <h2>Справка</h2>
+      <ul class="help">
+        <li>«Последняя синхронизация» — время последней отправки снимка клиентом («Отправить»). Получение («Получить») время файла не меняет и учитывается с момента запуска сервера.</li>
+        <li>Каждая отправка заменяет снимок целиком; предыдущие версии хранятся в <code>revisions/</code> (последние <span id="max-rev">10</span>).</li>
+        <li>Выгрузка — тот же JSON, что клиент импортирует при «Получить». Для переноса между устройствами используйте сам клиент, файл нужен для резервной копии и проверки содержимого.</li>
+        <li>Панель доступна только с этого компьютера (127.0.0.1). Для доступа с другого устройства используйте SSH-туннель: <code>ssh -L 8081:127.0.0.1:8081 сервер</code>.</li>
+        <li>Неверный токен клиента блокирует его адрес после серии попыток; заблокированные адреса показаны в «Блокировки».</li>
+      </ul>
+    </section>
+  </div>
+</main>
+<script>
+(() => {
+  let passphrase = null; // memory only: cleared on logout and page close
+  const $ = id => document.getElementById(id);
+  const fmtDate = ms => ms ? new Date(ms).toLocaleString() : '—';
+  const fmtBytes = n => n == null ? '—' : n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ';
+  const fmtAgo = ms => {
+    if (!ms) return '';
+    const s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+    return s < 60 ? 'только что' : s < 3600 ? Math.round(s / 60) + ' мин назад' : s < 86400 ? Math.round(s / 3600) + ' ч назад' : Math.round(s / 86400) + ' дн назад';
+  };
+  const fmtUptime = s => { const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60); return (d ? d + ' д ' : '') + (h ? h + ' ч ' : '') + m + ' мин'; };
+  const kv = (label, value, hint) => {
+    const box = document.createElement('div'); box.className = 'kv';
+    const l = document.createElement('span'); l.textContent = label;
+    const v = document.createElement('b'); v.textContent = value;
+    box.append(l, v);
+    if (hint) { const h = document.createElement('span'); h.textContent = hint; box.append(h); }
+    return box;
+  };
+
+  async function call(path) {
+    const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Termian-Panel': '1'}, body: JSON.stringify({passphrase})});
+    if (response.status === 429) {
+      const wait = Number(response.headers.get('Retry-After')) || 0;
+      throw new Error('Слишком много неверных попыток. Повторите через ' + (wait < 90 ? wait + ' с' : Math.ceil(wait / 60) + ' мин') + '.');
+    }
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      const error = new Error(data.error || 'Ошибка ' + response.status);
+      error.status = response.status;
+      throw error;
+    }
+    return response;
+  }
+
+  function render({server, snapshot}) {
+    $('max-rev').textContent = server.maxRevisions;
+    const s = $('server');
+    s.replaceChildren(
+      kv('Последняя синхронизация', fmtDate(server.lastUploadAt), fmtAgo(server.lastUploadAt)),
+      kv('Последнее получение клиентом', fmtDate(server.lastDownloadAt), server.lastDownloadAt ? fmtAgo(server.lastDownloadAt) : 'с момента запуска не было'),
+      kv('Ревизия', server.revision || '—', 'SHA-256, первые 12 символов'),
+      kv('Размер снимка', fmtBytes(server.snapshotBytes), 'лимит ' + fmtBytes(server.maxBodyBytes)),
+      kv('Сохранённые версии', server.revisions.length + ' из ' + server.maxRevisions, server.revisions[0] ? 'последняя ' + fmtDate(server.revisions[0].at) : 'нет'),
+      kv('Работает', fmtUptime(server.uptimeSeconds), 'с ' + fmtDate(server.startedAt)),
+      kv('Блокировки', String(server.lockedClients), server.authFailures + ' попыток, затем от ' + server.authLockoutSeconds + ' с'),
+      kv('Версия сервера', server.version, server.trustForwardedFor ? 'адрес клиента из X-Forwarded-For' : 'адрес клиента из соединения'),
+    );
+    $('snapshot-card').hidden = !snapshot;
+    $('empty').hidden = !!snapshot;
+    if (!snapshot) return;
+    $('snapshot').replaceChildren(
+      kv('Создан клиентом', snapshot.createdAt ? fmtDate(Date.parse(snapshot.createdAt)) : '—', snapshot.createdAt ? fmtAgo(Date.parse(snapshot.createdAt)) : ''),
+      kv('Формат', String(snapshot.format || '—'), 'версия ' + (snapshot.formatVersion ?? '—')),
+      kv('Размер', fmtBytes(snapshot.decryptedBytes), 'зашифровано ' + fmtBytes(snapshot.encryptedBytes)),
+      kv('Настройки приложения', 'параметров: ' + snapshot.settingsCount),
+    );
+    const rows = snapshot.collections.map(item => {
+      const tr = document.createElement('tr');
+      if (!item.count) tr.className = 'zero';
+      const a = document.createElement('td'); a.textContent = item.title;
+      const b = document.createElement('td'); b.textContent = item.count;
+      tr.append(a, b);
+      return tr;
+    });
+    $('collections').replaceChildren(...rows);
+  }
+
+  async function load() {
+    const data = await (await call('/api/unlock')).json();
+    render(data);
+    $('login').hidden = true; $('dashboard').hidden = false; $('logout').hidden = false;
+  }
+
+  $('unlock').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = event.submitter; button.disabled = true;
+    $('login-msg').className = 'msg'; $('login-msg').textContent = 'Расшифровка…';
+    passphrase = $('passphrase').value;
+    try { await load(); $('passphrase').value = ''; $('login-msg').textContent = ''; }
+    catch (error) { passphrase = null; $('login-msg').className = 'msg err'; $('login-msg').textContent = error.message; }
+    finally { button.disabled = false; }
+  });
+  $('refresh').addEventListener('click', () => load().catch(error => alert(error.message)));
+  $('export').addEventListener('click', async () => {
+    const button = $('export'); button.disabled = true;
+    try {
+      const blob = await (await call('/api/export')).blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url; link.download = 'termian-snapshot-' + new Date().toISOString().slice(0, 10) + '.json';
+      document.body.append(link); link.click(); link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (error) { alert(error.message); }
+    finally { button.disabled = false; }
+  });
+  $('logout').addEventListener('click', () => {
+    passphrase = null;
+    $('dashboard').hidden = true; $('logout').hidden = true; $('login').hidden = false;
+    $('server').replaceChildren(); $('snapshot').replaceChildren(); $('collections').replaceChildren();
+    $('passphrase').focus();
+  });
+  $('passphrase').focus();
+})();
+</script>
+</body>
+</html>

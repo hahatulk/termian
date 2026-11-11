@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: wc-9466fd3d.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const t = "World, line, character, and byte count", e = "wc", n = [{ name: "file", description: "File to count in", template: ["filepaths"], isVariadic: true, isOptional: true }], i = [{ description: "Output the number of bytes to the standard input", name: "-c" }, { description: "Output the number of lines to the standard input", name: "-l" }, { description: "Output the number of characters to the standard input", name: "-m" }, { description: "Output the number of words to the standard input", name: "-w" }], o = { description: t, name: e, args: n, options: i };
+export {
+  n as args,
+  o as default,
+  t as description,
+  e as name,
+  i as options
+};

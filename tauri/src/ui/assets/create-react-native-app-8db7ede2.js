@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: create-react-native-app-8db7ede2.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Creates a new React Native project", a = "create-react-native-app", t = [{ name: "name", template: ["folders"] }], n = [{ description: "The name of a template from expo/examples or URL to a GitHub repo that contains an example", name: "--template", args: [{ name: "template" }] }, { description: "The path inside of a GitHub repo where the example lives", name: "--template-path", args: [{ name: "name" }] }, { description: "Use the default options for creating a project", name: "--yes", args: [{ name: "boolean", suggestions: [{ name: "true" }, { name: "false" }], isOptional: true }] }, { description: "Skip installing npm packages or CocoaPods", name: "--no-install", args: [{ name: "boolean", suggestions: [{ name: "true" }, { name: "false" }], isOptional: true }] }, { description: "Use npm to install dependencies. (default when Yarn is not installed)", name: "--use-npm", args: [{ name: "boolean", suggestions: [{ name: "true" }, { name: "false" }], isOptional: true }] }, { description: "Output usage information", name: ["-h", "--help"] }, { description: "Output the version number", name: ["-V", "--version"] }], s = { description: e, name: a, args: t, options: n };
+export {
+  t as args,
+  s as default,
+  e as description,
+  a as name,
+  n as options
+};

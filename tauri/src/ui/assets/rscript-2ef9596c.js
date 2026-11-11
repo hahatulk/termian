@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: rscript-2ef9596c.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Scripting Front-End for R", n = "Rscript", i = [{ name: "file", description: "R script to run" }, { name: "args", description: "Arguments to pass to the script", isVariadic: true }], s = [{ description: "R expression to run", name: "-e", args: [{ name: "expression", description: "R expression" }] }, { description: "Print usage and exit", name: "--help" }, { description: "Print version and exit", name: "--version" }, { description: "Print information on progress", name: "--verbose" }, { description: "Run as quietly as possible", name: "--no-echo" }, { description: "Don't restore anything", name: "--no-restore" }, { description: "Do save workspace at the end of the session", name: "--save" }, { description: "Don't read the site and user environment files", name: "--no-environ" }, { description: "Don't read the site-wide Rprofile", name: "--no-site-file" }, { description: "Don't read the user R profile", name: "--no-init-file" }, { description: "Do restore previously saved objects at startup", name: "--restore" }, { description: "Combine --no-save, --no-restore, --no-site-file --no-init-file and --no-environ", name: "--vanilla" }, { description: "Comma separated list of default packages", name: "--default-packages", args: [{ name: "packages", description: "A comma-separated set of package names, or 'NULL'" }] }], o = { description: e, name: n, args: i, options: s };
+export {
+  i as args,
+  o as default,
+  e as description,
+  n as name,
+  s as options
+};

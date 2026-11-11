@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Merged by Tauri into the macOS app's Info.plist. Texts for the system
+     privacy prompts shown when the SFTP "Local" panel opens these folders. -->
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>Termian shows and transfers files on your Desktop in the SFTP Local panel.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>Termian shows and transfers files in Documents in the SFTP Local panel.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>Termian shows and transfers files in Downloads in the SFTP Local panel.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>Termian shows and transfers files on external drives in the SFTP Local panel.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>Termian shows and transfers files on network volumes in the SFTP Local panel.</string>
+</dict>
+</plist>

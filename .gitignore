@@ -1,0 +1,21 @@
+/release-assets/
+**/termian-data/
+
+# Personal data, never distribute or commit
+# Android release signing keys must never be committed.
+*.jks
+*.keystore
+*.p12
+*.pfx
+**/.local-user-data*/
+**/.packaged-test-profile/
+**/self-cloud.json
+**/self-cloud-backups/
+/cloud-sync-server/.env
+/cloud-sync-server/target/
+.idea/
+.DS_Store
+/tauri/dist/
+/tauri/src/gen/
+node_modules
+/native/

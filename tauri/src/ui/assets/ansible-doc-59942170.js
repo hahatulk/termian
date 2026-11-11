@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: ansible-doc-59942170.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Displays information on modules installed in Ansible libraries", o = "ansible-doc", n = [{ name: "plugin", isVariadic: true }], i = [{ description: "For internal testing only Dump json metadata for all plugins", name: "--metadata-dump", args: [{ isOptional: true }] }, { description: "Sets the relative path for many features including roles/ group_vars/ etc", name: "--playbook-dir", args: [{ name: "BASEDIR", description: "Base directory", template: ["filepaths"] }] }, { description: "Shows version number, config file location, module search path, module location, executable location and exit", name: "--version", args: [{ isOptional: true }] }, { description: "Show plugin names and their source files without summaries (implies --list)", name: ["--list_files", "-F"], args: [{ isOptional: true }] }, { description: "Prepend colon-separated path(s) to module library", name: ["--module-path", "-M"], args: [{ isOptional: true }] }, { description: "Select the entry point for role(s)", name: ["--entry-point", "-E"], args: [{ name: "ENTRY_POINT" }] }, { description: "Show help and exit", name: ["--help", "-h"], args: [{ isOptional: true }] }, { description: "Change output into json format", name: ["--json", "-j"], args: [{ isOptional: true }] }, { description: "List available plugins; a supplied argument will be used for filtering (can be a namespace or full collection name)", name: ["--list", "-l"], args: [{ name: "NAMESPACE|COLLECTION", isOptional: true }] }, { description: "The path to the directory containing your roles", name: ["--roles-path", "-r"], args: [{ name: "PATH", template: ["filepaths"] }] }, { description: "Show playbook snippet for these plugin types: inventory, lookup, module", name: ["--snippet", "-s"], args: [{ name: "PLUGIN_TYPE", suggestions: ["inventory", "lookup", "module"] }] }, { description: 'Choose which plugin type (defaults to "module")', name: ["--type", "-t"], args: [{ name: "PLUGIN_TYPE", suggestions: ["become", "cache", "callback", "cliconf", "connection", "httpapi", "inventory", "lookup", "netconf", "shell", "vars", "module", "strategy", "role", "keyword"] }] }, { description: "Verbose mode (-vvv for more, -vvvv to enable connection debugging)", name: "--verbose", args: [{ isOptional: true }] }, { description: "Verbose mode (-vvv for more, -vvvv to enable connection debugging)", name: "-v", args: [{ isOptional: true }] }], t = { description: e, name: o, args: n, options: i };
+export {
+  n as args,
+  t as default,
+  e as description,
+  o as name,
+  i as options
+};

@@ -1,0 +1,13 @@
+/*
+ * Recovered Termius UI module: ua-49ec0d30.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Manage Ubuntu Pro services from Canonical", a = "ua", t = [{ description: "Connect an Ubuntu Pro support contract to this machine", name: "attach", args: [{ name: "token", description: "Auth token. Not required if specified in --attach-config file", isOptional: true }], options: [{ description: "Disable  the  automatic enablement of recommended entitlements", name: "--no-auto-enable" }, { description: "Provide a file with configuration options", name: "--attach-config", args: [{ name: "file path", template: ["filepaths"] }] }] }, { description: "Create a tarball with all relevant logs and debug data", name: "collect-logs", options: [{ description: "Path for tarball. Uses ua_logs.tar.gz in current directory if not specified", name: ["-o", "--output"], args: [{ name: "file", template: ["filepaths"] }] }] }, { description: "Disable this machine's access to an Ubuntu Pro service", name: "disable", args: [{ name: "service", suggestions: ["cc-eal", "cis", "esm", "fips", "fips-updates", "livepatch", "ros", "ros-updates"] }] }, { description: "Activate and configure this machine's access to an Ubuntu Pro service", name: "enable", args: [{ name: "service", suggestions: ["cc-eal", "cis", "esm", "fips", "fips-updates", "livepatch", "ros", "ros-updates"] }] }, { description: "Fix a CVE or USN on the  system  by  upgrading  the  appropriate package(s)", name: "fix", args: [{ name: "security issue" }] }, { description: "Report current status of Ubuntu Pro services on system", name: "status", options: [{ description: "Output format", name: "--format", args: [{ suggestions: ["tabular", "json", "yaml"] }] }, { name: "--simulate-with-token", args: [{ name: "token" }] }, { description: "Include beta and unavailable services", name: "--all" }] }], s = { description: e, name: a, subcommands: t };
+export {
+  s as default,
+  e as description,
+  a as name,
+  t as subcommands
+};

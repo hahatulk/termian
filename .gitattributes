@@ -1,0 +1,3 @@
+# Keep recovered SVG resource line endings consistent across Windows/macOS/Linux.
+# Git for Windows otherwise checks out 484 SVG files as CRLF and changes their byte sizes.
+/tauri/src/ui/assets/*.svg text eol=lf

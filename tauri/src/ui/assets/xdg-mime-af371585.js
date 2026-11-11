@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: xdg-mime-af371585.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Command line tool for querying information about file type handling and adding descriptions for new file types", i = "xdg-mime", t = [{ description: "Returns information related to file types", name: "query", args: [{ name: "filetype | default", template: ["filepaths"], isVariadic: true }] }, { description: "Ask the desktop environment to make application the default application for opening files of type mimetype", name: "default", args: [{ name: "application" }, { name: "mimetype(s)", isVariadic: true }] }, { description: "Adds the file type descriptions provided in mimetypes-file to the desktop environment", name: "install", args: [{ name: "mimetypes-file", template: ["filepaths"] }], options: [{ name: "--mode", args: [{ name: "mode", suggestions: ["user", "system"] }] }, { description: "Disables xdg-mime checks that the mimetypes-file to be installed has a proper vendor prefix", name: "--novendor" }] }, { description: "Removes the file type descriptions provided in mimetypes-file and previously added with xdg-mime install from the desktop environment", name: "uninstall", args: [{ name: "mimetypes-file", template: ["filepaths"] }], options: [{ name: "--mode", args: [{ name: "mode", suggestions: ["user", "system"] }] }] }], n = [{ description: "Show command synopsis", name: "--help" }, { description: "Show manual page", name: "--manual" }, { description: "Show the xdg-utils version information", name: "--version" }], s = { description: e, name: i, subcommands: t, options: n };
+export {
+  s as default,
+  e as description,
+  i as name,
+  n as options,
+  t as subcommands
+};

@@ -1,0 +1,21 @@
+services:
+  cloud-sync-server:
+    build: .
+    restart: unless-stopped
+    environment:
+      SYNC_BEARER_TOKEN: "${SYNC_BEARER_TOKEN:?set SYNC_BEARER_TOKEN in .env}"
+      SYNC_BIND: "0.0.0.0:8080"
+      SYNC_DATA_DIR: /data
+      SYNC_MAX_BODY_BYTES: "67108864"
+      SYNC_AUTH_MAX_FAILURES: "${SYNC_AUTH_MAX_FAILURES:-5}"
+      SYNC_AUTH_LOCKOUT_SECONDS: "${SYNC_AUTH_LOCKOUT_SECONDS:-30}"
+      SYNC_LOG_RETENTION_DAYS: "${SYNC_LOG_RETENTION_DAYS:-60}"
+      SYNC_PANEL_BIND: "0.0.0.0:8081"
+    ports:
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - sync-data:/data
+
+volumes:
+  sync-data:

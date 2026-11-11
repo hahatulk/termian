@@ -1,0 +1,13 @@
+/*
+ * Recovered Termius UI module: dig-36e48282.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const r = "Domain Information Groper", n = "dig", s = [{ description: "Query Domain A Record", name: "A", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query Domain MX Record", name: "MX", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query Domain CNAME Record", name: "CNAME", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query Domain TXT Record", name: "TXT", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query MX Record", name: "NS", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query SOA Record", name: "SOA", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }, { description: "Query TTL Record", name: "TTL", options: [{ insertValue: "+short {cursor}", description: "Only print meaningful results", name: ["+short"], args: [{}] }] }], e = { description: r, name: n, subcommands: s };
+export {
+  e as default,
+  r as description,
+  n as name,
+  s as subcommands
+};

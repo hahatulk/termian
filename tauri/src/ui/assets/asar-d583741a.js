@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: asar-d583741a.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "A simple extensive tar-like archive format with indexing", i = "asar", t = [{ description: "Create asar archive", name: ["pack", "p"], args: [{ name: "directory", description: "The directory you want to archive" }, { name: "output", description: "The name of the output file" }] }, { description: "List files of asar archive", name: ["list", "l"], args: [{ name: "archive", description: "The archive file" }] }, { description: "Extract one file from archive", name: ["extract-file", "ef"], args: [{ name: "archive", description: "The archive file" }, { name: "filename", description: "The name of the file you want to extract" }] }, { description: "Extract archive", name: ["extract", "e"], args: [{ name: "archive", description: "The archive file" }, { name: "directory", description: "The directory you want to extract to" }] }], a = [{ description: "Show help for asar", name: ["--help", "-h"] }, { description: "Output the version number", name: ["--V", "--version"] }], r = { description: e, name: i, subcommands: t, options: a };
+export {
+  r as default,
+  e as description,
+  i as name,
+  a as options,
+  t as subcommands
+};

@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: elm-c441844c.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "Fig spec for the Elm language cli", o = "elm", n = [{ description: "Initialize a new Elm project", name: "init", options: [{ description: "Show help for elm init", name: "--help" }] }, { description: "Start an Elm repl", name: "repl", options: [{ description: "Turn off colors in the repl", name: "--no-colors" }, { description: "Path to an alternate JS interpreter, such as Node or Deno", name: "--interpreter", args: [{ name: "interpreter" }] }, { description: "Show help for elm repl", name: "--help" }] }, { description: "Start an Elm development server", name: "reactor", options: [{ description: "The port to access the development server on", name: "--port", args: [{ name: "port", description: "The port number" }] }, { description: "Show help for elm reactor", name: "--help" }] }, { description: "Install an Elm dependency", name: "install", args: [{ name: "package", description: "The name of the package to install" }], options: [{ description: "Show help for elm install", name: "--help" }] }, { description: "Build your Elm code", name: "make", args: [{ name: "source files", description: "The source files to compile", template: ["filepaths"] }], options: [{ description: "Show help for elm make", name: "--help" }, { description: "Compile in debug mode", name: "--debug" }, { description: "Compile in production mode", name: "--optimize" }, { description: "Where to output the compiled code", name: "--output", args: [{ name: "output file", description: "Name and location of output" }] }, { description: "Generate a JSON file of documentation", name: "--docs", args: [{ name: "output json", description: "Name and location of output" }] }] }, { description: "Bump the version of your package", name: "bump", options: [{ description: "Show help for elm bump", name: "--help" }] }, { description: "See what changed between versions of a package", name: "diff", args: [{ name: "package", isOptional: true }, { name: "version", isVariadic: true, isOptional: true }], options: [{ description: "Show help for elm diff", name: "--help" }] }, { description: "Publish your package", name: "publish", options: [{ description: "Show help for elm publish", name: "--help" }] }], i = [{ description: "Show help for elm", name: "--help" }], t = { description: e, name: o, subcommands: n, options: i };
+export {
+  t as default,
+  e as description,
+  o as name,
+  i as options,
+  n as subcommands
+};

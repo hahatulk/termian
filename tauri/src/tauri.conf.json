@@ -1,0 +1,80 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "termian",
+  "version": "1.0.0",
+  "identifier": "app.termian.desktop",
+  "build": {
+    "beforeBuildCommand": "npm run build:web",
+    "beforeDevCommand": "npm run build:web",
+    "frontendDist": "../dist/web"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    },
+    "windows": [
+      {
+        "title": "termian",
+        "url": "index.html?type=ui&id=3",
+        "decorations": false,
+        "width": 1440,
+        "height": 860,
+        "minWidth": 920,
+        "minHeight": 600,
+        "resizable": true,
+        "backgroundColor": "#131626",
+        "label": "main"
+      },
+      {
+        "label": "background",
+        "title": "termian background",
+        "url": "background.html?type=background&id=1",
+        "visible": false,
+        "skipTaskbar": true,
+        "focus": false,
+        "backgroundThrottling": "disabled",
+        "width": 400,
+        "height": 300
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "dmg"
+    ],
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.ico",
+      "icons/icon.icns"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "Russian",
+          "English"
+        ],
+        "displayLanguageSelector": false
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ3NTM1ODAwQTQxNjc5NDYKUldSR2VSYWtBRmhUMXcyWEU4dTk0dnVEaTR4eC9PeENoM1dDS2ZsT3VId1ZveGhGTnY4MEgwL1IK",
+      "endpoints": [],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

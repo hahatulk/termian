@@ -1,0 +1,14 @@
+/*
+ * Recovered Termius UI module: create-t3-app-62168174.js
+ * Readable reconstruction from the distributed bundle (no source map).
+ * Original bindings, import specifiers and export names are preserved.
+ * Local variable names and pre-bundle source boundaries cannot be recovered.
+ */
+const e = "A CLI for creating web applications with the t3 stack", t = "create-t3-app", a = [{ name: "dir", description: "The name of the application, as well as the name of the directory to create", template: ["folders"], isOptional: true }], n = [{ description: "Explicitly tell the CLI to not initialize a new git repo in the project (default: false)", name: "--noGit" }, { description: "Explicitly tell the CLI to not run the package manager's install command (default: false)", name: "--noInstall" }, { description: "Bypass the CLI and use all default options to bootstrap a new t3-app (default: false)", name: ["-y", "--default"] }, { description: "Display the version number", name: ["-v", "--version"] }, { description: "Display help for command", name: ["--help", "-h"] }], i = { description: e, name: t, args: a, options: n };
+export {
+  a as args,
+  i as default,
+  e as description,
+  t as name,
+  n as options
+};

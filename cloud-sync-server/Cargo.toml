@@ -1,0 +1,27 @@
+[package]
+name = "cloud-sync-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5", features = ["limit"] }
+sha2 = "0.10"
+subtle = "2.5"
+hex = "0.4"
+http = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+scrypt = { version = "0.11", default-features = false }
+aes-gcm = "0.10"
+
+[dev-dependencies]
+tower = "0.5"
+http-body-util = "0.1"
+tempfile = "3"
+
+[[bin]]
+name = "cloud-sync-server"
+path = "src/main.rs"
