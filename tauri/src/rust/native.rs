@@ -138,6 +138,11 @@ pub(crate) struct SelfCloudConfig {
     token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     passphrase: Option<String>,
+    /// HTTP Basic credentials for a reverse proxy in front of the sync server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basic_user: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    basic_password: Option<String>,
     /// Hourly two-way merge sync (src/bridge/self-cloud.js); on unless disabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     auto_sync: Option<bool>,
@@ -151,6 +156,11 @@ pub struct SelfCloudChanges {
     token: Option<String>,
     #[serde(default)]
     passphrase: Option<String>,
+    /// `Some("")` turns Basic auth off; `None` keeps the saved credentials.
+    #[serde(default, rename = "basicUser")]
+    basic_user: Option<String>,
+    #[serde(default, rename = "basicPassword")]
+    basic_password: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -225,10 +235,33 @@ fn validate_passphrase(passphrase: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_basic(user: &str, password: &str) -> Result<(), String> {
+    let printable = |value: &str| value.chars().all(|ch| !ch.is_control());
+    if user.is_empty() || user.contains(':') || user.len() > MAX_SECRET_LENGTH || !printable(user) {
+        return Err("Недопустимый логин Basic auth".into());
+    }
+    if password.is_empty() || password.len() > MAX_SECRET_LENGTH || !printable(password) {
+        return Err("Недопустимый пароль Basic auth".into());
+    }
+    Ok(())
+}
+
 pub(crate) struct ValidConfig {
     pub(crate) url: url::Url,
     pub(crate) token: String,
     pub(crate) passphrase: String,
+    basic: Option<String>,
+}
+
+impl ValidConfig {
+    /// With Basic auth the proxy owns `Authorization`, so the sync token moves
+    /// to `X-Termian-Token` (accepted by cloud-sync-server).
+    pub(crate) fn authorize(&self, request: ureq::Request) -> ureq::Request {
+        match &self.basic {
+            Some(basic) => request.set("authorization", &format!("Basic {basic}")).set("x-termian-token", &self.token),
+            None => request.set("authorization", &format!("Bearer {}", self.token)),
+        }
+    }
 }
 
 pub(crate) fn validated(config: &SelfCloudConfig) -> Result<ValidConfig, String> {
@@ -237,7 +270,15 @@ pub(crate) fn validated(config: &SelfCloudConfig) -> Result<ValidConfig, String>
     validate_token(&token)?;
     let passphrase = config.passphrase.clone().unwrap_or_default();
     validate_passphrase(&passphrase)?;
-    Ok(ValidConfig { url, token, passphrase })
+    let basic = match config.basic_user.as_deref().filter(|user| !user.is_empty()) {
+        Some(user) => {
+            let password = config.basic_password.as_deref().unwrap_or("");
+            validate_basic(user, password)?;
+            Some(STANDARD.encode(format!("{user}:{password}")))
+        }
+        None => None,
+    };
+    Ok(ValidConfig { url, token, passphrase, basic })
 }
 
 fn metadata(config: &SelfCloudConfig) -> Value {
@@ -246,6 +287,8 @@ fn metadata(config: &SelfCloudConfig) -> Value {
         "url": url,
         "hasToken": config.token.as_deref().is_some_and(|token| !token.is_empty()),
         "hasPassphrase": config.passphrase.as_deref().is_some_and(|passphrase| !passphrase.is_empty()),
+        "basicUser": config.basic_user.as_deref().unwrap_or(""),
+        "hasBasicPassword": config.basic_password.as_deref().is_some_and(|password| !password.is_empty()),
         "configured": validated(config).is_ok(),
         "autoSync": config.auto_sync != Some(false),
     })
@@ -254,7 +297,7 @@ fn metadata(config: &SelfCloudConfig) -> Value {
 /// Errors may echo server text; never let a secret reach the renderer.
 pub(crate) fn redact(message: impl Into<String>, config: &SelfCloudConfig) -> String {
     let mut message: String = message.into();
-    for secret in [config.token.as_deref(), config.passphrase.as_deref()].into_iter().flatten() {
+    for secret in [config.token.as_deref(), config.passphrase.as_deref(), config.basic_password.as_deref()].into_iter().flatten() {
         if !secret.is_empty() {
             message = message.replace(secret, "[скрыто]");
         }
@@ -278,7 +321,17 @@ pub fn self_cloud_save_config(app: tauri::AppHandle, config: SelfCloudChanges) -
         url: Some(config.url),
         token: keep(config.token, previous.token.clone()),
         passphrase: keep(config.passphrase, previous.passphrase.clone()),
+        basic_user: match config.basic_user {
+            Some(user) => Some(user.trim().to_string()).filter(|user| !user.is_empty()),
+            None => previous.basic_user.clone(),
+        },
+        basic_password: None,
         auto_sync: previous.auto_sync,
+    };
+    let mut next = next;
+    next.basic_password = match next.basic_user {
+        Some(_) => keep(config.basic_password, previous.basic_password.clone()),
+        None => None,
     };
     validated(&next).map_err(|error| redact(error, &next))?;
     write_self_cloud(&app, &next)?;
@@ -390,7 +443,7 @@ pub(crate) fn snapshot_endpoint(url: &url::Url) -> url::Url {
 /// failed-authorization limit and carries `Retry-After` in seconds.
 pub(crate) fn status_error(context: &str, code: u16, response: &ureq::Response) -> String {
     match code {
-        401 | 403 => format!("{context}: сервер отклонил токен доступа (HTTP {code}). Проверьте токен в настройках своего облака"),
+        401 | 403 => format!("{context}: сервер отклонил авторизацию (HTTP {code}). Проверьте токен и логин/пароль Basic auth в настройках своего облака"),
         429 => {
             let wait = response
                 .header("retry-after")
@@ -476,9 +529,9 @@ pub(crate) const REVISION_CHANGED: &str = "Снимок в облаке изме
 /// a merged upload must not overwrite a snapshot another device sent after
 /// it was downloaded. Returns the body and the snapshot revision (ETag).
 fn http(method: &str, config: &ValidConfig, body: Option<Vec<u8>>, condition: Option<(&str, &str)>) -> Result<(Vec<u8>, Option<String>), String> {
-    let mut request = ureq::request(method, snapshot_endpoint(&config.url).as_str())
-        .timeout(REQUEST_TIMEOUT)
-        .set("authorization", &format!("Bearer {}", config.token));
+    let request = ureq::request(method, snapshot_endpoint(&config.url).as_str())
+        .timeout(REQUEST_TIMEOUT);
+    let mut request = config.authorize(request);
     if let Some((name, value)) = condition {
         request = request.set(name, value);
     }
@@ -515,10 +568,7 @@ pub async fn self_cloud_probe(app: tauri::AppHandle) -> Result<Value, String> {
     let stored = read_self_cloud(&app);
     tauri::async_runtime::spawn_blocking(move || {
         let config = validated(&stored)?;
-        let response = ureq::request("HEAD", snapshot_endpoint(&config.url).as_str())
-            .timeout(REQUEST_TIMEOUT)
-            .set("authorization", &format!("Bearer {}", config.token))
-            .call();
+        let response = config.authorize(ureq::request("HEAD", snapshot_endpoint(&config.url).as_str()).timeout(REQUEST_TIMEOUT)).call();
         match response {
             Ok(reply) => Ok(json!({"exists": true, "revision": reply.header("etag")})),
             Err(ureq::Error::Status(404, _)) => Ok(json!({"exists": false, "revision": null})),
@@ -654,6 +704,31 @@ fn chrono_like_stamp() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn basic_auth_moves_token_to_custom_header() {
+        let mut config = SelfCloudConfig {
+            url: Some("https://cloud.example".into()),
+            token: Some("sync-token".into()),
+            passphrase: Some("correct horse battery".into()),
+            ..Default::default()
+        };
+        let plain = validated(&config).unwrap().authorize(ureq::get("https://cloud.example"));
+        assert_eq!(plain.header("authorization"), Some("Bearer sync-token"));
+        assert_eq!(plain.header("x-termian-token"), None);
+
+        config.basic_user = Some("alice".into());
+        assert!(validated(&config).is_err(), "Basic auth needs a password");
+        config.basic_password = Some("s3cret".into());
+        let proxied = validated(&config).unwrap().authorize(ureq::get("https://cloud.example"));
+        assert_eq!(proxied.header("authorization"), Some("Basic YWxpY2U6czNjcmV0"));
+        assert_eq!(proxied.header("x-termian-token"), Some("sync-token"));
+        assert!(!redact("bad s3cret", &config).contains("s3cret"));
+        assert_eq!(metadata(&config)["hasBasicPassword"], true);
+
+        config.basic_user = Some("a:b".into());
+        assert!(validated(&config).is_err());
+    }
 
     #[test]
     fn sealed_snapshots_round_trip_and_reject_wrong_passphrase() {

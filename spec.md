@@ -184,11 +184,12 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 #### 4.5.1. Конфигурация
 
-- `self-cloud.json` в данных приложения хранит `url`, `token`, `passphrase` и `auto_sync`. Секреты в UI не возвращаются, интерфейс только записывает их.
+- `self-cloud.json` в данных приложения хранит `url`, `token`, `passphrase`, `basic_user`, `basic_password` и `auto_sync`. Секреты в UI не возвращаются, интерфейс только записывает их.
 - Требования к значениям:
   - URL — HTTPS; HTTP допустим только для локальной сети (loopback, частные IPv4, link-local, `100.64.0.0/10`, IPv6 ULA/link-local, имена без точки, `.local`, `.lan`, `.home.arpa`, `.internal`, `.localhost`). URL без учётных данных, query и fragment;
   - токен — печатный ASCII до 4096 символов;
-  - пароль шифрования — не менее 12 символов.
+  - пароль шифрования — не менее 12 символов;
+  - Basic auth (необязательно, для обратного прокси) — логин без `:` и пароль, без управляющих символов. При включённом Basic auth клиент шлёт `Authorization: Basic …`, а токен — в `X-Termian-Token`.
 - Ошибки, проходящие через Rust, очищаются от секретов (`redact`) и обрезаются до 240 символов.
 
 #### 4.5.2. Снимок
@@ -311,7 +312,7 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 ### 6.1. API
 
-Все маршруты, кроме `/health`, требуют `Authorization: Bearer <token>`.
+Все маршруты, кроме `/health`, требуют `Authorization: Bearer <token>` либо, за прокси с Basic auth, заголовок `X-Termian-Token: <token>`.
 
 | Метод и путь | Описание |
 | --- | --- |

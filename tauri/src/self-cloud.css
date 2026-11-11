@@ -61,3 +61,8 @@
 .self-cloud-dialog button:focus-visible{outline:2px solid var(--accent,#00cc74);outline-offset:2px}
 .self-cloud-dialog button:disabled{opacity:.45;cursor:default;pointer-events:none}
 @media(max-width:540px){.self-cloud-overlay{padding:12px}.self-cloud-dialog{max-height:calc(100vh - 24px)}.self-cloud-dialog-header{padding:18px 18px 16px}.self-cloud-fields{padding:0 18px 18px}.self-cloud-actions{padding:14px 18px;align-items:stretch;flex-direction:column-reverse}.self-cloud-sync-actions{flex-wrap:wrap}.self-cloud-sync-actions .self-cloud-button{flex:1}.self-cloud-cancel{align-self:flex-end}}
+.self-cloud-basic{display:flex;flex-direction:column;gap:12px;margin:0;padding:12px;border:1px solid var(--border-color,#3a4050);border-radius:6px}
+.self-cloud-basic legend{padding:0 4px;font-size:12px;font-weight:600;color:var(--text-common,#d7dbe1)}
+.self-cloud-fields label.self-cloud-check{flex-direction:row;align-items:center;gap:8px}
+.self-cloud-basic input:disabled{opacity:.5}
+.self-cloud-fields .self-cloud-check input{width:auto;height:auto;padding:0}

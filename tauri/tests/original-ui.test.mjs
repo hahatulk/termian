@@ -352,7 +352,7 @@ test('Credential errors from native self-cloud pause background polling', async 
   const bridge = source('src/bridge/self-cloud.js').toString('utf8');
   const pattern = new RegExp(bridge.match(/const CREDENTIAL_ERROR = \/(.+)\/i;/)[1], 'i');
   const native = source('src/rust/native.rs').toString('utf8');
-  for (const phrase of ['сервер отклонил токен доступа', 'слишком много неверных попыток авторизации',
+  for (const phrase of ['сервер отклонил авторизацию', 'слишком много неверных попыток авторизации',
     'Не удалось расшифровать снимок: неверный пароль шифрования', 'Слишком много неверных паролей шифрования']) {
     assert.ok(native.includes(phrase), 'native message changed: ' + phrase);
     assert.match(phrase, pattern);

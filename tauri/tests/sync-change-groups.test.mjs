@@ -72,7 +72,7 @@ test('Sync dialog omits decorative copy but preserves meaningful controls and se
   assert.ok(ui.includes('data-sync-preview hidden'), 'Change preview must remain');
   assert.ok(ui.includes('data-sync-warning hidden'), 'Overwrite warning must remain');
   assert.ok(ui.includes('data-confirm-sync hidden'), 'Manual sync confirmation must remain');
-  assert.ok(ui.includes('Токен и пароль сохраняются в конфиге этого профиля'),
+  assert.ok(ui.includes('Токен и пароли сохраняются в конфиге этого профиля'),
     'Useful configuration help must not be removed');
 });
 

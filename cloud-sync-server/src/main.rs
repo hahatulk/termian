@@ -269,14 +269,16 @@ fn too_many_attempts(left: Duration) -> Response {
     (StatusCode::TOO_MANY_REQUESTS, headers, "too many failed authorization attempts\n").into_response()
 }
 
+/// Behind a reverse proxy with HTTP Basic auth the client keeps
+/// `Authorization` for the proxy and sends the token in `X-Termian-Token`.
+const TOKEN_HEADER: &str = "x-termian-token";
+
 fn authorized(headers: &HeaderMap, state: &AppState) -> bool {
-    let Some(value) = headers
+    let bearer = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-    else {
-        return false;
-    };
-    let Some(given) = value.strip_prefix("Bearer ") else {
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let Some(given) = bearer.or_else(|| headers.get(TOKEN_HEADER).and_then(|value| value.to_str().ok())) else {
         return false;
     };
     bool::from(given.as_bytes().ct_eq(&state.cfg.token))
@@ -795,6 +797,24 @@ mod tests {
             response.headers().get(CONDITIONAL_CREATE_HEADER).unwrap(),
             "v1"
         );
+    }
+
+    #[tokio::test]
+    async fn token_header_behind_basic_auth_proxy() {
+        let dir = TempDir::new().unwrap();
+        let app = app(dir.path(), 10);
+        let with = |token: &str| {
+            axum::http::Request::builder()
+                .uri("/v1/snapshot")
+                .header(header::AUTHORIZATION, "Basic YWxpY2U6czNjcmV0")
+                .header(TOKEN_HEADER, token)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(with(TOKEN)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let response = app.oneshot(with("wrong")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

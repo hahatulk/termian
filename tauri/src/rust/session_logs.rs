@@ -242,9 +242,7 @@ fn upload(config: &native::ValidConfig, name: &str, meta: &Value, file: &[u8], m
     });
     let envelope = native::seal(&payload, &config.passphrase)?;
     let body = serde_json::to_vec(&envelope).map_err(|error| error.to_string())?;
-    let response = ureq::request("PUT", log_endpoint(&config.url, name).as_str())
-        .timeout(native::REQUEST_TIMEOUT)
-        .set("authorization", &format!("Bearer {}", config.token))
+    let response = config.authorize(ureq::request("PUT", log_endpoint(&config.url, name).as_str()).timeout(native::REQUEST_TIMEOUT))
         .set("content-type", "application/octet-stream")
         .send_bytes(&body);
     match response {
@@ -314,9 +312,7 @@ pub async fn session_log_cloud_restore(app: tauri::AppHandle, name: String) -> R
     let Ok(config) = native::validated(&stored) else { return Ok(false) };
     let worker = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let response = ureq::request("GET", log_endpoint(&config.url, &name).as_str())
-            .timeout(native::REQUEST_TIMEOUT)
-            .set("authorization", &format!("Bearer {}", config.token))
+        let response = config.authorize(ureq::request("GET", log_endpoint(&config.url, &name).as_str()).timeout(native::REQUEST_TIMEOUT))
             .call();
         let response = match response {
             Ok(response) => response,
@@ -400,9 +396,7 @@ pub async fn session_logs_clear(app: tauri::AppHandle, since: u64, keep: Vec<Str
                 let path = endpoint.path().trim_end_matches("/x").to_string();
                 endpoint.set_path(&path);
                 endpoint.set_query(Some(&format!("since={since}")));
-                match ureq::request("DELETE", endpoint.as_str())
-                    .timeout(native::REQUEST_TIMEOUT)
-                    .set("authorization", &format!("Bearer {}", config.token))
+                match config.authorize(ureq::request("DELETE", endpoint.as_str()).timeout(native::REQUEST_TIMEOUT))
                     .call()
                 {
                     Ok(response) => json!({"removed": response.into_string().ok()

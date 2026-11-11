@@ -21,7 +21,7 @@ const REVISION_CHANGED = 'Снимок в облаке изменился во �
 // Wrong token / passphrase errors from src/rust/native.rs. Background polling
 // must not keep retrying them: every attempt extends the server lockout or
 // spends the local wrong-passphrase allowance.
-const CREDENTIAL_ERROR = /токен доступа|неверных попыток авторизации|неверный пароль шифрования|неверных паролей/i;
+const CREDENTIAL_ERROR = /токен доступа|отклонил авторизацию|неверных попыток авторизации|неверный пароль шифрования|неверных паролей/i;
 export const isCredentialError = message => CREDENTIAL_ERROR.test(String(message || ''));
 
 export function installSelfCloud({ invoke, bus, isBackground, isPrimary = false }) {

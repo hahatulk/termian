@@ -51,6 +51,16 @@ The sync API cannot detect a wrong **encryption password**: it only stores ciphe
 
 Snapshot endpoints require `Authorization: Bearer <token>`.
 
+When a reverse proxy in front of the server requires HTTP Basic auth, the proxy owns the `Authorization` header. Enable Basic auth in the client's sync settings: it then sends `Authorization: Basic …` for the proxy and the token in `X-Termian-Token: <token>`. The proxy must forward that header. Example for nginx:
+
+```nginx
+location / {
+    auth_basic           "Termian sync";
+    auth_basic_user_file /etc/nginx/termian.htpasswd;
+    proxy_pass           http://127.0.0.1:8080;
+}
+```
+
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Public health check |

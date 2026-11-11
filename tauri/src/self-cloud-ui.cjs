@@ -67,7 +67,7 @@ function createDialog(title, content, actions) {
 
 async function editConfig(ipcRenderer) {
   const view = createDialog('Своё облако',
-    '<label>Адрес сервера<input name="url" type="url" required spellcheck="false" placeholder="https://cloud.example/v1/snapshot" autocomplete="off"></label><label>Токен доступа<input name="token" type="password" autocomplete="new-password" placeholder="Введите токен сервера"><span data-token-state class="self-cloud-secret-state"></span></label><label>Пароль шифрования<input name="passphrase" type="password" minlength="12" autocomplete="new-password" placeholder="Не менее 12 символов"><span data-passphrase-state class="self-cloud-secret-state"></span></label><p class="self-cloud-help">Токен и пароль сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.</p>',
+    '<label>Адрес сервера<input name="url" type="url" required spellcheck="false" placeholder="https://cloud.example/v1/snapshot" autocomplete="off"></label><label>Токен доступа<input name="token" type="password" autocomplete="new-password" placeholder="Введите токен сервера"><span data-token-state class="self-cloud-secret-state"></span></label><label>Пароль шифрования<input name="passphrase" type="password" minlength="12" autocomplete="new-password" placeholder="Не менее 12 символов"><span data-passphrase-state class="self-cloud-secret-state"></span></label><fieldset class="self-cloud-basic"><legend>HTTP Basic auth</legend><label class="self-cloud-check"><input name="basicEnabled" type="checkbox"> Сервер за прокси с Basic auth</label><label>Логин<input name="basicUser" type="text" spellcheck="false" autocomplete="off"></label><label>Пароль<input name="basicPassword" type="password" autocomplete="new-password"><span data-basic-state class="self-cloud-secret-state"></span></label></fieldset><p class="self-cloud-help">Токен и пароли сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.</p>',
     '<button type="button" class="self-cloud-button self-cloud-primary" data-save-config>Сохранить настройки</button>');
   const { modal, form, out, setBusy } = view;
   const applyMetadata = metadata => {
@@ -75,7 +75,19 @@ async function editConfig(ipcRenderer) {
     form.elements.passphrase.required = !metadata.hasPassphrase;
     modal.querySelector('[data-token-state]').textContent = metadata.hasToken ? 'Токен сохранён. Поле — только для замены.' : 'Токен ещё не сохранён.';
     modal.querySelector('[data-passphrase-state]').textContent = metadata.hasPassphrase ? 'Пароль сохранён. Поле — только для замены.' : 'Пароль ещё не сохранён.';
+    form.elements.basicEnabled.checked = !!metadata.basicUser;
+    form.elements.basicUser.value = metadata.basicUser || '';
+    form.elements.basicPassword.dataset.saved = metadata.hasBasicPassword ? '1' : '';
+    modal.querySelector('[data-basic-state]').textContent = metadata.hasBasicPassword ? 'Пароль сохранён. Поле — только для замены.' : '';
+    syncBasic();
   };
+  const syncBasic = () => {
+    const on = form.elements.basicEnabled.checked;
+    for (const name of ['basicUser', 'basicPassword']) form.elements[name].disabled = !on;
+    form.elements.basicUser.required = on;
+    form.elements.basicPassword.required = on && !form.elements.basicPassword.dataset.saved;
+  };
+  form.elements.basicEnabled.onchange = syncBasic;
   setBusy(true);
   try {
     const metadata = await ipcRenderer.invoke('self-cloud:get-config');
@@ -89,11 +101,13 @@ async function editConfig(ipcRenderer) {
     // Write-only edits: never ask the main process to return a saved secret.
     if (form.elements.token.value) changes.token = form.elements.token.value;
     if (form.elements.passphrase.value) changes.passphrase = form.elements.passphrase.value;
+    changes.basicUser = form.elements.basicEnabled.checked ? form.elements.basicUser.value.trim() : '';
+    if (changes.basicUser && form.elements.basicPassword.value) changes.basicPassword = form.elements.basicPassword.value;
     setBusy(true); out.textContent = 'Сохранение…'; out.dataset.state = 'working';
     try {
       const result = await ipcRenderer.invoke('self-cloud:save-config', changes);
       if (!result?.ok) throw new Error(result?.error || 'Не удалось сохранить настройки');
-      form.elements.token.value = ''; form.elements.passphrase.value = '';
+      form.elements.token.value = ''; form.elements.passphrase.value = ''; form.elements.basicPassword.value = '';
       applyMetadata(result);
       out.dataset.state = 'success'; out.textContent = 'Настройки сохранены';
     } catch (error) { out.dataset.state = 'error'; out.textContent = error?.message || 'Не удалось сохранить настройки'; }
