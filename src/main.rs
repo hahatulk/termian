@@ -1,9 +1,15 @@
+mod ui;
+
 use gpui::{
-    div, prelude::*, px, rgb, size, App, Application, Bounds, Context, SharedString, Stateful,
-    Div, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, SharedString, Stateful,
+    TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
+use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
 use termian_native::theme;
+use termian_native::vault::{GroupId, Vault};
+use ui::assets::{icon, Assets};
+use ui::hosts::Section;
 
 /// Room left of the tab strip for the macOS traffic-light buttons.
 #[cfg(target_os = "macos")]
@@ -11,54 +17,89 @@ const WINDOW_CONTROLS_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const WINDOW_CONTROLS_INSET: f32 = 12.;
 
-struct Shell {
+pub struct Shell {
     tabs: Tabs,
+    vault: Vault,
+    vault_error: Option<String>,
+    section: Section,
+    group: Option<GroupId>,
+}
+
+/// Reads hosts from the legacy profile without modifying it.
+/// `TERMIAN_LEGACY_INDEXEDDB` overrides the profile location; `TERMIAN_DEMO`
+/// shows sample data instead.
+fn load_legacy_vault() -> Result<Vault, String> {
+    if std::env::var_os("TERMIAN_DEMO").is_some() {
+        return Ok(termian_native::vault::demo());
+    }
+    let dir = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB")
+        .map(Into::into)
+        .or_else(profile::default_indexeddb_dir)
+        .ok_or("legacy profile not found")?;
+    let cipher = FieldCipher::from_local_key(&profile::read_local_key()?)?;
+    profile::load_vault(&dir, &cipher)
 }
 
 impl Shell {
+    fn new() -> Self {
+        let (vault, vault_error) = match load_legacy_vault() {
+            Ok(vault) => (vault, None),
+            Err(error) => (Vault::default(), Some(error)),
+        };
+        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts, group: None }
+    }
+
     fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = tab.id;
-        let (text, background) = if id == self.tabs.active().id {
-            (theme::TEXT, theme::SURFACE_ACTIVE)
-        } else {
-            (theme::TEXT_MUTED, theme::SURFACE)
+        let active = id == self.tabs.active().id;
+        let icon_name = match tab.kind {
+            TabKind::Vaults => "keychain",
+            TabKind::Sftp => "sftp",
+            TabKind::Session { .. } => "terminal",
+            TabKind::Launcher => "plus",
         };
-        let mut element = div()
+        let leading = if tab.closable() {
+            div()
+                .id(SharedString::from(format!("close-{id:?}")))
+                .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(theme::TEXT)))
+                .on_click(cx.listener(move |shell, _, _, cx| {
+                    cx.stop_propagation();
+                    shell.tabs.close(id);
+                    cx.notify();
+                }))
+        } else {
+            div().id(SharedString::from(format!("icon-{id:?}"))).child(svg().path(icon(icon_name)).size(px(14.)).text_color(rgb(theme::TEXT)))
+        };
+        div()
             .id(SharedString::from(format!("tab-{id:?}")))
+            .h(px(30.))
+            .when(tab.closable(), |s| s.w(px(230.)))
+            .px_3()
             .flex()
             .items_center()
             .gap_2()
-            .px_3()
-            .py_1()
             .rounded_md()
             .text_sm()
-            .text_color(rgb(text))
-            .bg(rgb(background))
+            .text_color(rgb(theme::TEXT))
+            .bg(rgb(if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.tabs.activate(id);
                 cx.notify();
-            }));
-        if tab.closable() {
-            element = element.child(
-                div()
-                    .id(SharedString::from(format!("close-{id:?}")))
-                    .child("×")
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        cx.stop_propagation();
-                        shell.tabs.close(id);
-                        cx.notify();
-                    })),
-            );
-        }
-        element.child(SharedString::from(tab.title().to_owned()))
+            }))
+            .child(leading)
+            .child(div().truncate().child(SharedString::from(tab.title().to_owned())))
     }
 }
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, cx)).collect();
-        // Sync / push / pull indicators; glyphs stand in until the icon set is ported.
-        let toolbar = ["⟳", "⇪", "⇩"].map(|glyph| div().px_2().text_color(rgb(theme::TEXT_MUTED)).child(glyph));
+        let toolbar = ["sync", "upload", "download"]
+            .map(|name| div().px_2().child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT))));
+        let content = match self.tabs.active().kind {
+            TabKind::Vaults => self.render_vaults(cx),
+            _ => div().into_any_element(),
+        };
 
         div()
             .size_full()
@@ -67,20 +108,20 @@ impl Render for Shell {
             .bg(rgb(theme::BACKGROUND))
             .child(
                 div()
-                    .h(px(48.))
+                    .h(px(44.))
+                    .flex_none()
                     .pl(px(WINDOW_CONTROLS_INSET))
                     .pr_3()
                     .flex()
                     .items_center()
-                    .gap_2()
+                    .gap_1()
                     .bg(rgb(theme::TITLE_BAR))
                     .children(tabs)
                     .child(
                         div()
                             .id("new-tab")
                             .px_2()
-                            .text_color(rgb(theme::TEXT_MUTED))
-                            .child("+")
+                            .child(svg().path(icon("plus")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                             .on_click(cx.listener(|shell, _, _, cx| {
                                 shell.tabs.open(TabKind::Launcher);
                                 cx.notify();
@@ -89,12 +130,12 @@ impl Render for Shell {
                     .child(div().flex_1())
                     .children(toolbar),
             )
-            .child(div().flex_1())
+            .child(div().flex_1().min_h_0().child(content))
     }
 }
 
 fn main() {
-    Application::new().run(|cx: &mut App| {
+    Application::new().with_assets(Assets).run(|cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             WindowOptions {
@@ -106,7 +147,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| Shell { tabs: Tabs::default() }),
+            |_, cx| cx.new(|_| Shell::new()),
         )
         .expect("failed to open the main window");
         cx.activate(true);

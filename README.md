@@ -34,12 +34,15 @@ npm run legacy:build:windows  # Windows x64
 npm run legacy:build:mac      # macOS Apple Silicon
 ```
 
-Нативный клиент (в разработке, пока только окно с вкладками):
+Нативный клиент (в разработке: вкладки и экран Hosts только для просмотра; поиск, редактирование и подключение ещё не перенесены):
 
 ```bash
-npm test      # cargo test
-npm run dev   # cargo run
+npm test                 # cargo test
+npm run dev              # cargo run: хосты из профиля legacy-клиента (macOS, нужен доступ к Связке ключей)
+TERMIAN_DEMO=1 cargo run # тестовые данные без профиля и Связки ключей
 ```
+
+Профиль legacy-клиента читается только на чтение: базы IndexedDB копируются во временный каталог. Пока поддерживается только профиль WebKit на macOS; профиль WebView2 на Windows (LevelDB) не читается.
 
 Потребление памяти можно сравнить скриптом `scripts/measure-rss.sh <имя процесса>`. На macOS WebView работает в отдельных процессах `com.apple.WebKit.*`, их нужно учитывать отдельно.
 
