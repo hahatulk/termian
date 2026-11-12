@@ -1,7 +1,7 @@
 mod ui;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, Entity, SharedString, Stateful,
+    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, Entity, FocusHandle, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use std::collections::HashMap;
@@ -29,6 +29,8 @@ pub struct Shell {
     section: Section,
     group: Option<GroupId>,
     terminals: HashMap<TabId, Entity<TerminalView>>,
+    query: String,
+    search_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -47,12 +49,17 @@ fn load_legacy_vault() -> Result<Vault, String> {
 }
 
 impl Shell {
-    fn new() -> Self {
+    fn new(cx: &mut Context<Self>) -> Self {
         let (vault, vault_error) = match load_legacy_vault() {
             Ok(vault) => (vault, None),
             Err(error) => (Vault::default(), Some(error)),
         };
-        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts, group: None, terminals: HashMap::new() }
+        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts,
+            group: None,
+            terminals: HashMap::new(),
+            query: String::new(),
+            search_focus: cx.focus_handle(),
+        }
     }
 
     fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -102,7 +109,7 @@ impl Shell {
 }
 
 impl Shell {
-    fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
         let id = self.tabs.open(TabKind::Session { title });
         let view = cx.new(|cx| TerminalView::new(session, window, cx));
         self.terminals.insert(id, view);
@@ -125,12 +132,12 @@ impl Shell {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, cx)).collect();
         let toolbar = ["sync", "upload", "download"]
             .map(|name| div().px_2().child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT))));
         let content = match self.tabs.active().kind {
-            TabKind::Vaults => self.render_vaults(cx),
+            TabKind::Vaults => self.render_vaults(window, cx),
             TabKind::Session { .. } => match self.terminals.get(&self.tabs.active().id) {
                 Some(view) => view.clone().into_any_element(),
                 None => div().into_any_element(),
@@ -184,7 +191,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| Shell::new()),
+            |_, cx| cx.new(Shell::new),
         )
         .expect("failed to open the main window");
         cx.activate(true);

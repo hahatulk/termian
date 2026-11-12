@@ -151,6 +151,22 @@ impl SshTarget {
     }
 }
 
+/// Parses what a user types into the quick-connect field:
+/// `host`, `user@host`, `host:port`, optionally prefixed with `ssh `.
+pub fn parse_destination(input: &str) -> Option<SshTarget> {
+    let input = input.trim();
+    let input = input.strip_prefix("ssh ").map(str::trim).unwrap_or(input);
+    if input.is_empty() || input.contains(char::is_whitespace) {
+        return None;
+    }
+    let (user, host) = match input.rsplit_once('@') {
+        Some((user, host)) if !user.is_empty() && !host.is_empty() => (Some(user.to_owned()), host),
+        Some(_) => return None,
+        None => (None, input),
+    };
+    Some(SshTarget::new(host, user))
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 const PASSWORD_ATTEMPTS: usize = 3;
 
@@ -607,6 +623,16 @@ mod tests {
         let mut session = ssh(target(port, dir.path().join("kh")), 80, 24);
         let output = collect_until(&mut session, "<closed");
         assert!(output.contains(&format!("connect to host 127.0.0.1:{port}")), "{output:?}");
+    }
+
+    #[test]
+    fn parses_quick_connect_input() {
+        let t = parse_destination("ssh root@10.0.0.1:2001").unwrap();
+        assert_eq!((t.username.as_deref(), t.host.as_str(), t.port), (Some("root"), "10.0.0.1", 2001));
+        assert_eq!(parse_destination("example.com").unwrap().username, None);
+        assert!(parse_destination("").is_none());
+        assert!(parse_destination("two words").is_none());
+        assert!(parse_destination("@host").is_none());
     }
 
     #[test]

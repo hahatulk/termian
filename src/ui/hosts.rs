@@ -1,6 +1,7 @@
 //! Vaults tab: navigation sidebar and the Hosts screen.
 
-use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
+use termian_native::session;
 use termian_native::theme;
 use termian_native::vault::{Group, GroupId, Host};
 
@@ -75,6 +76,10 @@ fn card(id: SharedString, tile: Div, title: String, subtitle: String) -> Statefu
         )
 }
 
+fn caret() -> Div {
+    div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))
+}
+
 fn section_title(title: &str) -> Div {
     div().pt_5().pb_3().text_color(rgb(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.to_owned())
 }
@@ -97,9 +102,9 @@ fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Div> {
 }
 
 impl Shell {
-    pub fn render_vaults(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let content = match self.section {
-            Section::Hosts => self.render_hosts(cx).into_any_element(),
+            Section::Hosts => self.render_hosts(window, cx).into_any_element(),
             _ => div()
                 .flex_1()
                 .flex()
@@ -137,8 +142,59 @@ impl Shell {
         )
     }
 
-    fn render_hosts(&self, cx: &mut Context<Self>) -> Div {
+    /// Typing in the search field. Enter opens the first match, or connects
+    /// to the typed `user@host` when nothing matches; Escape clears.
+    fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.platform || keystroke.modifiers.control {
+            if keystroke.modifiers.platform && keystroke.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.query.push_str(text.lines().next().unwrap_or(""));
+                }
+            }
+        } else {
+            match keystroke.key.as_str() {
+                "backspace" => {
+                    self.query.pop();
+                }
+                "escape" => self.query.clear(),
+                "enter" => self.connect_query(window, cx),
+                _ => match keystroke.key_char.as_deref() {
+                    Some(text) if !text.chars().any(char::is_control) => self.query.push_str(text),
+                    _ => return,
+                },
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn connect_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(host) = self.vault.search(&self.query).first().map(|h| h.id) {
+            self.query.clear();
+            self.connect_host(host, window, cx);
+        } else if let Some(target) = session::parse_destination(&self.query) {
+            let title = self.query.trim().trim_start_matches("ssh ").to_owned();
+            self.query.clear();
+            self.open_terminal(title, session::ssh(target, 80, 24), window, cx);
+        }
+    }
+
+    fn render_hosts(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let focused = self.search_focus.is_focused(window);
+        let (text, color) = if self.query.is_empty() {
+            ("Find a host or ssh user@hostname...".to_owned(), theme::TEXT_MUTED)
+        } else {
+            (self.query.clone(), theme::TEXT)
+        };
         let search = div()
+            .id("search")
+            .track_focus(&self.search_focus)
+            .on_key_down(cx.listener(Self::on_search_key))
+            .on_click(cx.listener(|shell, _, window, cx| {
+                window.focus(&shell.search_focus);
+                cx.notify();
+            }))
             .m_2()
             .h(px(36.))
             .px_3()
@@ -146,9 +202,30 @@ impl Shell {
             .items_center()
             .rounded_md()
             .bg(rgb(theme::INPUT))
-            .text_color(rgb(theme::TEXT_MUTED))
-            .child(div().flex_1().child("Find a host or ssh user@hostname..."))
-            .child(div().px_2().py_1().rounded_sm().bg(rgb(theme::SURFACE)).text_xs().child("CONNECT"));
+            .border_1()
+            .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .text_color(rgb(color))
+                    .when(focused && self.query.is_empty(), |d| d.child(caret()))
+                    .child(text)
+                    .when(focused && !self.query.is_empty(), |d| d.child(caret())),
+            )
+            .child(
+                div()
+                    .id("connect")
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(theme::SURFACE))
+                    .text_xs()
+                    .text_color(rgb(if self.query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
+                    .child("CONNECT")
+                    .on_click(cx.listener(|shell, _, window, cx| shell.connect_query(window, cx))),
+            );
 
         let toolbar = div()
             .px_3()
@@ -173,6 +250,14 @@ impl Shell {
             body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(format!("Could not read the legacy profile: {error}")));
         }
 
+        if !self.query.trim().is_empty() {
+            let results = self.vault.search(&self.query);
+            body = body.child(section_title(if results.is_empty() { "No hosts found" } else { "Hosts" }));
+            return div().flex_1().h_full().flex().flex_col().child(search).child(toolbar).child(
+                body.child(div().grid().grid_cols(4).gap_3().children(results.into_iter().map(|h| self.render_host(h, cx)))),
+            );
+        }
+
         let path = self.vault.breadcrumbs(self.group);
         if !path.is_empty() {
             body = body.child(self.render_breadcrumbs(&path, cx));
@@ -188,20 +273,22 @@ impl Shell {
         let hosts = self.vault.hosts_under(self.group);
         if !hosts.is_empty() {
             body = body.child(section_title("Hosts")).child(div().grid().grid_cols(4).gap_3().children(
-                hosts.into_iter().map(|h| {
-                    let id = h.id;
-                    card(format!("host-{id}").into(), host_tile(h), h.label.clone(), h.subtitle()).on_click(cx.listener(
-                        move |shell, event: &gpui::ClickEvent, window, cx| {
-                            if event.click_count() >= 2 {
-                                shell.connect_host(id, window, cx);
-                            }
-                        },
-                    ))
-                }),
+                hosts.into_iter().map(|h| self.render_host(h, cx)),
             ));
         }
 
         div().flex_1().h_full().flex().flex_col().child(search).child(toolbar).child(body)
+    }
+
+    fn render_host(&self, host: &Host, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = host.id;
+        card(format!("host-{id}").into(), host_tile(host), host.label.clone(), host.subtitle()).on_click(cx.listener(
+            move |shell, event: &gpui::ClickEvent, window, cx| {
+                if event.click_count() >= 2 {
+                    shell.connect_host(id, window, cx);
+                }
+            },
+        ))
     }
 
     fn render_group(&self, group: &Group, cx: &mut Context<Self>) -> Stateful<Div> {
