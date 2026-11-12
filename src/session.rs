@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
+use futures::future::BoxFuture;
 use futures::StreamExt;
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{
@@ -191,6 +192,14 @@ pub fn ssh(target: SshTarget, columns: u16, rows: u16) -> Session {
     session
 }
 
+/// Where login questions go: the terminal for shells, a form for SFTP.
+pub(crate) trait Prompter: Send {
+    fn print(&mut self, text: &str);
+    fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>>;
+}
+
+pub(crate) type SharedPrompter = Arc<Mutex<dyn Prompter>>;
+
 /// The terminal as seen by the SSH task: prints text and reads answers.
 struct Terminal {
     input: UnboundedReceiver<Input>,
@@ -237,17 +246,27 @@ impl Terminal {
         }
     }
 
-    async fn ask(&mut self, prompt: &str, echo: bool) -> Option<String> {
+    async fn ask_line(&mut self, prompt: &str, echo: bool) -> Option<String> {
         self.print(prompt);
         self.read_line(echo).await
     }
 }
 
-struct Verifier {
+impl Prompter for Terminal {
+    fn print(&mut self, text: &str) {
+        Terminal::print(self, text);
+    }
+
+    fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>> {
+        Box::pin(self.ask_line(prompt, echo))
+    }
+}
+
+pub(crate) struct Verifier {
     host: String,
     port: u16,
     known_hosts: PathBuf,
-    io: Arc<Mutex<Terminal>>,
+    io: SharedPrompter,
 }
 
 impl client::Handler for Verifier {
@@ -296,6 +315,16 @@ impl client::Handler for Verifier {
 }
 
 async fn run_ssh(target: SshTarget, io: Arc<Mutex<Terminal>>) -> Result<(), String> {
+    let handle = connect(&target, io.clone()).await?;
+    let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
+    let (cols, rows) = io.lock().await.size;
+    channel.request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
+    channel.request_shell(true).await.map_err(|e| e.to_string())?;
+    pump(channel, io).await
+}
+
+/// Opens an authenticated SSH connection, asking `io` whatever login needs.
+pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Handle<Verifier>, String> {
     let address = format!("{}:{}", target.host, target.port);
     io.lock().await.print(&format!("Connecting to {address}...\n"));
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((target.host.as_str(), target.port)))
@@ -316,20 +345,15 @@ async fn run_ssh(target: SshTarget, io: Arc<Mutex<Terminal>>) -> Result<(), Stri
         Some(user) => user,
         None => io.lock().await.ask("login as: ", true).await.ok_or("Authentication cancelled.")?,
     };
-    authenticate(&mut handle, &username, &target, &io).await?;
-
-    let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
-    let (cols, rows) = io.lock().await.size;
-    channel.request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
-    channel.request_shell(true).await.map_err(|e| e.to_string())?;
-    pump(channel, io).await
+    authenticate(&mut handle, &username, target, &io).await?;
+    Ok(handle)
 }
 
 async fn authenticate(
     handle: &mut Handle<Verifier>,
     user: &str,
     target: &SshTarget,
-    io: &Arc<Mutex<Terminal>>,
+    io: &SharedPrompter,
 ) -> Result<(), String> {
     let failed = |e: russh::Error| e.to_string();
     if handle.authenticate_none(user).await.map_err(failed)?.success() {
@@ -367,7 +391,7 @@ async fn authenticate(
     Err(format!("{user}@{}: Permission denied.", target.host))
 }
 
-async fn keyboard_interactive(handle: &mut Handle<Verifier>, user: &str, io: &Arc<Mutex<Terminal>>) -> Result<bool, String> {
+async fn keyboard_interactive(handle: &mut Handle<Verifier>, user: &str, io: &SharedPrompter) -> Result<bool, String> {
     let mut response =
         handle.authenticate_keyboard_interactive_start(user, None).await.map_err(|e| e.to_string())?;
     loop {
@@ -423,7 +447,7 @@ async fn pump(channel: russh::Channel<client::Msg>, io: Arc<Mutex<Terminal>>) ->
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn collect_until(session: &mut Session, needle: &str) -> String {
@@ -477,12 +501,13 @@ mod tests {
         assert!(output.contains("got:ping"), "{output:?}");
     }
 
-    mod server {
+    pub(crate) mod server {
         use super::*;
         use russh::keys::ssh_key::private::Ed25519Keypair;
         use russh::keys::PrivateKey;
         use russh::server::{self, Auth, Msg, Session as ServerSession};
         use russh::{Channel, ChannelId};
+        use russh_sftp::protocol::{Attrs, File, FileAttributes, Handle, Name, Status, StatusCode, Version};
 
         pub const PASSWORD: &str = "s3cret";
 
@@ -490,9 +515,74 @@ mod tests {
             PrivateKey::from(Ed25519Keypair::from_seed(&[7; 32]))
         }
 
-        /// Accepts `PASSWORD` and echoes shell input back with a prefix.
-        #[derive(Clone)]
-        struct Echo;
+        /// Accepts `PASSWORD`, echoes shell input back with a prefix and,
+        /// when `root` is set, serves that directory over SFTP.
+        #[derive(Default)]
+        struct Echo {
+            root: Option<std::path::PathBuf>,
+            channel: Option<Channel<Msg>>,
+            sftp: Option<ChannelId>,
+        }
+
+        /// Read-only SFTP over a local directory, enough for listings.
+        struct Files {
+            root: std::path::PathBuf,
+            listed: std::collections::HashSet<String>,
+        }
+
+        impl Files {
+            fn local(&self, path: &str) -> std::path::PathBuf {
+                self.root.join(path.trim_start_matches('/'))
+            }
+
+            fn attrs(&self, path: &std::path::Path) -> Result<FileAttributes, StatusCode> {
+                std::fs::symlink_metadata(path).map(|m| FileAttributes::from(&m)).map_err(|_| StatusCode::NoSuchFile)
+            }
+        }
+
+        impl russh_sftp::server::Handler for Files {
+            type Error = StatusCode;
+
+            fn unimplemented(&self) -> StatusCode {
+                StatusCode::OpUnsupported
+            }
+
+            async fn init(&mut self, _: u32, _: std::collections::HashMap<String, String>) -> Result<Version, StatusCode> {
+                Ok(Version::new())
+            }
+
+            async fn realpath(&mut self, id: u32, _: String) -> Result<Name, StatusCode> {
+                Ok(Name { id, files: vec![File::dummy("/")] })
+            }
+
+            async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
+                self.listed.remove(&path);
+                Ok(Handle { id, handle: path })
+            }
+
+            async fn readdir(&mut self, id: u32, handle: String) -> Result<Name, StatusCode> {
+                if !self.listed.insert(handle.clone()) {
+                    return Err(StatusCode::Eof);
+                }
+                let mut files = Vec::new();
+                for item in std::fs::read_dir(self.local(&handle)).map_err(|_| StatusCode::NoSuchFile)?.flatten() {
+                    files.push(File::new(item.file_name().to_string_lossy(), self.attrs(&item.path())?));
+                }
+                Ok(Name { id, files })
+            }
+
+            async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+                Ok(Attrs { id, attrs: self.attrs(&self.local(&path))? })
+            }
+
+            async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+                Ok(Attrs { id, attrs: self.attrs(&self.local(&path))? })
+            }
+
+            async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
+                Ok(Status { id, status_code: StatusCode::Ok, error_message: "Ok".into(), language_tag: "en".into() })
+            }
+        }
 
         impl server::Handler for Echo {
             type Error = russh::Error;
@@ -503,11 +593,30 @@ mod tests {
 
             async fn channel_open_session(
                 &mut self,
-                _: Channel<Msg>,
+                channel: Channel<Msg>,
                 reply: server::ChannelOpenHandle,
                 _: &mut ServerSession,
             ) -> Result<(), Self::Error> {
+                self.channel = Some(channel);
                 reply.accept().await;
+                Ok(())
+            }
+
+            async fn subsystem_request(
+                &mut self,
+                channel: ChannelId,
+                name: &str,
+                session: &mut ServerSession,
+            ) -> Result<(), Self::Error> {
+                match (name, self.root.clone(), self.channel.take()) {
+                    ("sftp", Some(root), Some(stream)) => {
+                        session.channel_success(channel)?;
+                        self.sftp = Some(channel);
+                        let files = Files { root, listed: Default::default() };
+                        tokio::spawn(russh_sftp::server::run(stream.into_stream(), files));
+                    }
+                    _ => session.channel_failure(channel)?,
+                }
                 Ok(())
             }
 
@@ -533,12 +642,23 @@ mod tests {
             }
 
             async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {
+                if self.sftp == Some(channel) {
+                    return Ok(()); // the SFTP task reads this channel itself
+                }
                 session.data(channel, [b"echo:".as_slice(), data].concat())
             }
         }
 
         /// Starts a one-connection server on a free port.
         pub fn start() -> u16 {
+            start_with(None)
+        }
+
+        pub fn start_with_sftp(root: std::path::PathBuf) -> u16 {
+            start_with(Some(root))
+        }
+
+        fn start_with(root: Option<std::path::PathBuf>) -> u16 {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             listener.set_nonblocking(true).unwrap();
@@ -552,7 +672,7 @@ mod tests {
                         ..Default::default()
                     });
                     let (socket, _) = listener.accept().await.unwrap();
-                    let running = server::run_stream(config, socket, Echo).await.unwrap();
+                    let running = server::run_stream(config, socket, Echo { root, channel: None, sftp: None }).await.unwrap();
                     let _ = running.await;
                 });
             });

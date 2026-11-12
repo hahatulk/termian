@@ -43,8 +43,13 @@ pub(super) fn tile(name: &str, background: u32) -> Div {
         .child(glyph(name, 20., 0xffffff))
 }
 
-fn host_tile(host: &Host) -> Div {
-    match host.os.as_deref() {
+pub(super) fn host_tile(host: &Host) -> Div {
+    os_tile(host.os.as_deref())
+}
+
+/// Host icon tile for a distribution name; unknown systems get a generic icon.
+pub(super) fn os_tile(os: Option<&str>) -> Div {
+    match os {
         Some("debian") => tile("debian", theme::TILE_DEBIAN),
         Some("ubuntu") => tile("ubuntu", theme::TILE_UBUNTU),
         Some(_) => tile("linux", theme::TILE_BLUE),

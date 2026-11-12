@@ -33,6 +33,7 @@ pub struct Shell {
     search_focus: FocusHandle,
     sftp: ui::sftp::SftpState,
     sftp_filter_focus: FocusHandle,
+    sftp_answer_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -63,6 +64,7 @@ impl Shell {
             search_focus: cx.focus_handle(),
             sftp: ui::sftp::SftpState::new(),
             sftp_filter_focus: cx.focus_handle(),
+            sftp_answer_focus: cx.focus_handle(),
         }
     }
 
