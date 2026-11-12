@@ -6,7 +6,7 @@ import YAML from 'yaml';
 
 const root = path.resolve(import.meta.dirname, '../..');
 const read = p => fs.readFileSync(path.join(root, p), 'utf8');
-const baseConfig = JSON.parse(read('tauri/src/tauri.conf.json'));
+const baseConfig = JSON.parse(read('legacy/src/tauri.conf.json'));
 const workflow = YAML.parse(read('.github/workflows/release.yml'));
 
 test('macOS ARM64 release verifies signatures and supports Developer ID notarization', () => {

@@ -13,18 +13,18 @@ const steps = build.steps;
 test('Rust CI cache follows the real Cargo target directory for both desktop platforms', () => {
   const desktopCache = steps.find(s => s.uses?.toLowerCase().includes('rust-cache'));
   assert.ok(desktopCache);
-  assert.equal(desktopCache.with.workspaces, 'tauri/src -> ../dist/.cargo');
+  assert.equal(desktopCache.with.workspaces, 'legacy/src -> ../dist/.cargo');
   assert.equal(desktopCache.with['cache-targets'], true);
-  const cli = read('tauri/scripts/tauri-cli.mjs');
+  const cli = read('legacy/scripts/tauri-cli.mjs');
   assert.ok(cli.includes("CARGO_TARGET_DIR: path.join(root, 'dist', '.cargo')"));
-  assert.ok(fs.existsSync(path.join(root, 'tauri/src/Cargo.lock')));
+  assert.ok(fs.existsSync(path.join(root, 'legacy/src/Cargo.lock')));
 });
 
 test('Rust tests reuse release dependencies instead of compiling the debug profile first', () => {
   const rustTest = steps.find(s => s.name?.startsWith('Test Rust backend'));
   assert.ok(rustTest);
   assert.match(rustTest.run, /cargo test --release --lib --manifest-path src\/Cargo\.toml --locked/);
-  assert.ok(rustTest.env.CARGO_TARGET_DIR.endsWith('/tauri/dist/.cargo'));
+  assert.ok(rustTest.env.CARGO_TARGET_DIR.endsWith('/legacy/dist/.cargo'));
   assert.equal(steps.filter(s => /cargo test\b/.test(s.run || '')).length, 1);
   assert.ok(!steps.some(s => /dist\/\.cargo\/debug|cargo clean\b/.test(s.run || '')));
   assert.ok(steps.some(s => s.name?.includes('Build Windows portable EXE')));
@@ -75,33 +75,33 @@ test('macOS ad-hoc signing does not pass empty certificate secrets to Tauri', ()
 });
 
 test('Publishing EXE and DMG preserves Cargo cache unless explicitly opted out', () => {
-  for (const file of ['tauri/scripts/publish-windows.mjs', 'tauri/scripts/publish-mac.mjs']) {
+  for (const file of ['legacy/scripts/publish-windows.mjs', 'legacy/scripts/publish-mac.mjs']) {
     const source = read(file);
     assert.ok(source.includes("process.env.TERMIAN_CLEAN_BUILD_CACHE === '1'"),
       'Only opt-in cleanup may delete Rust cache: ' + file);
     assert.ok(source.includes("fs.rmSync("), 'Generated web files still need cleanup');
   }
-  const scripts = JSON.parse(read('tauri/package.json')).scripts;
+  const scripts = JSON.parse(read('legacy/package.json')).scripts;
   assert.match(scripts['build:windows'], /publish-windows\.mjs/);
   assert.equal(scripts['clean:rust-cache'], 'node scripts/clean-rust-cache.mjs');
-  const cleaner = read('tauri/scripts/clean-rust-cache.mjs');
+  const cleaner = read('legacy/scripts/clean-rust-cache.mjs');
   assert.ok(cleaner.includes("'dist', '.cargo'"));
   assert.ok(!cleaner.includes('termian-data'));
 });
 
 test('Cold release profile prefers faster compiler optimization without enabling debug mode', () => {
-  const cargo = read('tauri/src/Cargo.toml');
+  const cargo = read('legacy/src/Cargo.toml');
   assert.match(cargo, /\[profile\.release\]\s+opt-level = 2\s+codegen-units = 32\s+lto = false/);
 });
 
 test('Release publishes only Windows and macOS artifacts', () => {
   assert.ok(!workflow.jobs.android);
   assert.deepEqual(workflow.jobs.publish.needs, ['prepare', 'build']);
-  const config = JSON.parse(read('tauri/src/tauri.conf.json'));
+  const config = JSON.parse(read('legacy/src/tauri.conf.json'));
   assert.ok(!config.bundle.android);
-  for (const removed of ['tauri/src/mobile.js', 'tauri/src/tauri.android.conf.json',
-    'tauri/src/ui/mobile.html', 'tauri/src/ui/mobile.css',
-    'tauri/scripts/configure-android.mjs']) {
+  for (const removed of ['legacy/src/mobile.js', 'legacy/src/tauri.android.conf.json',
+    'legacy/src/ui/mobile.html', 'legacy/src/ui/mobile.css',
+    'legacy/scripts/configure-android.mjs']) {
     assert.ok(!fs.existsSync(path.join(root, removed)), 'Android-only file remains: ' + removed);
   }
   const release = workflow.jobs.publish.steps.find(s => s.name?.includes('both desktop'));

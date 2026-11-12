@@ -15,7 +15,7 @@ The Windows/macOS Termian frontend, shipped as prebuilt React/Redux bundles.
 
 ## Editing
 
-Run from `tauri/`:
+Run from `legacy/`:
 
 ```bash
 npm run index:ui

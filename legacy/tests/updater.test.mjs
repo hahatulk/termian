@@ -66,7 +66,7 @@ test('Release workflow signs update packages and publishes latest.json', () => {
   const workflow = read('../.github/workflows/release.yml');
   assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY \}\}/);
   assert.match(workflow, /node scripts\/updater-artifacts\.mjs/);
-  assert.match(workflow, /node tauri\/scripts\/updater-manifest\.mjs release-assets/);
+  assert.match(workflow, /node legacy\/scripts\/updater-manifest\.mjs release-assets/);
   for (const asset of ['mac-arm64.app.tar.gz', 'mac-arm64.app.tar.gz.sig', 'win-x64.exe.sig', 'win-x64-setup.exe', 'win-x64-setup.exe.sig']) {
     assert.ok(workflow.includes('"termian-${RELEASE_VERSION}-' + asset + '"'), 'Release must require ' + asset);
   }

@@ -1,10 +1,10 @@
 # Клиент Tauri
 
-Единственная клиентская реализация Termian. Интерфейс работает поверх Tauri 2 с нативным Rust-бэкендом.
+Legacy-клиент Termian: интерфейс работает в WebView поверх Tauri 2 с нативным Rust-бэкендом. Остаётся релизным, пока нативный клиент из корня репозитория (GPUI) не достигнет паритета — см. [ADR 0001](../docs/adr/0001-native-gpui-client.md). Собирается и из корня: `npm run legacy:build:mac`, `npm run legacy:build:windows`.
 
 ## Запуск и сборка
 
-Все команды выполняются из `tauri/`. Нужны Node.js, Rust/Cargo и [зависимости Tauri](https://v2.tauri.app/start/prerequisites/).
+Все команды выполняются из `legacy/`. Нужны Node.js, Rust/Cargo и [зависимости Tauri](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 npm ci

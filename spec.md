@@ -3,8 +3,8 @@
 Документ описывает назначение, архитектуру, функциональные требования, форматы данных, протоколы и инварианты проекта. Он дополняет [AGENTS.md](AGENTS.md) (правила работы с репозиторием) и профильные README:
 
 - [README.md](README.md) — витрина проекта;
-- [tauri/README.md](tauri/README.md) — техническая документация клиента;
-- [tauri/src/ui/README.md](tauri/src/ui/README.md) — интерфейс;
+- [legacy/README.md](legacy/README.md) — техническая документация клиента;
+- [legacy/src/ui/README.md](legacy/src/ui/README.md) — интерфейс;
 - [cloud-sync-server/README.md](cloud-sync-server/README.md) — сервер синхронизации.
 
 При расхождении приоритет такой: код и тесты → этот документ → README. Если поведение меняется, обновляйте spec.md вместе с кодом.
@@ -44,17 +44,19 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 | Путь | Назначение |
 | --- | --- |
-| `tauri/` | Единственный клиент. Рабочий каталог npm-команд |
-| `tauri/src/` | Единственный каталог редактируемых исходников и конфигурации клиента |
-| `tauri/src/rust/` | Нативный бэкенд (Tauri-команды) |
-| `tauri/src/bridge/` | JS-мост: совместимость UI с Tauri |
-| `tauri/src/ui/` | Интерфейс (HTML + бандлы `assets/`, индексы `symbols.json`, `inventory.json`) |
-| `tauri/src/original-bridge.js` | Ранний скрипт-загрузчик каждого окна (preload-аналог Electron) |
-| `tauri/src/legacy-terminal.js` | Привязка локальных терминальных вкладок к нативному PTY |
-| `tauri/src/self-cloud-*.cjs`, `self-cloud.css`, `sync-change-groups.cjs`, `local-account.cjs` | Экспорт/импорт снимков, UI своего облака, офлайн-аккаунт |
-| `tauri/tests/` | Тесты Node (`node --test`) |
-| `tauri/scripts/` | Сборка, публикация, подпись обновлений, CDP-утилиты отладки |
-| `tauri/dist/` | Результаты сборки, Rust-кэш (`.cargo/`), **пользовательский профиль портативной Windows-версии** (`termian-data/`) |
+| `Cargo.toml`, `src/` | Нативный клиент на GPUI (в разработке, см. `docs/adr/0001-native-gpui-client.md`) |
+| `package.json` | Корневые скрипты: нативный клиент и сборка legacy (`legacy:*`) |
+| `legacy/` | Релизный клиент Tauri + WebView. Рабочий каталог npm-команд legacy |
+| `legacy/src/` | Исходники и конфигурация legacy-клиента |
+| `legacy/src/rust/` | Нативный бэкенд (Tauri-команды) |
+| `legacy/src/bridge/` | JS-мост: совместимость UI с Tauri |
+| `legacy/src/ui/` | Интерфейс (HTML + бандлы `assets/`, индексы `symbols.json`, `inventory.json`) |
+| `legacy/src/original-bridge.js` | Ранний скрипт-загрузчик каждого окна (preload-аналог Electron) |
+| `legacy/src/legacy-terminal.js` | Привязка локальных терминальных вкладок к нативному PTY |
+| `legacy/src/self-cloud-*.cjs`, `self-cloud.css`, `sync-change-groups.cjs`, `local-account.cjs` | Экспорт/импорт снимков, UI своего облака, офлайн-аккаунт |
+| `legacy/tests/` | Тесты Node (`node --test`) |
+| `legacy/scripts/` | Сборка, публикация, подпись обновлений, CDP-утилиты отладки |
+| `legacy/dist/` | Результаты сборки, Rust-кэш (`.cargo/`), **пользовательский профиль портативной Windows-версии** (`termian-data/`) |
 | `cloud-sync-server/` | Самостоятельный сервер синхронизации (Rust/axum, Docker) |
 | `.github/workflows/release.yml` | Релиз Windows x64 + macOS arm64 |
 
@@ -364,7 +366,7 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 ## 9. Сборка, тестирование, релиз
 
-### 9.1. Команды (из `tauri/`)
+### 9.1. Команды (из `legacy/`)
 
 ```bash
 npm ci
@@ -414,14 +416,14 @@ CARGO_TARGET_DIR=$PWD/dist/.cargo MACOSX_DEPLOYMENT_TARGET=11.0 \
 - Windows: `tauri build --no-bundle`, затем `publish-windows.mjs`. Скрипт копирует портативный EXE (бинарник ещё не помечен, `…_VAR_UNK`), затем выполняет `tauri bundle --bundles nsis` (`installMode: currentUser`, языки RU/EN, WebView2 через загрузчик).
 - Секреты: `TAURI_SIGNING_PRIVATE_KEY` и при необходимости `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Для Developer ID дополнительно 6 секретов `APPLE_*`; без них используется ad-hoc подпись.
 - macOS: Cargo-тесты собираются с `--target aarch64-apple-darwin` и `MACOSX_DEPLOYMENT_TARGET=11.0`. Порядок: `tauri build --no-bundle` → `tauri bundle --bundles app,dmg` (повтор упаковки при `hdiutil … Resource busy`). Затем `codesign --verify`, а для Developer ID ещё `spctl --assess`.
-- Кэш `tauri/src -> ../dist/.cargo` сохраняется между сборками и не очищается автоматически.
+- Кэш `legacy/src -> ../dist/.cargo` сохраняется между сборками и не очищается автоматически.
 
 ---
 
 ## 10. Инварианты (нельзя нарушать)
 
-1. Только клиент `tauri/`, исходники только в `tauri/src/`. Не создавать `src-tauri/`, `ui-src/`, копии Electron.
-2. Не очищать `tauri/dist/` целиком. Не трогать `termian-data/`, Vault, WebView-профили, резервные копии.
+1. Клиенты: нативный (корень, `src/`) и legacy (`legacy/`, исходники только в `legacy/src/`). Не создавать `src-tauri/`, `ui-src/`, копии Electron.
+2. Не очищать `legacy/dist/` целиком. Не трогать `termian-data/`, Vault, WebView-профили, резервные копии.
 3. Не удалять работающий код только из-за имени «Electron» в нём.
 4. Конфликт синхронизации разрешает только пользователь. Отправка слияния всегда условная (`If-Match` или `If-None-Match`). Перед импортом из облака делается резервная копия. Пропавший снимок на сервере не превращается в удаление локальных данных.
 5. Выгрузка логов не влияет на снимок, базу и индикацию синхронизации. Пароли и ключи хостов в метаданных логов не отправляются.
