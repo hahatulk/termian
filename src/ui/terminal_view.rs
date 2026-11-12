@@ -5,8 +5,26 @@ use gpui::{
     div, font, prelude::*, px, rgb, App, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Window,
 };
-use termian_native::session::{Session, SessionEvent};
+use termian_native::login::{Answer, LoginEvent, LoginState, Stage};
+use termian_native::session::{self, Session, SessionEvent, SshTarget};
 use termian_native::terminal::{self, key_bytes, paste_bytes, Modifiers, Terminal};
+
+use super::login_view::{self, LoginActions, LoginTarget};
+
+/// Where an SSH tab connects to; kept so the connection can be retried.
+#[derive(Clone)]
+pub struct Connection {
+    pub label: String,
+    pub os: Option<String>,
+    pub target: SshTarget,
+}
+
+/// Requests from the tab to the window.
+pub enum TerminalEvent {
+    Close,
+}
+
+impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
 
 const FONT_FAMILY: &str = "Menlo";
 const FONT_SIZE: f32 = 13.;
@@ -20,17 +38,52 @@ pub struct TerminalView {
     closed: bool,
     cell_width: Option<f32>,
     selecting: bool,
+    /// SSH tabs show the connection screen until the shell is ready.
+    connection: Option<Connection>,
+    login: Option<LoginState>,
+    login_focus: FocusHandle,
+    /// Bumped on retry; events from the replaced session are ignored.
+    generation: u64,
 }
 
 impl TerminalView {
-    pub fn new(mut session: Session, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(session: Session, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(session, None, window, cx)
+    }
+
+    pub fn ssh(connection: Connection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let session = session::ssh(connection.target.clone(), 80, 24);
+        Self::build(session, Some(connection), window, cx)
+    }
+
+    fn build(mut session: Session, connection: Option<Connection>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus);
+        let login_focus = cx.focus_handle();
+        window.focus(if connection.is_some() { &login_focus } else { &focus });
+        Self::listen(&mut session, 0, window, cx);
+        Self {
+            terminal: Terminal::new(80, 24),
+            session,
+            focus,
+            closed: false,
+            cell_width: None,
+            selecting: false,
+            login: connection.as_ref().map(|_| LoginState::default()),
+            connection,
+            login_focus,
+            generation: 0,
+        }
+    }
+
+    fn listen(session: &mut Session, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(mut events) = session.take_events() {
-            cx.spawn(async move |this, cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 while let Some(event) = events.next().await {
-                    let alive = this.update(cx, |view, cx| {
-                        view.handle(event);
+                    let alive = this.update_in(cx, |view, window, cx| {
+                        if view.generation != generation {
+                            return;
+                        }
+                        view.handle(event, window);
                         cx.notify();
                     });
                     if alive.is_err() {
@@ -40,11 +93,29 @@ impl TerminalView {
             })
             .detach();
         }
-        Self { terminal: Terminal::new(80, 24), session, focus, closed: false, cell_width: None, selecting: false }
     }
 
-    fn handle(&mut self, event: SessionEvent) {
+    fn handle(&mut self, event: SessionEvent, window: &mut Window) {
         match event {
+            SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
+                self.login = None;
+                window.focus(&self.focus);
+            }
+            SessionEvent::Login(event) => {
+                let asks_text = matches!(event, LoginEvent::Prompt { .. });
+                if let Some(login) = self.login.as_mut() {
+                    login.apply(event);
+                }
+                if asks_text {
+                    window.focus(&self.login_focus);
+                }
+            }
+            SessionEvent::Closed(reason) if self.login.is_some() => {
+                self.closed = true;
+                if let Some(login) = self.login.as_mut() {
+                    login.fail(reason.unwrap_or_else(|| "The connection was closed.".into()));
+                }
+            }
             SessionEvent::Output(bytes) => {
                 self.terminal.feed(&bytes);
                 let replies = self.terminal.take_replies();
@@ -131,7 +202,61 @@ impl TerminalView {
     }
 
     pub fn focus(&self, window: &mut Window) {
-        window.focus(&self.focus);
+        window.focus(if self.login.is_some() { &self.login_focus } else { &self.focus });
+    }
+
+    fn login_answer(&mut self, answer: Answer, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(login) = self.login.as_mut() else { return };
+        let cancels = matches!(answer, Answer::Text(None) | Answer::HostKey(termian_native::login::HostKeyDecision::Reject));
+        if let Some(answer) = login.answer(answer) {
+            self.session.answer(answer);
+        }
+        if cancels {
+            cx.emit(TerminalEvent::Close);
+        }
+        cx.notify();
+    }
+
+    fn login_submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(answer) = self.login.as_mut().and_then(LoginState::submit_text) {
+            self.login_answer(answer, window, cx);
+        }
+    }
+
+    fn login_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let paste = cx.read_from_clipboard().and_then(|item| item.text());
+        let Some(login) = self.login.as_mut() else { return };
+        if let Some(answer) = login_view::edit(login, event, paste) {
+            if let Some(answer) = answer {
+                self.login_answer(answer, window, cx);
+            }
+            cx.stop_propagation();
+            cx.notify();
+        }
+    }
+
+    fn login_close(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TerminalEvent::Close);
+    }
+
+    fn login_retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection.clone() else { return };
+        self.generation += 1;
+        self.session = session::ssh(connection.target, 80, 24);
+        Self::listen(&mut self.session, self.generation, window, cx);
+        self.terminal = Terminal::new(80, 24);
+        self.closed = false;
+        let show_logs = self.login.as_ref().is_some_and(|l| l.show_logs);
+        self.login = Some(LoginState { show_logs, ..LoginState::default() });
+        window.focus(&self.login_focus);
+        cx.notify();
+    }
+
+    fn login_toggle_logs(&mut self, cx: &mut Context<Self>) {
+        if let Some(login) = self.login.as_mut() {
+            login.show_logs = !login.show_logs;
+        }
+        cx.notify();
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -170,6 +295,22 @@ pub const TOP_INSET: f32 = 44.;
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let (Some(login), Some(connection)) = (&self.login, &self.connection) {
+            let target = LoginTarget {
+                label: &connection.label,
+                subtitle: format!("SSH {}:{}", connection.target.host, connection.target.port),
+                os: connection.os.as_deref(),
+            };
+            let actions = LoginActions {
+                answer: Self::login_answer,
+                close: Self::login_close,
+                retry: Self::login_retry,
+                toggle_logs: Self::login_toggle_logs,
+                key: Self::login_key,
+                submit: Self::login_submit,
+            };
+            return login_view::render(target, login, &self.login_focus, window, &actions, cx).into_any_element();
+        }
         let viewport = window.viewport_size();
         self.fit(viewport.width, viewport.height - px(TOP_INSET), window);
         let snapshot = self.terminal.snapshot();
@@ -220,5 +361,6 @@ impl Render for TerminalView {
             .line_height(px(LINE_HEIGHT))
             .children(lines)
             .children(cursor)
+            .into_any_element()
     }
 }

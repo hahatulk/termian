@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use termian_native::session::{self, SshTarget};
 use termian_native::tabs::TabId;
 use termian_native::vault::HostId;
-use ui::terminal_view::TerminalView;
+use ui::terminal_view::{Connection, TerminalEvent, TerminalView};
 use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
 use termian_native::theme;
@@ -115,18 +115,37 @@ impl Shell {
 }
 
 impl Shell {
-    pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
+    fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, cx: &mut Context<Self>) {
         let id = self.tabs.open(TabKind::Session { title });
-        let view = cx.new(|cx| TerminalView::new(session, window, cx));
+        cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| match event {
+            TerminalEvent::Close => {
+                shell.tabs.close(id);
+                shell.terminals.remove(&id);
+                cx.notify();
+            }
+        })
+        .detach();
         self.terminals.insert(id, view);
         cx.notify();
+    }
+
+    pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
+        let view = cx.new(|cx| TerminalView::new(session, window, cx));
+        self.add_terminal(title, view, cx);
+    }
+
+    /// Opens an SSH tab that shows the connection screen until the shell is ready.
+    pub fn open_ssh(&mut self, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let connection = Connection { label: label.clone(), os, target };
+        let view = cx.new(|cx| TerminalView::ssh(connection, window, cx));
+        self.add_terminal(label, view, cx);
     }
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(host) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::new(&host.address, host.username.clone());
-        let title = host.label.clone();
-        self.open_terminal(title, session::ssh(target, 80, 24), window, cx);
+        let (label, os) = (host.label.clone(), host.os.clone());
+        self.open_ssh(label, os, target, window, cx);
     }
 
     /// Runs a snippet in the most recently opened terminal, starting a local one if none is open.

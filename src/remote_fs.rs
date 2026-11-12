@@ -1,30 +1,28 @@
 //! Remote side of the SFTP tab. Runs on its own thread; the UI sends
 //! commands and receives events. Login questions (host key, password) arrive
-//! as `Prompt` events and are answered with [`RemoteFs::answer`].
+//! as `Login` events and are answered with [`RemoteFs::answer`].
 
 use std::sync::Arc;
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
-use futures::future::BoxFuture;
 use futures::StreamExt;
 use russh_sftp::client::SftpSession;
 use tokio::sync::Mutex;
 
 use crate::files::{join, Entry};
-use crate::session::{connect, Prompter, SshTarget};
+use crate::login::{Answer, LoginEvent, Stage};
+use crate::session::{connect, EventPrompter, Prompter, SshTarget};
 
 #[derive(Debug, PartialEq)]
 pub enum RemoteEvent {
-    /// Text to show before the next prompt (host key fingerprint, warnings).
-    Message(String),
-    Prompt { text: String, echo: bool },
+    Login(LoginEvent),
     Connected { home: String },
     Listed { path: String, result: Result<Vec<Entry>, String> },
     Closed(Option<String>),
 }
 
 enum Command {
-    Answer(Option<String>),
+    Answer(Answer),
     List(String),
 }
 
@@ -56,34 +54,13 @@ impl RemoteFs {
         self.events.take()
     }
 
-    /// Answers the pending prompt; `None` cancels the login.
-    pub fn answer(&self, answer: Option<String>) {
+    /// Answers the pending login question.
+    pub fn answer(&self, answer: Answer) {
         let _ = self.commands.unbounded_send(Command::Answer(answer));
     }
 
     pub fn list(&self, path: &str) {
         let _ = self.commands.unbounded_send(Command::List(path.to_owned()));
-    }
-}
-
-struct FormPrompter {
-    events: UnboundedSender<RemoteEvent>,
-    answers: UnboundedReceiver<Option<String>>,
-}
-
-impl Prompter for FormPrompter {
-    fn print(&mut self, text: &str) {
-        let text = text.trim();
-        if !text.is_empty() && !text.starts_with("Connecting to ") {
-            let _ = self.events.unbounded_send(RemoteEvent::Message(text.to_owned()));
-        }
-    }
-
-    fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>> {
-        Box::pin(async move {
-            let _ = self.events.unbounded_send(RemoteEvent::Prompt { text: prompt.trim().to_owned(), echo });
-            self.answers.next().await.flatten()
-        })
     }
 }
 
@@ -107,12 +84,19 @@ async fn run(
         }
     });
 
-    let prompter = Arc::new(Mutex::new(FormPrompter { events: events.clone(), answers }));
-    let handle = connect(&target, prompter).await?;
+    let emit_events = events.clone();
+    let prompter = Arc::new(Mutex::new(EventPrompter {
+        emit: move |event| {
+            let _ = emit_events.unbounded_send(RemoteEvent::Login(event));
+        },
+        answers,
+    }));
+    let handle = connect(&target, prompter.clone()).await?;
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
     let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP is not available: {e}"))?;
     let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
+    prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
     let _ = events.unbounded_send(RemoteEvent::Connected { home });
 
     while let Some(path) = lists.next().await {
@@ -151,6 +135,7 @@ async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::login::HostKeyDecision;
     use crate::session::tests::server;
     use std::time::Duration;
 
@@ -183,15 +168,31 @@ mod tests {
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
 
-        let RemoteEvent::Prompt { text, echo } = next(&mut events) else { panic!("expected host key prompt") };
-        assert!(text.contains("SHA256:") && text.ends_with("(yes/no)?") && echo, "{text}");
-        remote.answer(Some("yes".into()));
-        assert!(matches!(next(&mut events), RemoteEvent::Message(m) if m.contains("Permanently added")));
-        let RemoteEvent::Prompt { text, echo } = next(&mut events) else { panic!("expected password prompt") };
-        assert_eq!((text.as_str(), echo), ("root@127.0.0.1's password:", false));
-        remote.answer(Some(server::PASSWORD.into()));
+        let info = loop {
+            match next(&mut events) {
+                RemoteEvent::Login(LoginEvent::HostKey(info)) => break info,
+                RemoteEvent::Login(_) => continue,
+                other => panic!("expected host key question, got {other:?}"),
+            }
+        };
+        assert_eq!((info.host.as_str(), info.algorithm.as_str()), ("127.0.0.1", "ED25519"));
+        remote.answer(Answer::HostKey(HostKeyDecision::Save));
+        let (text, echo) = loop {
+            match next(&mut events) {
+                RemoteEvent::Login(LoginEvent::Prompt { text, echo }) => break (text, echo),
+                RemoteEvent::Login(_) => continue,
+                other => panic!("expected password prompt, got {other:?}"),
+            }
+        };
+        assert_eq!((text.as_str(), echo), ("root@127.0.0.1's password", false));
+        remote.answer(Answer::Text(Some(server::PASSWORD.into())));
+        let event = loop {
+            match next(&mut events) {
+                RemoteEvent::Login(_) => continue,
+                other => break other,
+            }
+        };
 
-        let event = next(&mut events);
         let RemoteEvent::Connected { home } = event else { panic!("expected connection, got {event:?}") };
         assert_eq!(home, "/");
         remote.list("/");
@@ -217,15 +218,15 @@ mod tests {
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
-        assert!(matches!(next(&mut events), RemoteEvent::Prompt { .. }));
-        remote.answer(None);
+        while !matches!(next(&mut events), RemoteEvent::Login(LoginEvent::HostKey(_))) {}
+        remote.answer(Answer::HostKey(HostKeyDecision::Reject));
         loop {
             match next(&mut events) {
                 RemoteEvent::Closed(reason) => {
                     assert!(reason.unwrap().contains("Host key verification failed"));
                     break;
                 }
-                RemoteEvent::Message(_) => continue,
+                RemoteEvent::Login(_) => continue,
                 other => panic!("unexpected {other:?}"),
             }
         }

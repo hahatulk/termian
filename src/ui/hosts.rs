@@ -174,13 +174,16 @@ impl Shell {
     }
 
     fn connect_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.query.trim().is_empty() {
+            return;
+        }
         if let Some(host) = self.vault.search(&self.query).first().map(|h| h.id) {
             self.query.clear();
             self.connect_host(host, window, cx);
         } else if let Some(target) = session::parse_destination(&self.query) {
             let title = self.query.trim().trim_start_matches("ssh ").to_owned();
             self.query.clear();
-            self.open_terminal(title, session::ssh(target, 80, 24), window, cx);
+            self.open_ssh(title, None, target, window, cx);
         }
     }
 

@@ -1,6 +1,7 @@
 //! Byte streams behind terminal tabs: a local shell (PTY) or an SSH shell.
-//! Interactive questions during SSH login (unknown host key, password,
-//! keyboard-interactive) are asked inside the terminal, like OpenSSH does.
+//! SSH login questions (unknown host key, password, keyboard-interactive)
+//! arrive as `SessionEvent::Login` and are answered with `Session::answer`,
+//! so the UI can show them on the connection screen.
 
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -18,15 +19,20 @@ use russh::keys::{
 use russh::ChannelMsg;
 use tokio::sync::Mutex;
 
+use crate::login::{Answer, HostKeyDecision, HostKeyInfo, LoginEvent, Stage};
+
 #[derive(Debug, PartialEq)]
 pub enum SessionEvent {
     Output(Vec<u8>),
+    /// SSH login progress and questions; the shell output follows `Stage::Ready`.
+    Login(LoginEvent),
     /// The session ended; `Some` carries the reason when it failed.
     Closed(Option<String>),
 }
 
 enum Input {
     Data(Vec<u8>),
+    Answer(Answer),
     Resize(u16, u16),
     Close,
 }
@@ -40,6 +46,11 @@ pub struct Session {
 impl Session {
     pub fn write(&self, bytes: &[u8]) {
         let _ = self.input.unbounded_send(Input::Data(bytes.to_vec()));
+    }
+
+    /// Answers the pending login question.
+    pub fn answer(&self, answer: Answer) {
+        let _ = self.input.unbounded_send(Input::Answer(answer));
     }
 
     /// Session output; can be taken once.
@@ -112,6 +123,7 @@ pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: 
                 Input::Resize(cols, rows) => {
                     let _ = master.resize(size(cols, rows));
                 }
+                Input::Answer(_) => {}
                 Input::Close => break,
             }
         }
@@ -181,84 +193,54 @@ pub fn ssh(target: SshTarget, columns: u16, rows: u16) -> Session {
                 return;
             }
         };
-        let io = Arc::new(Mutex::new(Terminal { input: input_rx, output: events_tx.clone(), size: (columns, rows) }));
-        let result = runtime.block_on(run_ssh(target, io.clone()));
-        let reason = result.err();
-        if let Some(reason) = &reason {
-            let _ = events_tx.unbounded_send(SessionEvent::Output(format!("\r\n{reason}\r\n").into_bytes()));
-        }
-        let _ = events_tx.unbounded_send(SessionEvent::Closed(reason));
+        let result = runtime.block_on(run_ssh(target, input_rx, events_tx.clone(), (columns, rows)));
+        let _ = events_tx.unbounded_send(SessionEvent::Closed(result.err()));
     });
     session
 }
 
-/// Where login questions go: the terminal for shells, a form for SFTP.
+/// Where login questions go; the UI answers them on the connection screen.
 pub(crate) trait Prompter: Send {
-    fn print(&mut self, text: &str);
+    fn event(&mut self, event: LoginEvent);
     fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>>;
+    fn host_key(&mut self, info: HostKeyInfo) -> BoxFuture<'_, HostKeyDecision>;
+
+    fn log(&mut self, line: String) {
+        self.event(LoginEvent::Log(line));
+    }
 }
 
 pub(crate) type SharedPrompter = Arc<Mutex<dyn Prompter>>;
 
-/// The terminal as seen by the SSH task: prints text and reads answers.
-struct Terminal {
-    input: UnboundedReceiver<Input>,
-    output: UnboundedSender<SessionEvent>,
-    size: (u16, u16),
+/// Forwards login events through `emit` and waits for answers on `answers`.
+pub(crate) struct EventPrompter<F: FnMut(LoginEvent) + Send> {
+    pub emit: F,
+    pub answers: UnboundedReceiver<Answer>,
 }
 
-impl Terminal {
-    fn print(&self, text: &str) {
-        let _ = self.output.unbounded_send(SessionEvent::Output(text.replace('\n', "\r\n").into_bytes()));
-    }
-
-    /// Reads one line; `None` when the user pressed Ctrl-C/Ctrl-D or closed the tab.
-    async fn read_line(&mut self, echo: bool) -> Option<String> {
-        let mut line = String::new();
-        loop {
-            match self.input.next().await? {
-                Input::Close => return None,
-                Input::Resize(cols, rows) => self.size = (cols, rows),
-                Input::Data(bytes) => {
-                    for ch in String::from_utf8_lossy(&bytes).chars() {
-                        match ch {
-                            '\r' | '\n' => {
-                                self.print("\n");
-                                return Some(line);
-                            }
-                            '\u{3}' | '\u{4}' => return None,
-                            '\u{7f}' | '\u{8}' => {
-                                if line.pop().is_some() && echo {
-                                    self.print("\u{8} \u{8}");
-                                }
-                            }
-                            c if !c.is_control() => {
-                                line.push(c);
-                                if echo {
-                                    self.print(&c.to_string());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn ask_line(&mut self, prompt: &str, echo: bool) -> Option<String> {
-        self.print(prompt);
-        self.read_line(echo).await
-    }
-}
-
-impl Prompter for Terminal {
-    fn print(&mut self, text: &str) {
-        Terminal::print(self, text);
+impl<F: FnMut(LoginEvent) + Send> Prompter for EventPrompter<F> {
+    fn event(&mut self, event: LoginEvent) {
+        (self.emit)(event);
     }
 
     fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>> {
-        Box::pin(self.ask_line(prompt, echo))
+        Box::pin(async move {
+            (self.emit)(LoginEvent::Prompt { text: prompt.trim().to_owned(), echo });
+            match self.answers.next().await {
+                Some(Answer::Text(text)) => text,
+                _ => None,
+            }
+        })
+    }
+
+    fn host_key(&mut self, info: HostKeyInfo) -> BoxFuture<'_, HostKeyDecision> {
+        Box::pin(async move {
+            (self.emit)(LoginEvent::HostKey(info));
+            match self.answers.next().await {
+                Some(Answer::HostKey(decision)) => decision,
+                _ => HostKeyDecision::Reject,
+            }
+        })
     }
 }
 
@@ -269,6 +251,10 @@ pub(crate) struct Verifier {
     io: SharedPrompter,
 }
 
+fn key_label(key: &PublicKey) -> String {
+    crate::vault::key_kind(key.algorithm().as_str())
+}
+
 impl client::Handler for Verifier {
     type Error = russh::Error;
 
@@ -277,61 +263,106 @@ impl client::Handler for Verifier {
             PublicKeyOrCertificate::PublicKey { key, .. } => key.clone(),
             PublicKeyOrCertificate::Certificate(certificate) => certificate.public_key().clone().into(),
         };
-        let fingerprint = key.fingerprint(HashAlg::Sha256);
+        let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+        let info = HostKeyInfo {
+            host: self.host.clone(),
+            port: self.port,
+            algorithm: key_label(&key),
+            fingerprint: fingerprint.trim_start_matches("SHA256:").to_owned(),
+        };
         let mut io = self.io.lock().await;
+        io.event(LoginEvent::Stage(Stage::Verifying));
+        io.log(format!("Server host key: {} {fingerprint}", info.algorithm));
         match check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
-            Ok(true) => return Ok(true),
+            Ok(true) => {
+                io.log("Host key matches a known_hosts entry".into());
+                return Ok(true);
+            }
             Err(russh::keys::Error::KeyChanged { line }) => {
-                io.print(&format!(
-                    "WARNING: the host key for {} has changed (known_hosts line {line}).\n\
-                     Offending key fingerprint: {fingerprint}\nConnection refused to protect you from \
-                     a possible man-in-the-middle attack.\n",
-                    self.host
-                ));
+                io.log(format!("Host key differs from known_hosts line {line}"));
+                io.event(LoginEvent::HostKeyChanged(info));
                 return Ok(false);
             }
             _ => {}
         }
-        let question = format!(
-            "The authenticity of host '{}' can't be established.\n{} key fingerprint is {fingerprint}.\n\
-             Are you sure you want to continue connecting (yes/no)? ",
-            self.host,
-            key.algorithm().as_str()
-        );
-        loop {
-            match io.ask(&question, true).await.as_deref().map(str::trim) {
-                Some("yes") => break,
-                Some("no") | None => return Ok(false),
-                _ => continue,
+        match io.host_key(info).await {
+            HostKeyDecision::Reject => Ok(false),
+            HostKeyDecision::Once => {
+                io.log("Host key accepted for this session".into());
+                Ok(true)
+            }
+            HostKeyDecision::Save => {
+                match learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
+                    Ok(()) => io.log(format!("Permanently added '{}' to the list of known hosts", self.host)),
+                    Err(error) => io.log(format!("Could not save the host key: {error}")),
+                }
+                Ok(true)
             }
         }
-        if let Err(error) = learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
-            io.print(&format!("Could not save the host key: {error}\n"));
-        } else {
-            io.print(&format!("Permanently added '{}' to the list of known hosts.\n", self.host));
-        }
-        Ok(true)
     }
 }
 
-async fn run_ssh(target: SshTarget, io: Arc<Mutex<Terminal>>) -> Result<(), String> {
-    let handle = connect(&target, io.clone()).await?;
+async fn run_ssh(
+    target: SshTarget,
+    mut input: UnboundedReceiver<Input>,
+    events: UnboundedSender<SessionEvent>,
+    size: (u16, u16),
+) -> Result<(), String> {
+    // Answers go to the login; everything else waits for the shell.
+    let (answer_tx, answers) = unbounded();
+    let (shell_tx, shell_input) = unbounded();
+    let latest_size = Arc::new(std::sync::Mutex::new(size));
+    let router_size = latest_size.clone();
+    tokio::spawn(async move {
+        while let Some(item) = input.next().await {
+            let sent = match item {
+                Input::Answer(answer) => answer_tx.unbounded_send(answer).is_ok(),
+                Input::Resize(cols, rows) => {
+                    *router_size.lock().unwrap() = (cols, rows);
+                    shell_tx.unbounded_send(Input::Resize(cols, rows)).is_ok()
+                }
+                Input::Close => {
+                    let _ = shell_tx.unbounded_send(Input::Close);
+                    break;
+                }
+                other => shell_tx.unbounded_send(other).is_ok(),
+            };
+            if !sent {
+                break;
+            }
+        }
+    });
+
+    let emit_events = events.clone();
+    let prompter = Arc::new(Mutex::new(EventPrompter {
+        emit: move |event| {
+            let _ = emit_events.unbounded_send(SessionEvent::Login(event));
+        },
+        answers,
+    }));
+    let handle = connect(&target, prompter.clone()).await?;
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
-    let (cols, rows) = io.lock().await.size;
+    let (cols, rows) = *latest_size.lock().unwrap();
     channel.request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
     channel.request_shell(true).await.map_err(|e| e.to_string())?;
-    pump(channel, io).await
+    prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
+    pump(channel, shell_input, events).await
 }
 
 /// Opens an authenticated SSH connection, asking `io` whatever login needs.
 pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Handle<Verifier>, String> {
     let address = format!("{}:{}", target.host, target.port);
-    io.lock().await.print(&format!("Connecting to {address}...\n"));
+    {
+        let mut io = io.lock().await;
+        io.event(LoginEvent::Stage(Stage::Connecting));
+        io.log(format!("Connecting to {address}"));
+    }
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((target.host.as_str(), target.port)))
         .await
         .map_err(|_| format!("ssh: connect to host {address}: timed out"))?
         .map_err(|error| format!("ssh: connect to host {address}: {error}"))?;
     let _ = stream.set_nodelay(true);
+    io.lock().await.log("TCP connection established".into());
 
     let config = client::Config { keepalive_interval: Some(Duration::from_secs(30)), keepalive_max: 3, ..Default::default() };
     let verifier =
@@ -343,9 +374,15 @@ pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Ha
 
     let username = match target.username.clone().filter(|u| !u.is_empty()) {
         Some(user) => user,
-        None => io.lock().await.ask("login as: ", true).await.ok_or("Authentication cancelled.")?,
+        None => io.lock().await.ask("Username", true).await.ok_or("Authentication cancelled.")?,
     };
+    {
+        let mut io = io.lock().await;
+        io.event(LoginEvent::Stage(Stage::Authenticating));
+        io.log(format!("Authenticating as '{username}'"));
+    }
     authenticate(&mut handle, &username, target, &io).await?;
+    io.lock().await.log("Authentication succeeded".into());
     Ok(handle)
 }
 
@@ -360,10 +397,11 @@ async fn authenticate(
         return Ok(());
     }
     for path in target.identity_files.iter().filter(|p| p.is_file()) {
+        io.lock().await.log(format!("Offering public key {}", path.display()));
         let key = match load_secret_key(path, None) {
             Ok(key) => key,
             Err(_) => {
-                let prompt = format!("Enter passphrase for key '{}': ", path.display());
+                let prompt = format!("Passphrase for key '{}'", path.display());
                 let Some(passphrase) = io.lock().await.ask(&prompt, false).await else { continue };
                 match load_secret_key(path, Some(&passphrase)) {
                     Ok(key) => key,
@@ -374,11 +412,12 @@ async fn authenticate(
         let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
         let result = handle.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await;
         if result.map_err(failed)?.success() {
+            io.lock().await.log("Authenticated with public key".into());
             return Ok(());
         }
     }
     for _ in 0..PASSWORD_ATTEMPTS {
-        let prompt = format!("{user}@{}'s password: ", target.host);
+        let prompt = format!("{user}@{}'s password", target.host);
         let password = io.lock().await.ask(&prompt, false).await.ok_or("Authentication cancelled.")?;
         if handle.authenticate_password(user, &password).await.map_err(failed)?.success() {
             return Ok(());
@@ -386,7 +425,7 @@ async fn authenticate(
         if keyboard_interactive(handle, user, io).await? {
             return Ok(());
         }
-        io.lock().await.print("Permission denied, please try again.\n");
+        io.lock().await.log("Permission denied, please try again".into());
     }
     Err(format!("{user}@{}: Permission denied.", target.host))
 }
@@ -401,7 +440,7 @@ async fn keyboard_interactive(handle: &mut Handle<Verifier>, user: &str, io: &Sh
             KeyboardInteractiveAuthResponse::InfoRequest { instructions, prompts, .. } => {
                 let mut io = io.lock().await;
                 if !instructions.is_empty() {
-                    io.print(&format!("{instructions}\n"));
+                    io.log(instructions);
                 }
                 let mut answers = Vec::new();
                 for prompt in prompts {
@@ -416,14 +455,17 @@ async fn keyboard_interactive(handle: &mut Handle<Verifier>, user: &str, io: &Sh
 }
 
 /// Copies shell output to the terminal and keystrokes to the shell until either side closes.
-async fn pump(channel: russh::Channel<client::Msg>, io: Arc<Mutex<Terminal>>) -> Result<(), String> {
+async fn pump(
+    channel: russh::Channel<client::Msg>,
+    mut input: UnboundedReceiver<Input>,
+    events: UnboundedSender<SessionEvent>,
+) -> Result<(), String> {
     let (mut reader, writer) = channel.split();
-    let mut io = io.lock().await;
     loop {
         tokio::select! {
             message = reader.wait() => match message {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
-                    let _ = io.output.unbounded_send(SessionEvent::Output(data.to_vec()));
+                    let _ = events.unbounded_send(SessionEvent::Output(data.to_vec()));
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) if exit_status != 0 => {
                     return Err(format!("Remote shell exited with code {exit_status}"));
@@ -431,12 +473,12 @@ async fn pump(channel: russh::Channel<client::Msg>, io: Arc<Mutex<Terminal>>) ->
                 Some(ChannelMsg::Close | ChannelMsg::Eof) | None => return Ok(()),
                 _ => {}
             },
-            input = io.input.next() => match input {
+            item = input.next() => match item {
                 Some(Input::Data(bytes)) => writer.data_bytes(bytes).await.map_err(|e| e.to_string())?,
                 Some(Input::Resize(cols, rows)) => {
-                    io.size = (cols, rows);
                     let _ = writer.window_change(cols as u32, rows as u32, 0, 0).await;
                 }
+                Some(Input::Answer(_)) => {}
                 Some(Input::Close) | None => {
                     let _ = writer.close().await;
                     return Ok(());
@@ -459,6 +501,19 @@ pub(crate) mod tests {
                 match next {
                     Some(SessionEvent::Output(bytes)) => {
                         seen.extend(bytes);
+                        if String::from_utf8_lossy(&seen).contains(needle) {
+                            break;
+                        }
+                    }
+                    Some(SessionEvent::Login(event)) => {
+                        let text = match event {
+                            LoginEvent::HostKey(info) => format!("<hostkey {} {}>", info.algorithm, info.fingerprint),
+                            LoginEvent::Prompt { text, echo } => format!("<prompt {text} echo={echo}>"),
+                            LoginEvent::HostKeyChanged(_) => "<changed>".into(),
+                            LoginEvent::Stage(stage) => format!("<stage {stage:?}>"),
+                            LoginEvent::Log(line) => format!("<log {line}>"),
+                        };
+                        seen.extend(text.bytes());
                         if String::from_utf8_lossy(&seen).contains(needle) {
                             break;
                         }
@@ -696,16 +751,17 @@ pub(crate) mod tests {
         let known_hosts = dir.path().join("known_hosts");
         let mut session = ssh(target(server::start(), known_hosts.clone()), 100, 30);
 
-        let output = collect_until(&mut session, "(yes/no)? ");
-        assert!(output.contains("SHA256:"), "{output:?}");
-        session.write(b"yes\r");
-        let output = collect_until(&mut session, "password: ");
-        assert!(output.contains("root@127.0.0.1's password: "), "{output:?}");
-        session.write(server::PASSWORD.as_bytes());
-        session.write(b"\r");
+        let output = collect_until(&mut session, "<hostkey");
+        assert!(output.contains("<stage Connecting>") && output.contains("<stage Verifying>"), "{output:?}");
+        assert!(output.contains("<hostkey ED25519 "), "{output:?}");
+        session.answer(Answer::HostKey(HostKeyDecision::Save));
+        let output = collect_until(&mut session, "echo=false>");
+        assert!(output.contains("<prompt root@127.0.0.1's password echo=false>"), "{output:?}");
+        session.answer(Answer::Text(Some(server::PASSWORD.into())));
         let output = collect_until(&mut session, "welcome");
+        assert!(output.contains("<stage Ready>"), "{output:?}");
         assert!(output.contains("pty xterm-256color 100x30"), "{output:?}");
-        assert!(!output.contains(server::PASSWORD), "password must not be echoed");
+        assert!(!output.contains(server::PASSWORD), "password must not leak");
 
         session.write(b"ls");
         assert!(collect_until(&mut session, "echo:ls").contains("echo:ls"));
@@ -722,17 +778,30 @@ pub(crate) mod tests {
 
         let mut session = ssh(target(port, known_hosts), 80, 24);
         let output = collect_until(&mut session, "<closed");
-        assert!(output.contains("has changed"), "{output:?}");
+        assert!(output.contains("<changed>"), "{output:?}");
         assert!(output.contains("Host key verification failed"), "{output:?}");
+        assert!(!output.contains("<hostkey"), "a changed key is never offered for trust: {output:?}");
     }
 
     #[test]
     fn declining_the_host_key_closes_the_session() {
         let dir = tempfile::tempdir().unwrap();
         let mut session = ssh(target(server::start(), dir.path().join("known_hosts")), 80, 24);
-        collect_until(&mut session, "(yes/no)? ");
-        session.write(b"no\r");
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Reject));
         assert!(collect_until(&mut session, "<closed").contains("Host key verification failed"));
+        assert!(!dir.path().join("known_hosts").exists());
+    }
+
+    #[test]
+    fn continue_trusts_the_key_without_saving_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = ssh(target(server::start(), dir.path().join("known_hosts")), 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        collect_until(&mut session, "echo=false>");
+        session.answer(Answer::Text(Some(server::PASSWORD.into())));
+        assert!(collect_until(&mut session, "welcome").contains("welcome"));
         assert!(!dir.path().join("known_hosts").exists());
     }
 

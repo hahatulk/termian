@@ -42,7 +42,7 @@ npm run dev              # cargo run: хосты из профиля legacy-кл
 TERMIAN_DEMO=1 cargo run # тестовые данные без профиля и Связки ключей
 ```
 
-SSH в нативном клиенте: ключи хостов хранятся в собственном `known_hosts` (`~/Library/Application Support/termian-native/known_hosts` на macOS), новый ключ принимается только после ответа `yes`, сменившийся ключ блокирует подключение. Аутентификация: ключи `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, затем пароль или keyboard-interactive — вводятся прямо в терминале. Пароли и ключи из Vault legacy-клиента пока не используются.
+SSH в нативном клиенте: при подключении вкладка показывает экран подключения, как в legacy-клиенте (шаги, отпечаток ключа, «Close / Continue / Add and continue», запрос пароля, «Show logs», «Retry»); тот же экран используется для SFTP. Ключи хостов хранятся в собственном `known_hosts` (`~/Library/Application Support/termian-native/known_hosts` на macOS): «Continue» доверяет ключу только на эту сессию, «Add and continue» сохраняет его; сменившийся ключ блокирует подключение. Аутентификация: ключи `~/.ssh/id_ed25519`, `id_ecdsa`, `id_rsa`, затем пароль или keyboard-interactive. Пароли и ключи из Vault legacy-клиента пока не используются.
 
 Профиль legacy-клиента читается только на чтение: базы IndexedDB копируются во временный каталог. Пока поддерживается только профиль WebKit на macOS; профиль WebView2 на Windows (LevelDB) не читается.
 
