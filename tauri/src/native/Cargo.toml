@@ -1,0 +1,15 @@
+[package]
+name = "termian-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "termian-native"
+path = "src/main.rs"
+
+[dependencies]
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
