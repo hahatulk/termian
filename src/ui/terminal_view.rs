@@ -2,8 +2,8 @@
 
 use futures::StreamExt;
 use gpui::{
-    div, font, prelude::*, px, rgb, App, Context, FocusHandle, Focusable, KeyDownEvent, Pixels, ScrollDelta,
-    ScrollWheelEvent, SharedString, Window,
+    div, font, prelude::*, px, rgb, App, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Window,
 };
 use termian_native::session::{Session, SessionEvent};
 use termian_native::terminal::{self, key_bytes, paste_bytes, Modifiers, Terminal};
@@ -19,6 +19,7 @@ pub struct TerminalView {
     focus: FocusHandle,
     closed: bool,
     cell_width: Option<f32>,
+    selecting: bool,
 }
 
 impl TerminalView {
@@ -39,7 +40,7 @@ impl TerminalView {
             })
             .detach();
         }
-        Self { terminal: Terminal::new(80, 24), session, focus, closed: false, cell_width: None }
+        Self { terminal: Terminal::new(80, 24), session, focus, closed: false, cell_width: None, selecting: false }
     }
 
     fn handle(&mut self, event: SessionEvent) {
@@ -65,7 +66,11 @@ impl TerminalView {
         let keystroke = &event.keystroke;
         let mods = keystroke.modifiers;
         if mods.platform {
-            if keystroke.key == "v" {
+            if keystroke.key == "c" {
+                if let Some(text) = self.terminal.selection_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            } else if keystroke.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
                     self.session.write(&paste_bytes(&text, self.terminal.bracketed_paste()));
                 }
@@ -75,10 +80,49 @@ impl TerminalView {
         let mods = Modifiers { control: mods.control, alt: mods.alt, shift: mods.shift };
         if let Some(bytes) = key_bytes(&keystroke.key, keystroke.key_char.as_deref(), mods, self.terminal.app_cursor()) {
             self.terminal.scroll(i32::MIN / 2); // typing jumps back to the prompt
+            self.terminal.clear_selection();
             self.session.write(&bytes);
             cx.stop_propagation();
             cx.notify();
         }
+    }
+
+    /// Grid cell under a window position.
+    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
+        let x = (f32::from(position.x) - PADDING).max(0.);
+        let y = (f32::from(position.y) - TOP_INSET - PADDING).max(0.);
+        ((y / LINE_HEIGHT) as usize, (x / self.cell_width.unwrap_or(8.)).round() as usize)
+    }
+
+    fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        let (row, column) = self.cell_at(event.position);
+        self.terminal.start_selection(row, column, event.click_count == 2);
+        if event.click_count == 2 {
+            self.terminal.extend_selection(row, column);
+        }
+        self.selecting = true;
+        cx.notify();
+    }
+
+    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
+            let (row, column) = self.cell_at(event.position);
+            self.terminal.extend_selection(row, column);
+            cx.notify();
+        }
+    }
+
+    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.selecting = false;
+        if self.terminal.selection_text().is_none() {
+            self.terminal.clear_selection();
+        }
+        cx.notify();
+    }
+
+    pub fn focus(&self, window: &mut Window) {
+        window.focus(&self.focus);
     }
 
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -154,7 +198,9 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
-            .on_click(cx.listener(|view, _, window, _| window.focus(&view.focus)))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .relative()
             .size_full()
             .p(px(PADDING))

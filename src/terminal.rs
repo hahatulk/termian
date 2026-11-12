@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, TermMode};
+use alacritty_terminal::term::{viewport_to_point, Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use alacritty_terminal::Term;
 
@@ -19,6 +21,8 @@ pub const PALETTE: [u32; 16] = [
 pub const BACKGROUND: u32 = 0x0d1b2e;
 pub const FOREGROUND: u32 = 0xe2e3e8;
 pub const CURSOR: u32 = 0x21b568;
+/// Selection highlight (accent at half strength over the background).
+pub const SELECTION: u32 = 0x175a4a;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
@@ -129,8 +133,38 @@ impl Terminal {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
 
+    /// Starts a selection at a viewport cell; `word` selects whole words (double-click).
+    pub fn start_selection(&mut self, row: usize, column: usize, word: bool) {
+        let point = self.viewport_point(row, column);
+        let kind = if word { SelectionType::Semantic } else { SelectionType::Simple };
+        self.term.selection = Some(Selection::new(kind, point, Side::Left));
+    }
+
+    pub fn extend_selection(&mut self, row: usize, column: usize) {
+        let point = self.viewport_point(row, column);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, Side::Right);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// Selected text; `None` when nothing (or only an empty cell range) is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string().filter(|text| !text.is_empty())
+    }
+
+    fn viewport_point(&self, row: usize, column: usize) -> Point {
+        let (columns, rows) = self.size();
+        let point = Point::new(row.min(rows - 1), Column(column.min(columns - 1)));
+        viewport_to_point(self.term.grid().display_offset(), point)
+    }
+
     pub fn snapshot(&self) -> Snapshot {
         let content = self.term.renderable_content();
+        let selection = content.selection;
         let offset = content.display_offset as i32;
         let (columns, rows) = self.size();
         let mut lines: Vec<Vec<Run>> = vec![Vec::new(); rows];
@@ -146,6 +180,9 @@ impl Terminal {
             let (mut fg, mut bg) = (color(cell.fg, FOREGROUND), color(cell.bg, BACKGROUND));
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
+            }
+            if selection.is_some_and(|range| range.contains(indexed.point)) {
+                bg = SELECTION;
             }
             let bold = cell.flags.contains(Flags::BOLD);
             let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
@@ -322,6 +359,40 @@ mod tests {
         t.resize(30, 5);
         assert_eq!(t.size(), (30, 5));
         assert_eq!(t.snapshot().lines.len(), 5);
+    }
+
+    #[test]
+    fn selects_and_copies_text() {
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"hello world\r\nsecond line");
+        t.start_selection(0, 6, false);
+        t.extend_selection(1, 5);
+        assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
+        let runs = &t.snapshot().lines[0];
+        let highlighted = runs.iter().find(|r| r.bg == SELECTION).unwrap();
+        assert!(highlighted.text.starts_with("world"), "{highlighted:?}");
+        assert!(runs[0].text.starts_with("hello") && runs[0].bg != SELECTION);
+        t.clear_selection();
+        assert_eq!(t.selection_text(), None);
+    }
+
+    #[test]
+    fn double_click_selects_a_word() {
+        let mut t = Terminal::new(20, 1);
+        t.feed(b"cd /opt/docker now");
+        t.start_selection(0, 5, true);
+        t.extend_selection(0, 5);
+        assert_eq!(t.selection_text().as_deref(), Some("/opt/docker"));
+    }
+
+    #[test]
+    fn selection_follows_scrollback() {
+        let mut t = Terminal::new(10, 2);
+        t.feed(b"one\r\ntwo\r\nthree");
+        t.scroll(1); // viewport now shows "one" and "two"
+        t.start_selection(1, 0, false);
+        t.extend_selection(1, 2);
+        assert_eq!(t.selection_text().as_deref(), Some("two"));
     }
 
     #[test]

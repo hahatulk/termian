@@ -89,8 +89,11 @@ impl Shell {
             .text_sm()
             .text_color(rgb(theme::TEXT))
             .bg(rgb(if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
-            .on_click(cx.listener(move |shell, _, _, cx| {
+            .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
+                if let Some(view) = shell.terminals.get(&id) {
+                    view.read(cx).focus(window);
+                }
                 cx.notify();
             }))
             .child(leading)
