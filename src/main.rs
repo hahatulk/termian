@@ -31,6 +31,8 @@ pub struct Shell {
     terminals: HashMap<TabId, Entity<TerminalView>>,
     query: String,
     search_focus: FocusHandle,
+    sftp: ui::sftp::SftpState,
+    sftp_filter_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -59,6 +61,8 @@ impl Shell {
             terminals: HashMap::new(),
             query: String::new(),
             search_focus: cx.focus_handle(),
+            sftp: ui::sftp::SftpState::new(),
+            sftp_filter_focus: cx.focus_handle(),
         }
     }
 
@@ -151,6 +155,7 @@ impl Render for Shell {
             .map(|name| div().px_2().child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT))));
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
+            TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
             TabKind::Session { .. } => match self.terminals.get(&self.tabs.active().id) {
                 Some(view) => view.clone().into_any_element(),
                 None => div().into_any_element(),

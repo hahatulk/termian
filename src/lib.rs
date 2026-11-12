@@ -1,5 +1,6 @@
 //! Termian native client. Pure models live here so they are testable without a window.
 
+pub mod files;
 pub mod legacy;
 pub mod session;
 pub mod tabs;

@@ -15,7 +15,7 @@ macro_rules! icons {
 icons!(
     "hosts", "keychain", "port_forwarding", "snippets", "known_hosts", "logs", "group", "debian", "ubuntu",
     "linux", "terminal", "serial", "new_host", "search", "grid", "tag", "chevron", "sync", "download", "upload",
-    "close", "plus", "sftp", "identity",
+    "close", "plus", "sftp", "identity", "file", "folder", "link", "arrow_left", "arrow_right", "local",
 );
 
 pub struct Assets;
