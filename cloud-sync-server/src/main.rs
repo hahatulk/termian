@@ -194,7 +194,7 @@ async fn main() {
         },
         AuthLimiter::new(free_failures, Duration::from_secs(lockout), trust_forwarded_for),
     ));
-    // Local web panel: loopback only by default; "off" disables it.
+    // Web panel: loopback only by default (see SYNC_PANEL_ALLOWED_HOSTS); "off" disables it.
     let panel_addr = env::var("SYNC_PANEL_BIND").unwrap_or_else(|_| "127.0.0.1:8081".into());
     if !matches!(panel_addr.as_str(), "" | "off") {
         let panel_app = panel::make_panel(state.clone());

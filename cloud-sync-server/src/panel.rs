@@ -2,7 +2,8 @@
 //! **encryption password**, the server decrypts the stored snapshot in memory
 //! and shows its contents and the server state; the decrypted JSON can be
 //! downloaded. Nothing derived from the password is stored or logged.
-//! Protections: loopback-only Host header (DNS rebinding), JSON-only API with
+//! Protections: Host allow-list (loopback by default, `SYNC_PANEL_ALLOWED_HOSTS`
+//! adds names/IPs or `*` for any; guards against DNS rebinding), JSON-only API with
 //! a custom header (no cross-site form posts), strict CSP, and the same
 //! failed-attempt lockout as the bearer token.
 
@@ -20,7 +21,7 @@ use axum::{
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use std::{fs, time::SystemTime};
+use std::{env, fs, sync::Arc, time::SystemTime};
 
 const PAGE: &str = include_str!("panel.html");
 const ENVELOPE_VERSION: u64 = 1;
@@ -39,25 +40,60 @@ const COLLECTIONS: [(&str, &str); 12] = [
     ("workspaceTemplates", "Шаблоны рабочих областей"),
 ];
 
+/// Host names (besides loopback) the panel answers to. `None` = any host.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllowedHosts(Option<Vec<String>>);
+
+impl AllowedHosts {
+    /// Comma-separated `SYNC_PANEL_ALLOWED_HOSTS`, e.g. `192.168.1.5,sync.example.com`; `*` allows any.
+    pub fn parse(value: &str) -> Self {
+        let names: Vec<String> = value.split(',').map(|name| name.trim().to_ascii_lowercase()).filter(|name| !name.is_empty()).collect();
+        if names.iter().any(|name| name == "*") {
+            return Self(None);
+        }
+        Self(Some(names))
+    }
+
+    pub fn from_env() -> Self {
+        Self::parse(&env::var("SYNC_PANEL_ALLOWED_HOSTS").unwrap_or_default())
+    }
+
+    fn allows(&self, host: &str) -> bool {
+        let name = host_name(host);
+        match &self.0 {
+            None => true,
+            Some(names) => is_loopback_name(&name) || names.iter().any(|allowed| *allowed == name),
+        }
+    }
+}
+
 pub fn make_panel(state: Shared) -> Router {
+    make_panel_with_hosts(state, AllowedHosts::from_env())
+}
+
+pub fn make_panel_with_hosts(state: Shared, hosts: AllowedHosts) -> Router {
+    let hosts = Arc::new(hosts);
     Router::new()
         .route("/", get(page))
         .route("/api/unlock", post(unlock))
         .route("/api/export", post(export))
-        .layer(middleware::from_fn(loopback_only))
+        .layer(middleware::from_fn(move |request: Request, next: Next| {
+            let hosts = hosts.clone();
+            async move { host_guard(&hosts, request, next).await }
+        }))
         .with_state(state)
 }
 
-/// Reject any Host other than a loopback name: a malicious site resolving its
-/// own domain to 127.0.0.1 (DNS rebinding) cannot reach the panel.
-async fn loopback_only(request: Request, next: Next) -> Response {
+/// Reject any Host outside the allow-list: a malicious site resolving its own
+/// domain to the server's address (DNS rebinding) cannot reach the panel.
+async fn host_guard(hosts: &AllowedHosts, request: Request, next: Next) -> Response {
     let host = request
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
         .unwrap_or("");
-    if !is_loopback_host(host) {
-        return (StatusCode::FORBIDDEN, "panel is available only via 127.0.0.1 or localhost\n").into_response();
+    if !hosts.allows(host) {
+        return (StatusCode::FORBIDDEN, "panel host is not allowed; add it to SYNC_PANEL_ALLOWED_HOSTS\n").into_response();
     }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
@@ -72,13 +108,22 @@ async fn loopback_only(request: Request, next: Next) -> Response {
     response
 }
 
-fn is_loopback_host(host: &str) -> bool {
+fn host_name(host: &str) -> String {
     let name = if let Some(rest) = host.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
     } else {
         host.rsplit_once(':').map_or(host, |(name, _)| name)
     };
-    matches!(name.to_ascii_lowercase().as_str(), "127.0.0.1" | "localhost" | "::1")
+    name.to_ascii_lowercase()
+}
+
+fn is_loopback_name(name: &str) -> bool {
+    matches!(name, "127.0.0.1" | "localhost" | "::1")
+}
+
+#[cfg(test)]
+fn is_loopback_host(host: &str) -> bool {
+    is_loopback_name(&host_name(host))
 }
 
 async fn page() -> Response {
@@ -301,5 +346,19 @@ mod tests {
         for host in ["evil.example:8081", "127.0.0.1.evil.example", "192.168.1.5:8081", ""] {
             assert!(!is_loopback_host(host), "{host}");
         }
+    }
+
+    #[test]
+    fn allowed_hosts_extend_loopback() {
+        let default = AllowedHosts::parse("");
+        assert!(default.allows("127.0.0.1:8081"));
+        assert!(!default.allows("192.168.1.5:8081"));
+        let listed = AllowedHosts::parse(" 192.168.1.5, Sync.Example.com ");
+        assert!(listed.allows("192.168.1.5:8081"));
+        assert!(listed.allows("sync.example.com"));
+        assert!(listed.allows("localhost:8081"));
+        assert!(!listed.allows("evil.example:8081"));
+        let any = AllowedHosts::parse("*");
+        assert!(any.allows("10.0.0.7:8081") && any.allows(""));
     }
 }

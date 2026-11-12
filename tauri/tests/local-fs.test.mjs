@@ -87,3 +87,14 @@ test('Read and write streams transfer a file in chunks for SFTP pipelines', asyn
   await new Promise(resolve => empty.on('finish', resolve).end());
   assert.equal(native.files.get('/home/me/empty.txt').length, 0, 'an empty transfer still creates the file');
 });
+
+test('Write stream with start resumes without truncating the partial file', async () => {
+  const native = fakeNative();
+  const fs = createLocalFs({invoke: native.invoke});
+  const writer = fs.createWriteStream('/home/me/a.txt', {start: 10});
+  await new Promise((resolve, reject) => {
+    writer.on('error', reject).on('finish', resolve);
+    writer.end(Buffer.from('AB'));
+  });
+  assert.equal(native.files.get('/home/me/a.txt').toString(), '0123456789AB');
+});

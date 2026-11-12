@@ -349,7 +349,7 @@ function sftpAttributes(attrs = {}) {
   };
 }
 
-function createSftpFileSystem(invoke, sftp, onClosed) {
+export function createSftpFileSystem(invoke, sftp, onClosed) {
   let closed = false;
   const op = (name, args = {}) => closed
     ? Promise.resolve({code: 6, message: 'SFTP session is closed'})
@@ -360,35 +360,50 @@ function createSftpFileSystem(invoke, sftp, onClosed) {
     if (closed) return null;
     let handle = null;
     let offset = 0;
+    // Streams call read/write right after open(); hold them until the handle
+    // exists, otherwise they race the open round-trip and fail at random.
+    let opening = Promise.resolve(0);
+    const whenOpen = run => void opening.then(code => (code ? run(null, code) : run(handle, 0)));
     return {
+      // Resume support: the next read/write starts at this byte offset.
+      setOffset(position) { offset = Number(position) || 0; },
       open(path, flags, mode, callback) {
-        void op('open', {path, flags: Number(flags) || 0, mode: Number(mode) || 0}).then(result => {
+        opening = op('open', {path, flags: Number(flags) || 0, mode: Number(mode) || 0}).then(result => {
           handle = result.handle ?? null;
           callback?.(result.code);
+          return result.code;
         });
       },
       read(length, callback) {
-        void op('read', {handle, offset, length: Number(length) || 65536}).then(result => {
-          const data = Buffer.from(result.data ?? '', 'base64');
-          offset += data.length;
-          callback?.(data, !!result.eof, result.code);
+        whenOpen((current, failed) => {
+          if (failed) return void callback?.(Buffer.alloc(0), false, failed);
+          void op('read', {handle: current, offset, length: Number(length) || 65536}).then(result => {
+            const data = Buffer.from(result.data ?? '', 'base64');
+            offset += data.length;
+            callback?.(data, !!result.eof, result.code);
+          });
         });
       },
       write(data, isLast, callback) {
         if (data == null || data.length === 0) {
-          queueMicrotask(() => callback?.(0));
+          whenOpen((current, failed) => callback?.(failed));
           return;
         }
         const bytes = Buffer.from(data);
         const position = offset;
         offset += bytes.length;
-        void op('write', {handle, offset: position, data: bytes.toString('base64')}).then(result => callback?.(result.code));
+        whenOpen((current, failed) => {
+          if (failed) return void callback?.(failed);
+          void op('write', {handle: current, offset: position, data: bytes.toString('base64')}).then(result => callback?.(result.code));
+        });
       },
       close(callback) {
-        if (!handle) { queueMicrotask(() => callback?.(0)); return; }
-        const current = handle;
-        handle = null;
-        void op('close', {handle: current}).then(result => callback?.(result.code));
+        void opening.then(() => {
+          if (!handle) return void callback?.(0);
+          const current = handle;
+          handle = null;
+          void op('close', {handle: current}).then(result => callback?.(result.code));
+        });
       },
     };
   }

@@ -27,7 +27,7 @@ The default bind address is `0.0.0.0:8080` (`SYNC_BIND`); the maximum request bo
 
 ### Web panel
 
-A local panel listens on `SYNC_PANEL_BIND` (default `127.0.0.1:8081`; `off` disables it). Docker Compose publishes it on the host's `127.0.0.1:8081` only. Open <http://127.0.0.1:8081> and enter the **encryption password** from Termian's «Своё облако» settings. The server decrypts the snapshot in memory to verify it; the password is never stored or logged.
+The web panel listens on `SYNC_PANEL_BIND` (default `127.0.0.1:8081`; `off` disables it). By default it answers only to `127.0.0.1`/`localhost`; `SYNC_PANEL_ALLOWED_HOSTS` adds comma-separated names or IPs (e.g. `192.168.1.5,sync.example.com`) or `*` for any host. Docker Compose binds `0.0.0.0:8081` with `SYNC_PANEL_ALLOWED_HOSTS=*` unless you override it in `.env`. Open <http://127.0.0.1:8081> (or `http://<server>:8081`) and enter the **encryption password** from Termian's «Своё облако» settings. The server decrypts the snapshot in memory to verify it; the password is never stored or logged.
 
 After unlocking the panel shows:
 
@@ -37,7 +37,7 @@ After unlocking the panel shows:
 
 **Выгрузить данные (JSON)** downloads the decrypted snapshot — the same JSON the client imports. It contains passwords and private keys in plain text.
 
-Protection: requests with a non-loopback `Host` are rejected (DNS rebinding), the API accepts only JSON with an `X-Termian-Panel` header (no cross-site form posts), a strict CSP is sent, and wrong passwords use the same lockout as wrong tokens. For remote access use an SSH tunnel: `ssh -L 8081:127.0.0.1:8081 server`.
+Protection: requests with a `Host` outside the allow-list are rejected (DNS rebinding; `*` turns this check off), the API accepts only JSON with an `X-Termian-Panel` header (no cross-site form posts), a strict CSP is sent, and wrong passwords use the same lockout as wrong tokens. The panel speaks plain HTTP: over an untrusted network the encryption password travels unencrypted, so prefer listing exact hosts behind an HTTPS reverse proxy, a VPN, or an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 server`).
 
 ### Failed authorization limit
 

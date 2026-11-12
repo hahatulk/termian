@@ -93,9 +93,10 @@ export function createLocalFs({ invoke, onPermissionDenied = () => {} }) {
   }
 
   function createWriteStream(path, options = {}) {
-    let position = 0;
+    // `start` resumes an interrupted transfer: keep the existing bytes.
+    let position = options.start ?? 0;
     // Create/truncate up front, like Node; 'open' fires once the file exists.
-    const opened = call('truncate', path, { mode: options.mode });
+    const opened = position ? Promise.resolve() : call('truncate', path, { mode: options.mode });
     const stream = new Writable({
       highWaterMark: MAX_CHUNK,
       write(chunk, _encoding, done) {

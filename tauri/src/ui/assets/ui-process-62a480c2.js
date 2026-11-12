@@ -1840,10 +1840,10 @@ function Ere(t12) {
   return e;
 }
 class kre extends Tre {
-  constructor(n, o) {
+  constructor(n, o, s) {
     super({ highWaterMark: 6e4 });
     I(this, "file");
-    this.file = Ere(n), this.file.open(o, J1.O_RDONLY, 0, (r) => {
+    this.file = Ere(n), s && this.file.setOffset(s), this.file.open(o, J1.O_RDONLY, 0, (r) => {
       this.maybeEmitError(r);
     });
   }
@@ -1865,7 +1865,7 @@ class kre extends Tre {
     return n !== 0 ? (this.emit("error", Wo.get(n)), true) : false;
   }
 }
-const Rre = J1.O_WRONLY | J1.O_CREAT | J1.O_TRUNC;
+const Rre = J1.O_WRONLY | J1.O_CREAT | J1.O_TRUNC, RreResume = J1.O_WRONLY | J1.O_CREAT;
 function Pre(t12) {
   const e = t12.getFile("write");
   if (!e) throw new Error("SFTP session has been closed");
@@ -1875,11 +1875,11 @@ function Lre(t12) {
   return new Error(Wo.get(t12));
 }
 class Mre extends rD {
-  constructor(n, o, r) {
+  constructor(n, o, r, s) {
     super({ highWaterMark: 6e4 });
     I(this, "file");
     I(this, "path");
-    this.path = o, this.file = Pre(n), this.file.open(o, Rre, r, (i) => {
+    this.path = o, this.file = Pre(n), s && this.file.setOffset(s), this.file.open(o, s ? RreResume : Rre, r, (i) => {
       i !== 0 && this.emit("error", Wo.get(i));
     });
   }
@@ -1964,8 +1964,13 @@ class Ore {
         r ? o(Wo.get(r)) : o();
       });
     });
-    I(this, "createReadStream", (e10) => new kre(this.fs, e10));
-    I(this, "createWriteStream", (e10, { mode: n }) => new Mre(this.fs, e10, n));
+    I(this, "size", (e10, n) => {
+      this.fs.stat(e10, (o, r) => {
+        o ? n(Wo.get(o)) : n(null, r.size);
+      });
+    });
+    I(this, "createReadStream", (e10, n = {}) => new kre(this.fs, e10, n.start));
+    I(this, "createWriteStream", (e10, { mode: n, start: o } = {}) => new Mre(this.fs, e10, n, o));
     this.fs = e;
   }
 }
@@ -14300,7 +14305,8 @@ class uC {
     I(this, "unlink", (...e) => this.fs.unlink(...e));
     I(this, "mkdir", (...e) => this.fs.mkdir(...e));
     I(this, "chmod", (...e) => this.fs.chmod(...e));
-    I(this, "createReadStream", (...e) => this.fs.createReadStream(...e, { highWaterMark: 6e4 }));
+    I(this, "size", async (e) => (await this.fs.stat(e)).size);
+    I(this, "createReadStream", (e, n = {}) => this.fs.createReadStream(e, { ...n, highWaterMark: 6e4 }));
     I(this, "createWriteStream", (...e) => this.fs.createWriteStream(...e));
     this.fs = a5(Od);
   }
@@ -14355,7 +14361,7 @@ var ghe = function(t12) {
     return o.length < bm ? c : (c - d) * bm / o.length;
   };
 };
-const vhe = xt(ghe), yhe = 1e3;
+const vhe = xt(ghe), yhe = 1e3, TRANSFER_AUTO_RETRIES = 6, TRANSFER_FATAL_ERRORS = ["Permission denied", "No such file", "No such path", "Write protect", "No space on file system", "Quota exceeded", "Invalid filename", "Not a directory", "EACCES", "EPERM", "ENOSPC"];
 class Che extends m9 {
   constructor(n) {
     super();
@@ -14396,22 +14402,54 @@ class She extends m9 {
     I(this, "toRemove");
     I(this, "deferredFiles");
     I(this, "isSkipAllFilesWithError");
+    I(this, "isClosed", false);
+    I(this, "isWriting", false);
+    I(this, "startedFiles", /* @__PURE__ */ new Set());
     I(this, "_emitStartFileTransferEvent", () => {
     });
     this.source = n.source, this.sourcePath = n.sourcePath, this.destination = n.destination, this.destinationPath = n.destinationPath, this.filesTransferred = 0, this.data = this.prepareData(n.data), this.filesCount = this.data.files.length, this.transferredLength = 0, this.item = this.getTransferStreamDataItem(n.data[0]), this.currentItemName = "", this.deferredFiles = [], this.toTransfer = this.prepareDataToStart(this.data), this.toRemove = this.prepareToRemove(n.data), this.isSkipAllFilesWithError = false, this.progress = new Che(this.data.length), this.progress.on("progress", (o) => {
       this._emitStartFileTransferEvent(), this.emit("progress", { ...o, filesTransferred: this.filesTransferred });
     });
   }
-  async fileTransferer(n, o) {
+  async resumeOffset(n, o) {
+    if (!this.startedFiles.has(n)) return 0;
     try {
-      const r = this.sourcePath ? new wi(this.sourcePath).join(n.path) : this.source.path.join(n.path), i = this.destinationPath ? new wi(this.destinationPath).join(o) : this.destination.path.join(o), s = this.destination.sessionId;
-      this.item = n, this.currentItemName = i;
-      const a = this.source.client.createReadStream(r);
-      this.readStream = a;
-      const l = this.destination.client.createWriteStream(i, { mode: n.origin.attrs.mode });
-      this.writeStream = l, this._emitStartFileTransferEvent = q6(() => this.emit("startTransferFile", i, s)), await fhe(a, l, this.progress), this.filesTransferred += 1, this.transferredLength += n.origin.attrs.size;
-    } catch (r) {
-      this.isSkipAllFilesWithError ? this.filesTransferred += 1 : this.deferredFiles.push({ source: n, destination: o, error: `${r} while transferring "${this.currentItemName}".` });
+      const r = await this.destination.client.size(n);
+      return r > 0 && r <= o ? r : 0;
+    } catch {
+      return 0;
+    }
+  }
+  isRetryableError(n) {
+    const o = `${(n == null ? void 0 : n.message) ?? n}`;
+    return !TRANSFER_FATAL_ERRORS.some((r) => o.includes(r));
+  }
+  async fileTransferer(n, o) {
+    // Resumes a partially written file from the destination size and retries
+    // transient (network) failures with back-off before asking the user.
+    const c = this.progress.transferredLength;
+    for (let d = 0; ; d++) {
+      if (this.isClosed) return;
+      try {
+        const r = this.sourcePath ? new wi(this.sourcePath).join(n.path) : this.source.path.join(n.path), i = this.destinationPath ? new wi(this.destinationPath).join(o) : this.destination.path.join(o), s = this.destination.sessionId;
+        this.item = n, this.currentItemName = i;
+        const u = await this.resumeOffset(i, n.origin.attrs.size);
+        if (this.isClosed) return;
+        this.progress.setTransferredLength(c + u);
+        const a = this.source.client.createReadStream(r, u ? { start: u } : {});
+        this.readStream = a;
+        const l = this.destination.client.createWriteStream(i, { mode: n.origin.attrs.mode, start: u });
+        this.writeStream = l, this.startedFiles.add(i), this.isWriting = true, this._emitStartFileTransferEvent = q6(() => this.emit("startTransferFile", i, s)), await fhe(a, l, this.progress), this.isWriting = false, this.filesTransferred += 1, this.transferredLength += n.origin.attrs.size;
+        return;
+      } catch (r) {
+        if (this.isWriting = false, this.isClosed) return;
+        if (d < TRANSFER_AUTO_RETRIES && this.isRetryableError(r)) {
+          await xo(Math.min(1e3 * 2 ** d, 15e3));
+          continue;
+        }
+        this.isSkipAllFilesWithError ? this.filesTransferred += 1 : this.deferredFiles.push({ source: n, destination: o, error: `${r} while transferring "${this.currentItemName}".` });
+        return;
+      }
     }
   }
   async createDirectories(n) {
@@ -14484,24 +14522,36 @@ class She extends m9 {
     this.isSkipAllFilesWithError ? (n.forEach((o) => this.skipItem(o.source.path)), await this.start()) : this.emit("error", n);
   }
   async start() {
+    if (this.isClosed) return;
     try {
       await this.remove(), this.progress.setTransferredLength(this.transferredLength);
       const { dirs: n, files: o, links: r } = this.prepareDataToStart(this.toTransfer);
-      await this.createDirectories(n), await this.createLinks(r), await this.transferFiles(o), this.deferredFiles.length ? this.resolveError(this.deferredFiles) : this.emit("end");
+      if (await this.createDirectories(n), await this.createLinks(r), await this.transferFiles(o), this.isClosed) return;
+      this.deferredFiles.length ? this.resolveError(this.deferredFiles) : this.emit("end");
     } catch (n) {
+      if (this.isClosed) return;
       const { path: o, origin: r } = this.item;
       this.resolveError([{ source: { path: o, origin: r }, destination: "", error: `${n} while transferring "${this.currentItemName}".` }]);
     }
   }
   async close() {
+    // Discard must work even on a dead connection: never wait for the server.
+    if (this.isClosed) return;
+    this.isClosed = true;
     let n = this.currentItemName;
-    const o = this.destination.sessionId;
-    if (this.readStream && this.readStream.close(), this.writeStream) {
-      this.writeStream.end(), n = this.writeStream.path;
+    const o = this.destination.sessionId, { readStream: r, writeStream: i, isWriting: s } = this;
+    try {
+      r && (r.close ? r.close() : r.destroy());
+    } catch {
+    }
+    if (i) {
+      n = i.path || n;
       try {
-        await this.destination.client.unlink(n);
+        i.close ? i.close() : i.destroy();
       } catch {
       }
+      s && Promise.resolve().then(() => this.destination.client.unlink(n)).catch(() => {
+      });
     }
     this.emit("close", n, o);
   }
@@ -15648,15 +15698,30 @@ function Z9(t12) {
   }, { extension: m, isDirectory: g } = n.item.origin;
   return p(G9, { className: ue(i.streamProgressBar, e), name: n.item.path, extension: m, error: l ? "" : s.error, onErrorClick: u, isProgressVisible: !s.error, percentage: s.percentage, fileInfo: P(be.Fragment, { children: [g && P("span", { className: i.infoItem, children: [" ", s.filesTransferred, " of ", s.filesCount, " files,"] }), P("span", { className: i.infoItem, children: [" ", s.transferred, "/", s.length, ","] }), P("span", { className: i.infoItem, children: [" ", s.speed, "/s,"] }), !!s.remaining && P("span", { className: i.infoItem, children: [" ", s.remaining] })] }), actions: P(be.Fragment, { children: [s.error && !l && p(ds, { onClick: d, children: "Retry" }), p(ds, { isRegular: true, onClick: h, children: "Discard" })] }) });
 }
-const cme = G()({ streamProgressBar: { height: "40px", padding: "0 10px" }, infoItem: { display: "inline", maxWidth: "30%", textOverflow: "ellipsis", overflow: "hidden", "&:last-child": { maxWidth: "10%" } } }), dme = "" + new URL("close-55652b4b.svg", import.meta.url).href, ume = "" + new URL("error-ea2607c2.svg", import.meta.url).href, pme = () => ({ wrapper: { display: "flex", alignItems: "center", height: 30, padding: "0 20px", backgroundColor: Nn.colors.primary.medium, color: Nn.colors.secondary.dark, borderTop: `1px solid ${Nn.colors.primary.dark}`, boxSizing: "content-box" }, info: { display: "flex", flex: 2, overflow: "hidden", whiteSpace: "nowrap", marginRight: 20 }, progress: { display: "flex", flex: 1.5, alignItems: "center" }, infoItem: { maxWidth: "30%", textOverflow: "ellipsis", overflow: "hidden", "&:last-child": { maxWidth: "10%" } }, button: { display: "flex", flexShrink: 0, alignItems: "center", justifyContent: "center", background: "inherit", borderRadius: "50%", width: 20, height: 20, marginRight: 5, border: "none", "&:focus": { outline: 0 } }, closeIcon: { content: `url(${dme})` }, errorIcon: { content: `url(${ume})` }, warningIcon: { width: 8, height: 9 }, progressBarsContainer: { backgroundColor: "var(--light-grey-4)", "&.termius-dark-theme, .termius-dark-theme &": { backgroundColor: "var(--dark-grey-3)" }, maxHeight: "20%", overflow: "auto" } });
+const cme = G()({ streamProgressBar: { height: "40px", padding: "0 10px" }, infoItem: { display: "inline", maxWidth: "30%", textOverflow: "ellipsis", overflow: "hidden", "&:last-child": { maxWidth: "10%" } } }), dme = "" + new URL("close-55652b4b.svg", import.meta.url).href, ume = "" + new URL("error-ea2607c2.svg", import.meta.url).href, pme = () => ({ wrapper: { display: "flex", alignItems: "center", height: 30, padding: "0 20px", backgroundColor: Nn.colors.primary.medium, color: Nn.colors.secondary.dark, borderTop: `1px solid ${Nn.colors.primary.dark}`, boxSizing: "content-box" }, info: { display: "flex", flex: 2, overflow: "hidden", whiteSpace: "nowrap", marginRight: 20 }, progress: { display: "flex", flex: 1.5, alignItems: "center" }, infoItem: { maxWidth: "30%", textOverflow: "ellipsis", overflow: "hidden", "&:last-child": { maxWidth: "10%" } }, button: { display: "flex", flexShrink: 0, alignItems: "center", justifyContent: "center", background: "inherit", borderRadius: "50%", width: 20, height: 20, marginRight: 5, border: "none", "&:focus": { outline: 0 } }, closeIcon: { content: `url(${dme})` }, errorIcon: { content: `url(${ume})` }, warningIcon: { width: 8, height: 9 }, progressBarsContainer: { backgroundColor: "var(--light-grey-4)", "&.termius-dark-theme, .termius-dark-theme &": { backgroundColor: "var(--dark-grey-3)" }, flexShrink: 0 }, summary: { display: "flex", alignItems: "center", paddingRight: 10 }, summaryItem: { flex: 1, minWidth: 0 } });
+function TransfersDialogContent({ streams: t12, showError: e, onClose: n }) {
+  const { classes: o } = transfersDialogStyles(), r = () => {
+    for (const [, i] of t12) i.close();
+    n();
+  };
+  return p(Q6, { title: "Transfers", onClose: n, actionButtons: [{ children: "Discard all", onClick: r, color: "error", className: o.leftSideButton, type: "button" }, { children: "Close", onClick: n, color: "accent", type: "button" }], children: p("div", { className: o.list, children: t12.map(([i, s]) => p(Z9, { className: o.item, showError: e, stream: s }, i)) }) });
+}
+const transfersDialogStyles = G()({ list: { display: "flex", flexDirection: "column", gap: "6px", maxHeight: "50vh", overflowY: "auto", margin: "0 -10px" }, item: { borderRadius: "8px", "--bg": "var(--light-grey-5)", ".termius-dark-theme &": { "--bg": "var(--dark-grey-5)" }, background: "var(--bg)" }, leftSideButton: { marginRight: "auto" } }), TransfersDialog = Ii(TransfersDialogContent, { hasBackdrop: true });
 class hme extends f.Component {
+  constructor() {
+    super(...arguments);
+    I(this, "state", { isListOpen: false });
+    I(this, "openList", () => this.setState({ isListOpen: true }));
+    I(this, "closeList", () => this.setState({ isListOpen: false }));
+  }
+  componentDidUpdate() {
+    this.state.isListOpen && ![...this.props.transferStreams].length && this.closeList();
+  }
   render() {
-    const e = tt.getClasses(this.props), n = () => {
-      const o = [];
-      for (const [r, i] of this.props.transferStreams) o.unshift(p(Z9, { showError: this.props.showError, stream: i }, r));
-      return o;
-    };
-    return p("div", { className: ue(e.progressBarsContainer), children: n() });
+    const e = tt.getClasses(this.props), n = [...this.props.transferStreams].reverse();
+    if (!n.length) return p("div", { className: ue(e.progressBarsContainer) });
+    const [o, r] = n[0];
+    return P("div", { className: ue(e.progressBarsContainer), children: [P("div", { className: e.summary, children: [p(Z9, { className: e.summaryItem, showError: this.props.showError, stream: r }, o), p(ds, { isRegular: true, onClick: this.openList, title: "Show all transfers", children: n.length > 1 ? `All transfers (${n.length})` : "Details" })] }), p(xe, { when: this.state.isListOpen, children: p(TransfersDialog, { streams: n, showError: this.props.showError, onClose: this.closeList }) })] });
   }
 }
 const fme = (t12) => ({ transferStreams: Qte(t12) }), mme = tt(bo(fme)(hme), pme, { name: "ConnectedProgressContainer" }), Vx = ec("open"), gme = ({ error: t12, onReconnect: e, onClose: n }) => p(Q6, { title: "Connection closed", titleColor: "error", onSubmit: e, onClose: n, text: t12 && `Closed with error: ${t12}`, actionButtons: [{ children: "Reconnect", color: "accent", type: "submit" }] }), vme = Ii(gme, { hasBackdrop: true }), yme = ({ changedFiles: t12, hostname: e, onConfirm: n, onClose: o }) => {

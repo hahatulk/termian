@@ -6,12 +6,15 @@
 use crate::ssh_client::{client_handle, SshClients};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use russh_sftp::client::{error::Error as SftpError, RawSftpSession};
-use russh_sftp::protocol::{FileAttributes, OpenFlags, StatusCode};
+use russh_sftp::protocol::{FileAttributes, OpenFlags, Status, StatusCode};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 const MAX_READ: u32 = 256 * 1024;
+// russh-sftp gives up on a request after 10 s by default, which fails healthy
+// transfers on slow or lossy links. Dead connections are still detected by SSH.
+const REQUEST_TIMEOUT_SECS: u64 = 120;
 // Values the bridge exposes as fs.constants (src/bridge/node-shims.js).
 const O_WRONLY: u32 = 1;
 const O_RDWR: u32 = 2;
@@ -26,8 +29,15 @@ pub struct SftpSessions(Mutex<HashMap<String, Arc<RawSftpSession>>>);
 fn status_code(error: &SftpError) -> u32 {
     match error {
         SftpError::Status(status) => status.status_code as u32,
+        // Transport problems: the renderer shows "Connection lost" and retries.
+        SftpError::Timeout | SftpError::IO(_) | SftpError::UnexpectedBehavior(_) => StatusCode::ConnectionLost as u32,
         _ => StatusCode::Failure as u32,
     }
+}
+
+// A malformed renderer request, kept apart from transport errors.
+fn bad_message(message: String) -> SftpError {
+    SftpError::Status(Status { id: 0, status_code: StatusCode::BadMessage, error_message: message, language_tag: "en".into() })
 }
 
 fn failure(error: SftpError) -> Value {
@@ -85,6 +95,7 @@ pub async fn sftp_start(
     let channel = handle.channel_open_session().await.map_err(|error| error.to_string())?;
     channel.request_subsystem(true, "sftp").await.map_err(|error| error.to_string())?;
     let session = RawSftpSession::new(channel.into_stream());
+    session.set_timeout(REQUEST_TIMEOUT_SECS);
     session.init().await.map_err(|error| error.to_string())?;
     sessions
         .0
@@ -180,7 +191,7 @@ async fn run(session: &RawSftpSession, op: &str, args: &Value) -> Result<Value, 
             }
         }
         "write" => {
-            let data = STANDARD.decode(arg_str(args, "data")).map_err(|_| SftpError::UnexpectedBehavior("invalid data".into()))?;
+            let data = STANDARD.decode(arg_str(args, "data")).map_err(|_| bad_message("invalid data".into()))?;
             session.write(arg_str(args, "handle"), arg_u64(args, "offset"), data).await?;
             json!({})
         }
@@ -188,7 +199,7 @@ async fn run(session: &RawSftpSession, op: &str, args: &Value) -> Result<Value, 
             session.close(arg_str(args, "handle")).await?;
             json!({})
         }
-        other => return Err(SftpError::UnexpectedBehavior(format!("unsupported SFTP operation {other}"))),
+        other => return Err(bad_message(format!("unsupported SFTP operation {other}"))),
     })
 }
 
@@ -232,5 +243,12 @@ mod tests {
             open_flags(O_RDWR | O_APPEND).bits(),
             (OpenFlags::READ | OpenFlags::WRITE | OpenFlags::APPEND).bits()
         );
+    }
+
+    #[test]
+    fn transport_errors_are_reported_as_connection_lost() {
+        assert_eq!(status_code(&SftpError::Timeout), StatusCode::ConnectionLost as u32);
+        assert_eq!(status_code(&SftpError::IO("broken pipe".into())), StatusCode::ConnectionLost as u32);
+        assert_eq!(status_code(&SftpError::UnexpectedPacket), StatusCode::Failure as u32);
     }
 }

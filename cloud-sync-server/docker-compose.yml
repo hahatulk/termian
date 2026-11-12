@@ -11,6 +11,8 @@ services:
       SYNC_AUTH_LOCKOUT_SECONDS: "${SYNC_AUTH_LOCKOUT_SECONDS:-30}"
       SYNC_LOG_RETENTION_DAYS: "${SYNC_LOG_RETENTION_DAYS:-60}"
       SYNC_PANEL_BIND: "0.0.0.0:8081"
+      # Host names/IPs the panel answers to besides localhost; "*" = any.
+      SYNC_PANEL_ALLOWED_HOSTS: "${SYNC_PANEL_ALLOWED_HOSTS:-*}"
     ports:
       - "8080:8080"
       - "8081:8081"
