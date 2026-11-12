@@ -1,9 +1,14 @@
 mod ui;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, SharedString, Stateful,
+    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, Entity, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
+use std::collections::HashMap;
+use termian_native::session::{self, SshTarget};
+use termian_native::tabs::TabId;
+use termian_native::vault::HostId;
+use ui::terminal_view::TerminalView;
 use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
 use termian_native::theme;
@@ -23,6 +28,7 @@ pub struct Shell {
     vault_error: Option<String>,
     section: Section,
     group: Option<GroupId>,
+    terminals: HashMap<TabId, Entity<TerminalView>>,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -46,7 +52,7 @@ impl Shell {
             Ok(vault) => (vault, None),
             Err(error) => (Vault::default(), Some(error)),
         };
-        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts, group: None }
+        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts, group: None, terminals: HashMap::new() }
     }
 
     fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
@@ -65,6 +71,7 @@ impl Shell {
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     cx.stop_propagation();
                     shell.tabs.close(id);
+                    shell.terminals.remove(&id);
                     cx.notify();
                 }))
         } else {
@@ -91,6 +98,29 @@ impl Shell {
     }
 }
 
+impl Shell {
+    fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
+        let id = self.tabs.open(TabKind::Session { title });
+        let view = cx.new(|cx| TerminalView::new(session, window, cx));
+        self.terminals.insert(id, view);
+        cx.notify();
+    }
+
+    pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(host) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
+        let target = SshTarget::new(&host.address, host.username.clone());
+        let title = host.label.clone();
+        self.open_terminal(title, session::ssh(target, 80, 24), window, cx);
+    }
+
+    pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match session::local_shell(80, 24) {
+            Ok(session) => self.open_terminal("Local".into(), session, window, cx),
+            Err(error) => self.vault_error = Some(format!("Could not start a local shell: {error}")),
+        }
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, cx)).collect();
@@ -98,6 +128,10 @@ impl Render for Shell {
             .map(|name| div().px_2().child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT))));
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(cx),
+            TabKind::Session { .. } => match self.terminals.get(&self.tabs.active().id) {
+                Some(view) => view.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             _ => div().into_any_element(),
         };
 

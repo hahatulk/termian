@@ -159,7 +159,9 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(tool_button("new-host", "new_host", "NEW HOST"))
-            .child(tool_button("terminal", "terminal", "TERMINAL"))
+            .child(tool_button("terminal", "terminal", "TERMINAL").on_click(cx.listener(|shell, _, window, cx| {
+                shell.open_local_terminal(window, cx);
+            })))
             .child(tool_button("serial", "serial", "SERIAL"))
             .child(div().flex_1())
             .child(glyph("grid", 16., theme::TEXT))
@@ -186,7 +188,16 @@ impl Shell {
         let hosts = self.vault.hosts_under(self.group);
         if !hosts.is_empty() {
             body = body.child(section_title("Hosts")).child(div().grid().grid_cols(4).gap_3().children(
-                hosts.into_iter().map(|h| card(format!("host-{}", h.id).into(), host_tile(h), h.label.clone(), h.subtitle())),
+                hosts.into_iter().map(|h| {
+                    let id = h.id;
+                    card(format!("host-{id}").into(), host_tile(h), h.label.clone(), h.subtitle()).on_click(cx.listener(
+                        move |shell, event: &gpui::ClickEvent, window, cx| {
+                            if event.click_count() >= 2 {
+                                shell.connect_host(id, window, cx);
+                            }
+                        },
+                    ))
+                }),
             ));
         }
 
