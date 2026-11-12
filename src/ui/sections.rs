@@ -1,0 +1,145 @@
+//! Vaults sections other than Hosts: Keychain, Port Forwarding, Snippets,
+//! Known Hosts, Logs. Read-only for now.
+
+use gpui::{div, prelude::*, px, rgb, svg, ClickEvent, Context, Div, SharedString, Stateful};
+use termian_native::theme;
+
+use super::assets::icon;
+use super::hosts::{card, section_title, tile, tool_button};
+use crate::Shell;
+
+/// Toolbar row plus a scrollable body, shared by every section.
+fn page(id: &str, toolbar: Vec<Stateful<Div>>, body: impl IntoElement) -> Div {
+    div()
+        .flex_1()
+        .h_full()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .h(px(56.))
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_2()
+                .border_b_1()
+                .border_color(rgb(theme::TITLE_BAR))
+                .bg(rgb(theme::SIDEBAR))
+                .children(toolbar)
+                .child(div().flex_1())
+                .child(svg().path(icon("search")).size(px(18.)).text_color(rgb(theme::TEXT))),
+        )
+        .child(div().id(SharedString::from(id.to_owned())).flex_1().overflow_y_scroll().px_5().pb_5().child(body))
+}
+
+fn grid() -> Div {
+    div().grid().grid_cols(4).gap_3()
+}
+
+/// Centered illustration and text shown when a section has no items.
+fn empty_state(icon_name: &str, title: &str, text: &str) -> Div {
+    div()
+        .pt(px(220.))
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap_3()
+        .child(
+            div()
+                .size(px(60.))
+                .rounded_xl()
+                .bg(rgb(theme::SURFACE))
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(svg().path(icon(icon_name)).size(px(28.)).text_color(rgb(theme::TEXT))),
+        )
+        .child(div().pt_4().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title.to_owned()))
+        .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(text.to_owned()))
+}
+
+impl Shell {
+    pub fn render_keychain(&self) -> Div {
+        let vault = &self.vault;
+        let mut body = div();
+        if !vault.keys.is_empty() {
+            body = body.child(section_title("Keys")).child(grid().children(vault.keys.iter().map(|key| {
+                card(format!("key-{}", key.id).into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle())
+            })));
+        }
+        if !vault.identities.is_empty() {
+            body = body.child(section_title("Identities")).child(grid().children(vault.identities.iter().map(|identity| {
+                card(
+                    format!("identity-{}", identity.id).into(),
+                    tile("identity", theme::TILE_BLUE),
+                    identity.label.clone(),
+                    identity.subtitle().to_owned(),
+                )
+            })));
+        }
+        if vault.keys.is_empty() && vault.identities.is_empty() {
+            body = body.child(empty_state("keychain", "Add a key", "Keys and identities you save appear here."));
+        }
+        page("keychain-scroll", vec![], body)
+    }
+
+    pub fn render_port_forwarding(&self) -> Div {
+        page(
+            "forwarding-scroll",
+            vec![tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING")],
+            empty_state(
+                "port_forwarding",
+                "Set up port forwarding",
+                "Save port forwarding to access databases, web apps, and other services.",
+            ),
+        )
+    }
+
+    pub fn render_snippets(&self, cx: &mut Context<Self>) -> Div {
+        let snippets = &self.vault.snippets;
+        let body = if snippets.is_empty() {
+            empty_state("snippets", "Create a snippet", "Save commands you run often.")
+        } else {
+            div().child(section_title("Snippets")).child(grid().children(snippets.iter().map(|snippet| {
+                let script = snippet.script.clone();
+                card(
+                    format!("snippet-{}", snippet.id).into(),
+                    tile("snippets", theme::TILE_BLUE),
+                    snippet.label.clone(),
+                    snippet.subtitle().unwrap_or_default().to_owned(),
+                )
+                .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
+                    if event.click_count() >= 2 {
+                        shell.run_in_terminal(&script, window, cx);
+                    }
+                }))
+            })))
+        };
+        page(
+            "snippets-scroll",
+            vec![tool_button("new-snippet", "snippets", "NEW SNIPPET"), tool_button("shell-history", "logs", "SHELL HISTORY")],
+            body,
+        )
+    }
+
+    pub fn render_known_hosts(&self) -> Div {
+        let known = &self.vault.known_hosts;
+        let body = if known.is_empty() {
+            empty_state("known_hosts", "No known hosts", "Host keys you trust appear here after the first connection.")
+        } else {
+            div().child(section_title("Known Hosts")).child(grid().children(known.iter().map(|entry| {
+                card(format!("known-{}", entry.id).into(), tile("known_hosts", theme::TILE_BLUE), entry.host.clone(), String::new())
+            })))
+        };
+        page("known-scroll", vec![tool_button("import-known", "download", "IMPORT")], body)
+    }
+
+    pub fn render_logs(&self) -> Div {
+        page(
+            "logs-scroll",
+            vec![],
+            empty_state("logs", "Logs are not ported yet", "Session history from the legacy client is not read by the native client yet."),
+        )
+    }
+}

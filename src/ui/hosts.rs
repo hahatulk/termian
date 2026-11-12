@@ -31,7 +31,7 @@ fn glyph(name: &str, size: f32, color: u32) -> impl IntoElement {
     svg().path(icon(name)).size(px(size)).flex_none().text_color(rgb(color))
 }
 
-fn tile(name: &str, background: u32) -> Div {
+pub(super) fn tile(name: &str, background: u32) -> Div {
     div()
         .size(px(40.))
         .flex_none()
@@ -52,7 +52,7 @@ fn host_tile(host: &Host) -> Div {
     }
 }
 
-fn card(id: SharedString, tile: Div, title: String, subtitle: String) -> Stateful<Div> {
+pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String) -> Stateful<Div> {
     div()
         .id(id)
         .h(px(60.))
@@ -72,7 +72,9 @@ fn card(id: SharedString, tile: Div, title: String, subtitle: String) -> Statefu
                 .flex_col()
                 .overflow_hidden()
                 .child(div().text_color(rgb(theme::TEXT)).truncate().child(title))
-                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).truncate().child(subtitle)),
+                .when(!subtitle.is_empty(), |d| {
+                    d.child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).truncate().child(subtitle))
+                }),
         )
 }
 
@@ -80,11 +82,11 @@ fn caret() -> Div {
     div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))
 }
 
-fn section_title(title: &str) -> Div {
+pub(super) fn section_title(title: &str) -> Div {
     div().pt_5().pb_3().text_color(rgb(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.to_owned())
 }
 
-fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Div> {
+pub(super) fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Div> {
     div()
         .id(SharedString::from(id.to_owned()))
         .h(px(26.))
@@ -105,14 +107,11 @@ impl Shell {
     pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let content = match self.section {
             Section::Hosts => self.render_hosts(window, cx).into_any_element(),
-            _ => div()
-                .flex_1()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(theme::TEXT_MUTED))
-                .child("This screen is not ported to the native client yet.")
-                .into_any_element(),
+            Section::Keychain => self.render_keychain().into_any_element(),
+            Section::PortForwarding => self.render_port_forwarding().into_any_element(),
+            Section::Snippets => self.render_snippets(cx).into_any_element(),
+            Section::KnownHosts => self.render_known_hosts().into_any_element(),
+            Section::Logs => self.render_logs().into_any_element(),
         };
         div().size_full().flex().child(self.render_sidebar(cx)).child(content).into_any_element()
     }

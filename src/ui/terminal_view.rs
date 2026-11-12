@@ -121,6 +121,15 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// Types `text` into the session as if pasted, followed by Enter.
+    pub fn run(&mut self, text: &str) {
+        if !self.closed {
+            self.terminal.scroll(i32::MIN / 2);
+            self.session.write(&paste_bytes(text, false));
+            self.session.write(b"\r");
+        }
+    }
+
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus);
     }

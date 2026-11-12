@@ -123,6 +123,19 @@ impl Shell {
         self.open_terminal(title, session::ssh(target, 80, 24), window, cx);
     }
 
+    /// Runs a snippet in the most recently opened terminal, starting a local one if none is open.
+    pub fn run_in_terminal(&mut self, script: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminals.is_empty() {
+            self.open_local_terminal(window, cx);
+        }
+        let Some((&id, view)) = self.terminals.iter().max_by_key(|(id, _)| **id) else { return };
+        let view = view.clone();
+        self.tabs.activate(id);
+        view.update(cx, |view, _| view.run(script));
+        view.read(cx).focus(window);
+        cx.notify();
+    }
+
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         match session::local_shell(80, 24) {
             Ok(session) => self.open_terminal("Local".into(), session, window, cx),

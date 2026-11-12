@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::cipher::FieldCipher;
 use super::ssv::{self, Value};
-use crate::vault::{Group, Host, Vault};
+use crate::vault::{key_kind, Group, Host, Identity, KnownHost, Snippet, SshKey, Vault};
 
 /// Keychain entry that holds the legacy local key.
 pub const KEYCHAIN_SERVICE: &str = "termian";
@@ -80,7 +80,42 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
-    Ok(Vault { groups, hosts })
+    // Secrets (passwords, private keys, passphrases) are never decrypted here;
+    // only whether they are present.
+    let keys = store("keys")
+        .iter()
+        .map(|(id, v)| SshKey {
+            id: *id,
+            label: text(v.get("label")).unwrap_or_default(),
+            kind: key_kind(&text(v.get("public_key")).unwrap_or_default()),
+        })
+        .collect();
+    let identities = store("ssh_identities")
+        .iter()
+        .map(|(id, v)| Identity {
+            id: *id,
+            label: text(v.get("label")).filter(|l| !l.is_empty()).or_else(|| usernames.get(id).cloned()).unwrap_or_default(),
+            has_password: v.get("password").and_then(Value::as_str).is_some_and(|p| !p.is_empty()),
+            has_key: link(v, "ssh_key").is_some(),
+        })
+        .collect();
+    let snippets = store("snippets")
+        .iter()
+        .map(|(id, v)| Snippet {
+            id: *id,
+            label: text(v.get("label")).unwrap_or_default(),
+            script: text(v.get("script")).unwrap_or_default(),
+        })
+        .collect();
+    let known_hosts = store("known_hosts")
+        .iter()
+        .map(|(id, v)| KnownHost {
+            id: *id,
+            host: text(v.get("hostname").or_else(|| v.get("hostnames"))).unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
@@ -230,6 +265,33 @@ mod tests {
         assert_eq!(host.subtitle(), "ssh, root, prod");
         assert_eq!(vault.hosts[1].label, "plain");
         assert_eq!(vault.hosts_under(Some(1)).len(), 1);
+    }
+
+    #[test]
+    fn loads_keychain_snippets_and_known_hosts_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_store(root, "keys", vec![(1., record(&[
+            ("label", F::Secret("kazgau")),
+            ("public_key", F::Secret("ssh-ed25519 AAAA")),
+            ("private_key", F::Secret("-----BEGIN OPENSSH PRIVATE KEY-----")),
+        ]))]);
+        write_store(root, "ssh_identities", vec![
+            (22., record(&[("label", F::Secret("kazgau")), ("password", F::Secret("pw")), ("ssh_key", F::Link(1))])),
+            (23., record(&[("username", F::Secret("root")), ("ssh_key", F::Link(1))])),
+        ]);
+        write_store(root, "snippets", vec![(3., record(&[("label", F::Secret("get pods")), ("script", F::Secret("kubectl get pods"))]))]);
+        write_store(root, "known_hosts", vec![(4., record(&[("hostname", F::Secret("[10.0.0.1]:2001"))]))]);
+
+        let vault = load_vault(root, &cipher()).unwrap();
+
+        assert_eq!(vault.keys, vec![SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into() }]);
+        assert_eq!(vault.identities[0].subtitle(), "Auth password and key");
+        assert_eq!((vault.identities[1].label.as_str(), vault.identities[1].subtitle()), ("root", "Auth key"));
+        assert_eq!(vault.snippets[0].subtitle(), Some("kubectl get pods"));
+        assert_eq!(vault.known_hosts[0].host, "[10.0.0.1]:2001");
+        let debug = format!("{vault:?}");
+        assert!(!debug.contains("PRIVATE KEY") && !debug.contains("\"pw\""), "secrets leaked: {debug}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Tab strip model: pinned Vaults/SFTP tabs plus closable session tabs.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// Ordered by creation: a larger id was opened later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TabId(u64);
 
 #[derive(Clone, Debug, PartialEq, Eq)]

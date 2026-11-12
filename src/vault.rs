@@ -39,10 +39,83 @@ impl Host {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SshKey {
+    pub id: u64,
+    pub label: String,
+    /// Algorithm as shown on the card: `ED25519`, `ECDSA`, `RSA`.
+    pub kind: String,
+}
+
+impl SshKey {
+    /// Card subtitle as in the legacy UI.
+    pub fn subtitle(&self) -> String {
+        format!("Type {}", self.kind)
+    }
+}
+
+/// Algorithm label for an OpenSSH public key line (`ssh-ed25519 AAAA...`).
+pub fn key_kind(public_key: &str) -> String {
+    let algorithm = public_key.split_whitespace().next().unwrap_or("");
+    let name = algorithm.trim_start_matches("sk-").trim_start_matches("ssh-");
+    if name.starts_with("ecdsa") {
+        "ECDSA".into()
+    } else if name.is_empty() {
+        "Unknown".into()
+    } else {
+        name.split('@').next().unwrap_or(name).to_uppercase()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Identity {
+    pub id: u64,
+    pub label: String,
+    pub has_password: bool,
+    pub has_key: bool,
+}
+
+impl Identity {
+    pub fn subtitle(&self) -> &'static str {
+        match (self.has_password, self.has_key) {
+            (true, true) => "Auth password and key",
+            (true, false) => "Auth password",
+            (false, true) => "Auth key",
+            (false, false) => "No credentials",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Snippet {
+    pub id: u64,
+    pub label: String,
+    pub script: String,
+}
+
+impl Snippet {
+    /// The card shows the script under the label only when they differ.
+    pub fn subtitle(&self) -> Option<&str> {
+        let script = self.script.trim();
+        (!script.is_empty() && script != self.label.trim()).then_some(script)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KnownHost {
+    pub id: u64,
+    /// `host` or `[host]:port`, as in OpenSSH known_hosts.
+    pub host: String,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Vault {
     pub groups: Vec<Group>,
     pub hosts: Vec<Host>,
+    pub keys: Vec<SshKey>,
+    pub identities: Vec<Identity>,
+    pub snippets: Vec<Snippet>,
+    pub known_hosts: Vec<KnownHost>,
 }
 
 impl Vault {
@@ -125,6 +198,7 @@ pub(crate) mod tests {
                 host(12, "Ugoloc Prod", Some(3)),
                 host(13, "loose", None),
             ],
+            ..Default::default()
         }
     }
 
@@ -157,7 +231,7 @@ pub(crate) mod tests {
 
     #[test]
     fn parent_cycles_do_not_hang() {
-        let v = Vault { groups: vec![group(1, "a", Some(2)), group(2, "b", Some(1))], hosts: vec![host(5, "h", Some(1))] };
+        let v = Vault { groups: vec![group(1, "a", Some(2)), group(2, "b", Some(1))], hosts: vec![host(5, "h", Some(1))], ..Default::default() };
         assert_eq!(v.breadcrumbs(Some(1)).len(), 2);
         assert!(v.hosts_under(Some(99)).is_empty());
     }
@@ -170,6 +244,25 @@ pub(crate) mod tests {
         assert_eq!(labels(v.search("10.0.0.13")), ["loose"]);
         assert_eq!(labels(v.search("PROD")), ["Office VPN", "Ugoloc Prod"]);
         assert_eq!(v.search("  ").len(), 4);
+    }
+
+    #[test]
+    fn key_kind_reads_the_algorithm() {
+        assert_eq!(key_kind("ssh-ed25519 AAAA comment"), "ED25519");
+        assert_eq!(key_kind("ecdsa-sha2-nistp256 AAAA"), "ECDSA");
+        assert_eq!(key_kind("ssh-rsa AAAA"), "RSA");
+        assert_eq!(key_kind("sk-ssh-ed25519@openssh.com AAAA"), "ED25519");
+        assert_eq!(key_kind(""), "Unknown");
+    }
+
+    #[test]
+    fn identity_and_snippet_subtitles() {
+        let identity = |has_password, has_key| Identity { id: 1, label: "root".into(), has_password, has_key };
+        assert_eq!(identity(true, true).subtitle(), "Auth password and key");
+        assert_eq!(identity(false, true).subtitle(), "Auth key");
+        let snippet = |label: &str, script: &str| Snippet { id: 1, label: label.into(), script: script.into() };
+        assert_eq!(snippet("sudo su", "sudo su").subtitle(), None);
+        assert_eq!(snippet("get pods", "kubectl get pods").subtitle(), Some("kubectl get pods"));
     }
 
     #[test]
@@ -218,5 +311,24 @@ pub fn demo() -> Vault {
             host(21, "Ugoloc Test", "debian", Some(4), None, &["test"]),
             host(22, "Beget VPN", "ubuntu", None, Some("hahatulk"), &[]),
         ],
+        keys: vec![
+            SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into() },
+            SshKey { id: 2, label: "My".into(), kind: "ECDSA".into() },
+        ],
+        identities: vec![
+            Identity { id: 1, label: "root".into(), has_password: false, has_key: true },
+            Identity { id: 2, label: "pt".into(), has_password: true, has_key: false },
+            Identity { id: 3, label: "kazgau".into(), has_password: true, has_key: true },
+        ],
+        snippets: vec![
+            Snippet { id: 1, label: "sudo su".into(), script: "sudo su".into() },
+            Snippet { id: 2, label: "cd /var/docker".into(), script: "cd /var/docker".into() },
+            Snippet { id: 3, label: "get pods".into(), script: "kubectl -n default get pods".into() },
+        ],
+        known_hosts: ["192.168.1.180", "[95.80.105.230]:50703", "10.0.209.12", "[192.168.88.59]:2001"]
+            .iter()
+            .enumerate()
+            .map(|(i, host)| KnownHost { id: i as u64, host: host.to_string() })
+            .collect(),
     }
 }
