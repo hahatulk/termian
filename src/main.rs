@@ -73,6 +73,8 @@ pub struct Shell {
     split_into: Option<(TabId, u64)>,
     /// A terminal tab's right-click menu.
     tab_menu: Option<(TabId, gpui::Point<gpui::Pixels>)>,
+    /// The pointer over the terminal area, for where a dragged tab lands.
+    pointer: gpui::Point<gpui::Pixels>,
     query: String,
     search_focus: FocusHandle,
     sftp: ui::sftp::SftpState,
@@ -218,6 +220,7 @@ impl Shell {
             next_pane: 0,
             split_into: None,
             tab_menu: None,
+            pointer: Default::default(),
             query: String::new(),
             search_focus: cx.focus_handle(),
             sftp: ui::sftp::SftpState::new(),
@@ -274,7 +277,9 @@ impl Shell {
                 cx.notify();
             }))
             .when(matches!(tab.kind, TabKind::Session { .. }), |d| {
-                d.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                d.on_drag(ui::workspace::TabDrag { tab: id, title: tab.title().to_owned() }, |drag, _, _, cx| cx.new(|_| drag.clone()))
+                    .on_hover(|hovered, window, _| ui::workspace::set_window_movable(window, !*hovered))
+                    .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
                     shell.tab_menu = Some((id, event.position));
                     cx.notify();
                 }))
@@ -480,6 +485,8 @@ impl Render for Shell {
                 d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))
             })
             .track_focus(&self.root_focus)
+            // A tab hovered made the window unmovable; a released drag ends that.
+            .capture_any_mouse_up(|_, window, _| ui::workspace::set_window_movable(window, true))
             .children(self.render_palette(window, cx))
             .children(self.render_tab_menu(window, cx))
             .children(self.render_update_notice(cx))

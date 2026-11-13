@@ -46,6 +46,11 @@ regex = "1"
 [dev-dependencies]
 font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Dragging a tab must not move the window by its (transparent) title bar.
+objc = "0.2.7"
+raw-window-handle = "0.6.2"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

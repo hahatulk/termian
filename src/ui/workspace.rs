@@ -25,6 +25,43 @@ pub enum Origin {
     None,
 }
 
+/// The tab strip lies under the macOS title bar, which drags the window on
+/// its own before the app sees the press: while the pointer is over a
+/// terminal tab the window is not movable, so the tab itself can be dragged.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc 0.2's msg_send! checks a cfg this crate does not declare
+pub fn set_window_movable(window: &Window, movable: bool) {
+    use objc::{msg_send, sel, sel_impl};
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    let Ok(handle) = HasWindowHandle::window_handle(window) else { return };
+    if let RawWindowHandle::AppKit(appkit) = handle.as_raw() {
+        let view = appkit.ns_view.as_ptr() as *mut objc::runtime::Object;
+        // SAFETY: the view belongs to this live window; both calls are plain AppKit messages.
+        unsafe {
+            let ns_window: *mut objc::runtime::Object = msg_send![view, window];
+            if !ns_window.is_null() {
+                let _: () = msg_send![ns_window, setMovable: movable as objc::runtime::BOOL];
+            }
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_window_movable(_: &Window, _: bool) {}
+
+/// What dragging a terminal tab carries.
+#[derive(Clone)]
+pub struct TabDrag {
+    pub tab: TabId,
+    pub title: String,
+}
+
+impl gpui::Render for TabDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().px_3().py_1().rounded_md().bg(rgb(theme::ACCENT)).text_sm().text_color(rgb(0xffffff)).child(self.title.clone())
+    }
+}
+
 pub struct Pane {
     pub title: String,
     pub view: Entity<TerminalView>,
@@ -90,7 +127,7 @@ impl Shell {
         }
         let tab = self.tabs.open(termian_native::tabs::TabKind::Session { title: title.clone() });
         let pane = self.new_pane_id();
-        self.subscribe_pane(tab, pane, &view, cx);
+        self.subscribe_pane(pane, &view, cx);
         let mut panes = BTreeMap::new();
         panes.insert(pane, Pane { title, view, history, origin });
         self.workspaces.insert(tab, Workspace { tree: SplitTree::single(pane), panes, focused: pane, broadcast: false, drag: None, refocus: false });
@@ -101,7 +138,7 @@ impl Shell {
     #[allow(clippy::too_many_arguments)]
     fn add_pane(&mut self, tab: TabId, target: u64, title: String, view: Entity<TerminalView>, history: Option<u64>, origin: Origin, layout: Layout, cx: &mut Context<Self>) {
         let pane = self.new_pane_id();
-        self.subscribe_pane(tab, pane, &view, cx);
+        self.subscribe_pane(pane, &view, cx);
         if let Some(workspace) = self.workspaces.get_mut(&tab) {
             workspace.tree.split(target, pane, layout, Position::End);
             workspace.panes.insert(pane, Pane { title, view, history, origin });
@@ -110,8 +147,14 @@ impl Shell {
         cx.notify();
     }
 
-    fn subscribe_pane(&mut self, tab: TabId, pane: u64, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
+    /// The tab a pane is in now (panes move when tabs are merged).
+    fn tab_of(&self, pane: u64) -> Option<TabId> {
+        self.workspaces.iter().find(|(_, w)| w.panes.contains_key(&pane)).map(|(tab, _)| *tab)
+    }
+
+    fn subscribe_pane(&mut self, pane: u64, view: &Entity<TerminalView>, cx: &mut Context<Self>) {
         cx.subscribe(view, move |shell, view, event: &TerminalEvent, cx| {
+            let Some(tab) = shell.tab_of(pane) else { return };
             let history = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| p.history);
             match event {
                 // A Serial tab gets its Logs row only once the port opens.
@@ -216,6 +259,35 @@ impl Shell {
         cx.notify();
     }
 
+    /// A terminal tab dropped on a pane joins it, on the side nearest to
+    /// where it was dropped (legacy: drag a tab into a workspace view).
+    #[allow(clippy::too_many_arguments)]
+    fn merge_tab(&mut self, source: TabId, tab: TabId, target: u64, layout: Layout, position: Position, window: &mut Window, cx: &mut Context<Self>) {
+        if source == tab || !self.workspaces.contains_key(&tab) {
+            return;
+        }
+        let Some(moved) = self.workspaces.remove(&source) else { return };
+        self.tabs.close(source);
+        let leaves = moved.tree.leaves();
+        let mut panes = moved.panes;
+        let workspace = self.workspaces.get_mut(&tab).expect("checked above");
+        let mut anchor = target;
+        for (i, leaf) in leaves.iter().enumerate() {
+            let Some(pane) = panes.remove(leaf) else { continue };
+            // The first pane goes where it was dropped; the rest follow it.
+            let (layout, position) = if i == 0 { (layout, position) } else { (layout, Position::End) };
+            workspace.tree.split(anchor, *leaf, layout, position);
+            workspace.panes.insert(*leaf, pane);
+            anchor = *leaf;
+        }
+        workspace.broadcast &= moved.broadcast;
+        workspace.focused = leaves[0];
+        workspace.refocus = true;
+        self.tabs.activate(tab);
+        let _ = window;
+        cx.notify();
+    }
+
     pub fn can_reopen(&self, tab: TabId) -> bool {
         self.workspaces.get(&tab).and_then(|w| w.panes.get(&w.focused)).is_some_and(|p| !matches!(p.origin, Origin::None))
     }
@@ -278,6 +350,24 @@ impl Shell {
                     .when(split, |d| d.border_1().border_color(rgb(if focused || workspace.broadcast { border } else { theme::TITLE_BAR })))
                     .flex()
                     .flex_col()
+                    .drag_over::<TabDrag>(|style, _, _, _| style.border_2().border_color(rgb(theme::ACCENT)))
+                    .on_drop(cx.listener(move |shell, drag: &TabDrag, window, cx| {
+                        // The nearest edge of the pane decides the side.
+                        let at = shell.pointer;
+                        let x = ((f32::from(at.x) - left) / w.max(1.)).clamp(0., 1.);
+                        let y = ((f32::from(at.y) - TOP_INSET - top) / h.max(1.)).clamp(0., 1.);
+                        let (layout, position) = [
+                            (x, Layout::Horizontal, Position::Start),
+                            (1. - x, Layout::Horizontal, Position::End),
+                            (y, Layout::Vertical, Position::Start),
+                            (1. - y, Layout::Vertical, Position::End),
+                        ]
+                        .into_iter()
+                        .min_by(|a, b| a.0.total_cmp(&b.0))
+                        .map(|(_, l, p)| (l, p))
+                        .unwrap_or((Layout::Horizontal, Position::End));
+                        shell.merge_tab(drag.tab, tab, id, layout, position, window, cx);
+                    }))
                     .on_mouse_down(MouseButton::Left, cx.listener(move |shell, _, _, cx| {
                         if let Some(workspace) = shell.workspaces.get_mut(&tab) {
                             workspace.focused = id;
@@ -342,6 +432,7 @@ impl Shell {
             }
         }
         area.on_mouse_move(cx.listener(move |shell, event: &gpui::MouseMoveEvent, _, cx| {
+            shell.pointer = event.position;
             let Some(workspace) = shell.workspaces.get_mut(&tab) else { return };
             let Some(drag) = &workspace.drag else { return };
             if !event.dragging() {
