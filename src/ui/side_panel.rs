@@ -6,6 +6,7 @@
 use std::collections::HashSet;
 
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, ClickEvent, ClipboardItem, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window};
+use termian_native::terminal_settings::{self, FONT_FAMILIES, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use termian_native::theme;
 use termian_native::vault::{Snippet, ShellCommand};
 
@@ -15,13 +16,14 @@ use super::host_editor::{caret, menu_panel, menu_row};
 use super::hosts::Section;
 use crate::Shell;
 
-const WIDTH: f32 = 340.;
+pub const WIDTH: f32 = 340.;
 
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
     Snippets,
     History,
+    Theme,
 }
 
 #[derive(Default)]
@@ -34,6 +36,8 @@ pub struct SidePanel {
     /// History row being saved as a snippet, with the label typed so far.
     saving: Option<(usize, String)>,
     saved: Vec<usize>,
+    font_open: bool,
+    fonts_list_open: bool,
 }
 
 /// Snippets and packages matching the search, as legacy filters them:
@@ -49,6 +53,10 @@ impl Shell {
             Some(_) => None,
             None => Some(SidePanel::default()),
         };
+        let inset = if self.side_panel.is_some() { WIDTH } else { 0. };
+        for view in self.terminals.values() {
+            view.update(cx, |view, cx| view.set_right_inset(inset, cx));
+        }
         if self.side_panel.is_none() {
             if let Some(view) = self.terminals.get(&self.tabs.active().id) {
                 view.read(cx).focus(window);
@@ -112,6 +120,21 @@ impl Shell {
     fn on_side_panel_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(panel) = &mut self.side_panel else { return };
+        // ↑/↓ step through the themes, as in the legacy list.
+        if panel.tab == Tab::Theme {
+            let step = match event.keystroke.key.as_str() {
+                "up" => -1,
+                "down" => 1,
+                _ => return,
+            };
+            let themes = terminal_settings::themes();
+            let current_name = self.vault.terminal.theme().name.clone();
+            let current = themes.iter().position(|t| t.name == current_name).unwrap_or(0) as i32;
+            let next = themes[(current + step).rem_euclid(themes.len() as i32) as usize].name.to_lowercase();
+            self.update_terminal(|t| t.color_scheme = next, cx);
+            cx.stop_propagation();
+            return;
+        }
         let target = match &mut panel.saving {
             Some((_, label)) => label,
             None => &mut panel.search,
@@ -168,10 +191,11 @@ impl Shell {
                     cx.notify();
                 }))
         };
-        let tabs = div().flex().gap_1().p_1().rounded_lg().bg(rgb(theme::SURFACE)).child(tab("panel-tab-snippets", "snippets", Tab::Snippets, cx)).child(tab("panel-tab-history", "logs", Tab::History, cx));
+        let tabs = div().flex().gap_1().p_1().rounded_lg().bg(rgb(theme::SURFACE)).child(tab("panel-tab-snippets", "snippets", Tab::Snippets, cx)).child(tab("panel-tab-history", "logs", Tab::History, cx)).child(tab("panel-tab-theme", "theme", Tab::Theme, cx));
         let body = match panel.tab {
             Tab::Snippets => self.render_panel_snippets(panel, &self.panel_focus, window, cx),
             Tab::History => self.render_panel_history(panel, cx),
+            Tab::Theme => self.render_panel_theme(panel, cx),
         };
         let menu = panel.menu.map(|(id, at)| self.render_panel_menu(id, at, cx));
         Some(
@@ -468,5 +492,124 @@ impl Shell {
             div().id(hover.clone()).group(hover).px_2().py(px(8.)).flex().items_center().gap_2().rounded_md().hover(|s| s.bg(rgb(theme::SURFACE))).child(div().flex_1().min_w_0().child(title)).child(actions)
         });
         div().flex_1().min_h_0().child(div().id("panel-history").size_full().overflow_y_scroll().flex().flex_col().children(rows))
+    }
+
+    /// Theme: «Font» (family and Text Size) and «Themes»; both change
+    /// Settings → Terminal and every open terminal, as the legacy global theme does.
+    fn render_panel_theme(&self, panel: &SidePanel, cx: &mut Context<Self>) -> Div {
+        let settings = &self.vault.terminal;
+        let size = settings.font_size;
+        let step = |id: &str, text: &str, disabled: bool| {
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .size(px(36.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_md()
+                .bg(rgb(theme::SURFACE_ACTIVE))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(theme::TEXT))
+                .when(disabled, |d| d.opacity(0.4))
+                .child(text.to_owned())
+        };
+        let font_header = div()
+            .id("panel-font-header")
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_color(rgb(theme::TEXT_MUTED))
+            .child(div().flex_1().child("Font"))
+            .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))))
+            .on_click(cx.listener(|shell, _, _, cx| {
+                if let Some(panel) = &mut shell.side_panel {
+                    panel.font_open = !panel.font_open;
+                }
+                cx.notify();
+            }));
+        let font = panel.font_open.then(|| {
+            let picker = div()
+                .id("panel-font-family")
+                .h(px(36.))
+                .px_3()
+                .flex()
+                .items_center()
+                .rounded_md()
+                .bg(rgb(theme::INPUT))
+                .text_color(rgb(theme::TEXT))
+                .child(div().flex_1().child(settings.font_family.clone()))
+                .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    if let Some(panel) = &mut shell.side_panel {
+                        panel.fonts_list_open = !panel.fonts_list_open;
+                    }
+                    cx.notify();
+                }));
+            let list = panel.fonts_list_open.then(|| {
+                let mut list = div().id("panel-font-list").max_h(px(240.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::SURFACE)).border_1().border_color(rgb(theme::SURFACE_ACTIVE));
+                for (i, family) in FONT_FAMILIES.iter().enumerate() {
+                    list = list.child(menu_row(format!("panel-font-{i}"), family, false, false).on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(panel) = &mut shell.side_panel {
+                            panel.fonts_list_open = false;
+                        }
+                        shell.update_terminal(|t| t.font_family = (*family).to_owned(), cx);
+                    })));
+                }
+                list
+            });
+            let text_size = div()
+                .flex()
+                .items_center()
+                .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child("Text Size"))
+                .child(step("panel-size-down", "−", size <= MIN_FONT_SIZE).when(size > MIN_FONT_SIZE, |d| d.on_click(cx.listener(move |shell, _, _, cx| shell.update_terminal(|t| t.set_font_size(size - 1), cx)))))
+                .child(div().w(px(51.)).mx(px(5.)).h(px(36.)).flex().items_center().justify_center().rounded_md().border_1().border_color(rgb(theme::SURFACE_ACTIVE)).text_color(rgb(theme::TEXT)).child(size.to_string()))
+                .child(step("panel-size-up", "+", size >= MAX_FONT_SIZE).when(size < MAX_FONT_SIZE, |d| d.on_click(cx.listener(move |shell, _, _, cx| shell.update_terminal(|t| t.set_font_size(size + 1), cx)))));
+            div().flex().flex_col().gap(px(10.)).child(picker).children(list).child(text_size)
+        });
+        let current = settings.theme().name.clone();
+        let rows = terminal_settings::themes().iter().enumerate().map(|(i, t)| {
+            let active = t.name == current;
+            let name = t.name.to_lowercase();
+            let swatch = div()
+                .w(px(44.))
+                .h(px(28.))
+                .flex_none()
+                .rounded_sm()
+                .bg(rgb(t.background))
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap(px(2.))
+                .children([1usize, 2, 3, 4].map(|c| div().size(px(5.)).rounded_full().bg(rgb(t.palette[c]))));
+            div()
+                .id(SharedString::from(format!("panel-theme-{i}")))
+                .p_1()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(if active { theme::ACCENT } else { theme::SIDEBAR }))
+                .hover(|s| s.bg(rgb(theme::SURFACE)))
+                .child(swatch)
+                .child(div().truncate().text_color(rgb(theme::TEXT)).child(t.name.clone()))
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    window.focus(&shell.panel_focus);
+                    let name = name.clone();
+                    shell.update_terminal(|t| t.color_scheme = name, cx);
+                }))
+        });
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(font_header)
+            .children(font)
+            .child(div().h(px(1.)).bg(rgb(theme::SURFACE_ACTIVE)))
+            .child(div().text_color(rgb(theme::TEXT_MUTED)).child("Themes"))
+            .child(div().id("panel-themes").flex_1().overflow_y_scroll().flex().flex_col().gap(px(4.)).children(rows))
     }
 }

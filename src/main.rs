@@ -275,6 +275,9 @@ impl Shell {
 impl Shell {
     fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, history: Option<u64>, cx: &mut Context<Self>) {
         let id = self.tabs.open(TabKind::Session { title });
+        if self.side_panel.is_some() {
+            view.update(cx, |view, cx| view.set_right_inset(ui::side_panel::WIDTH, cx));
+        }
         cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| {
             if let TerminalEvent::Os(os) = event {
                 shell.host_os_detected(history, os);

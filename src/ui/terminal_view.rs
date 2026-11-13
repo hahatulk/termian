@@ -69,6 +69,8 @@ pub struct TerminalView {
     search: Option<String>,
     search_found: bool,
     search_focus: FocusHandle,
+    /// Width the window gives to the side panel, beside the terminal.
+    right_inset: f32,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -113,6 +115,7 @@ impl TerminalView {
             search: None,
             search_found: true,
             search_focus: cx.focus_handle(),
+            right_inset: 0.,
         }
     }
 
@@ -513,6 +516,12 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
+    /// Room taken by the side panel; the grid refits on the next frame.
+    pub fn set_right_inset(&mut self, width: f32, cx: &mut Context<Self>) {
+        self.right_inset = width;
+        cx.notify();
+    }
+
     /// Pastes `text` into the session without running it (legacy «Paste»).
     pub fn paste(&mut self, text: &str) {
         if !self.closed {
@@ -644,7 +653,7 @@ impl Render for TerminalView {
             return login_view::render(target, login, &self.login_focus, window, &actions, cx).into_any_element();
         }
         let viewport = window.viewport_size();
-        self.fit(viewport.width, viewport.height - px(TOP_INSET), window);
+        self.fit(viewport.width - px(self.right_inset), viewport.height - px(TOP_INSET), window);
         let snapshot = self.terminal.snapshot();
         let focused = self.focus.is_focused(window);
         let cell_width = self.cell_width.unwrap_or(8.);
