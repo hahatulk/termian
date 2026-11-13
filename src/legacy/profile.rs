@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::cipher::FieldCipher;
 use super::ssv::{self, Value};
-use crate::vault::{key_kind, ForwardingRule, Group, HistoryEntry, Host, Identity, KnownHost, LogRef, RuleKind, Snippet, SshKey, Vault};
+use crate::vault::{key_kind, ForwardingRule, Group, HistoryEntry, Host, Identity, KnownHost, LogRef, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
 
 /// Keychain entry that holds the legacy local key.
 pub const KEYCHAIN_SERVICE: &str = "termian";
@@ -123,7 +123,16 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             id: *id,
             label: text(v.get("label")).unwrap_or_default(),
             script: text(v.get("script")).unwrap_or_default(),
+            package: link(v, "package"),
+            targets: match v.get("targetHosts") {
+                Some(Value::Array(hosts)) => hosts.iter().filter_map(|h| h.get("local_id")?.as_f64().map(|n| n as u64)).collect(),
+                _ => Vec::new(),
+            },
         })
+        .collect();
+    let packages = store("snippets_packages")
+        .iter()
+        .map(|(id, v)| SnippetPackage { id: *id, label: text(v.get("label")).unwrap_or_default() })
         .collect();
     let known_hosts = store("known_hosts")
         .iter()
@@ -155,7 +164,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         .collect();
 
     // Secrets are never decrypted here, so this data must not be uploaded as is.
-    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts, rules, secrets_missing: true, ..Vault::default() })
+    Ok(Vault { groups, hosts, keys, identities, snippets, packages, known_hosts, rules, secrets_missing: true, ..Vault::default() })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
@@ -272,6 +281,7 @@ mod tests {
         Text(&'a str),
         Secret(&'a str),
         Link(i32),
+        Links(&'a [i32]),
         Int(i32),
         Double(f64),
     }
@@ -292,6 +302,17 @@ mod tests {
                     e.int(*n);
                     e.key("id");
                     e.tag(3);
+                    e.end();
+                }
+                F::Links(ids) => {
+                    e.begin_array(ids.len() as u32);
+                    for (i, n) in ids.iter().enumerate() {
+                        e.index(i as u32);
+                        e.begin_object();
+                        e.key("local_id");
+                        e.int(*n);
+                        e.end();
+                    }
                     e.end();
                 }
             }
@@ -401,7 +422,13 @@ mod tests {
             (22., record(&[("label", F::Secret("kazgau")), ("password", F::Secret("pw")), ("ssh_key", F::Link(1))])),
             (23., record(&[("username", F::Secret("root")), ("ssh_key", F::Link(1))])),
         ]);
-        write_store(root, "snippets", vec![(3., record(&[("label", F::Secret("get pods")), ("script", F::Secret("kubectl get pods"))]))]);
+        write_store(root, "snippets", vec![(3., record(&[
+            ("label", F::Secret("get pods")),
+            ("script", F::Secret("kubectl get pods")),
+            ("package", F::Link(5)),
+            ("targetHosts", F::Links(&[7, 8])),
+        ]))]);
+        write_store(root, "snippets_packages", vec![(5., record(&[("label", F::Secret("k8s"))]))]);
         write_store(root, "known_hosts", vec![(4., record(&[("hostname", F::Secret("[10.0.0.1]:2001"))]))]);
 
         let vault = load_vault(root, &cipher()).unwrap();
@@ -410,6 +437,8 @@ mod tests {
         assert_eq!(vault.identities[0].subtitle(), "Auth password and key");
         assert_eq!((vault.identities[1].label.as_str(), vault.identities[1].subtitle()), ("root", "Auth key"));
         assert_eq!(vault.snippets[0].subtitle(), Some("kubectl get pods"));
+        assert_eq!((vault.snippets[0].package, vault.snippets[0].targets.as_slice()), (Some(5), &[7, 8][..]));
+        assert_eq!(vault.packages, vec![SnippetPackage { id: 5, label: "k8s".into() }]);
         assert_eq!(vault.known_hosts[0].host, "[10.0.0.1]:2001");
         let debug = format!("{vault:?}");
         assert!(!debug.contains("PRIVATE KEY") && !debug.contains("\"pw\""), "secrets leaked: {debug}");

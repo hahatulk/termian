@@ -226,6 +226,14 @@ pub(crate) mod tests {
         pub fn begin_object(&mut self) {
             self.out.push(OBJECT);
         }
+        /// Items follow as `index` then value; `end` closes the array.
+        pub fn begin_array(&mut self, len: u32) {
+            self.out.push(ARRAY);
+            self.out.extend(len.to_le_bytes());
+        }
+        pub fn index(&mut self, i: u32) {
+            self.out.extend(i.to_le_bytes());
+        }
         pub fn key(&mut self, k: &str) {
             self.str_data(k);
         }

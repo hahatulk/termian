@@ -62,6 +62,8 @@ pub struct TerminalView {
     was_ready: bool,
     /// «Autoreconnect» is retrying a lost session.
     reconnect: Option<session::Backoff>,
+    /// A snippet typed once the shell is first ready (legacy `startupSnippet`).
+    startup: Option<String>,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -102,6 +104,7 @@ impl TerminalView {
             faces: None,
             was_ready: false,
             reconnect: None,
+            startup: None,
         }
     }
 
@@ -185,6 +188,11 @@ impl TerminalView {
         self
     }
 
+    pub fn with_startup(mut self, script: Option<String>) -> Self {
+        self.startup = script;
+        self
+    }
+
     /// A recorded session, read-only.
     pub fn replay(data: Vec<u8>, note: Option<&str>, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self::build(session::replay(data), None, settings, window, cx);
@@ -226,6 +234,9 @@ impl TerminalView {
                 self.was_ready = true;
                 if self.reconnect.take().is_some() {
                     self.terminal.feed(b"\r\n\x1b[2m[Reconnected]\x1b[0m\r\n");
+                }
+                if let Some(script) = self.startup.take() {
+                    self.run(&script);
                 }
                 window.focus(&self.focus);
             }

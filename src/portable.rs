@@ -15,10 +15,10 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::sync::{empty_snapshot, Device, KINDS};
-use crate::vault::{ForwardingRule, Group, Host, Identity, RuleKind, Snippet, SshKey, Vault};
+use crate::vault::{ForwardingRule, Group, Host, Identity, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
 
 /// Collections kept as they are.
-const FOREIGN: [&str; 4] = ["snippetPackages", "telnetConfigs", "proxies", "workspaceTemplates"];
+const FOREIGN: [&str; 3] = ["telnetConfigs", "proxies", "workspaceTemplates"];
 
 fn key(kind: &str, id: u64) -> String {
     format!("{kind}|{id}")
@@ -170,10 +170,25 @@ pub fn export(vault: &Vault, now: &str) -> Value {
             }))
         })
         .collect();
+    out["snippetPackages"] = vault
+        .packages
+        .iter()
+        .map(|p| overlay(vault, &key("snippetPackages", p.id), json!({"local_id": p.id, "label": p.label})))
+        .collect();
     out["snippets"] = vault
         .snippets
         .iter()
-        .map(|s| overlay(vault, &key("snippets", s.id), json!({"local_id": s.id, "label": s.label, "script": s.script})))
+        .map(|s| {
+            let package = s.package.filter(|p| vault.package(*p).is_some());
+            let targets: Vec<Value> = s.targets.iter().filter(|h| vault.host(**h).is_some()).map(|h| json!({"local_id": h})).collect();
+            overlay(vault, &key("snippets", s.id), json!({
+                "local_id": s.id,
+                "label": s.label,
+                "script": s.script,
+                "package": reference(package),
+                "targetHosts": if targets.is_empty() { Value::Null } else { Value::Array(targets) },
+            }))
+        })
         .collect();
     out["portForwardingRules"] = vault
         .rules
@@ -326,10 +341,23 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
         portable.insert(key("hosts", id), raw);
     }
 
+    let mut packages = Vec::new();
+    for raw in list("snippetPackages") {
+        let id = assign("snippetPackages", &raw, &mut pairs, &mut ids);
+        packages.push(SnippetPackage { id, label: text(&raw, "label") });
+        portable.insert(key("snippetPackages", id), raw);
+    }
     let mut snippets = Vec::new();
     for raw in list("snippets") {
         let id = assign("snippets", &raw, &mut pairs, &mut ids);
-        snippets.push(Snippet { id, label: text(&raw, "label"), script: text(&raw, "script") });
+        let targets = raw.get("targetHosts").and_then(Value::as_array).into_iter().flatten();
+        snippets.push(Snippet {
+            id,
+            label: text(&raw, "label"),
+            script: text(&raw, "script"),
+            package: find(&ids, "snippetPackages", &raw, "package"),
+            targets: targets.filter_map(|h| h.get("local_id")).filter_map(|h| ids.get(&("hosts", token(h))).copied()).collect(),
+        });
         portable.insert(key("snippets", id), raw);
     }
     let mut rules = Vec::new();
@@ -368,6 +396,7 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
     vault.groups = groups;
     vault.hosts = hosts;
     vault.snippets = snippets;
+    vault.packages = packages;
     vault.rules = rules;
     vault.portable = portable;
     vault.foreign = foreign;
@@ -413,7 +442,8 @@ mod tests {
         let host = |id, label: &str| Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: Some(2), username: None, tags: vec![], port: None, password: None, key: None, identity: None };
         vault.hosts.push(Host { username: Some("root".into()), password: Some("secret".into()), port: Some(2222), tags: vec!["prod".into()], ..host(5, "web") });
         vault.hosts.push(Host { identity: Some(4), ..host(6, "api") });
-        vault.snippets.push(Snippet { id: 7, label: "top".into(), script: "top".into() });
+        vault.packages.push(SnippetPackage { id: 9, label: "tools".into() });
+        vault.snippets.push(Snippet { id: 7, label: "top".into(), script: "top".into(), package: Some(9), targets: vec![5, 6] });
         vault.rules.push(ForwardingRule { id: 8, label: "pg".into(), kind: RuleKind::Local, host: Some(5), bind_address: "127.0.0.1".into(), port: Some(15432), destination: "127.0.0.1".into(), destination_port: Some(5432) });
         vault
     }
@@ -434,7 +464,8 @@ mod tests {
             "groups": vault.groups.iter().map(|g| json!([g.label, label_of_group(g.parent)])).collect::<Vec<_>>(),
             "keys": vault.keys.iter().map(|k| json!([k.label, k.private_key, k.public_key])).collect::<Vec<_>>(),
             "identities": vault.identities.iter().map(|i| json!([i.label, i.username, i.password, i.key.and_then(|k| vault.key(k)).map(|k| k.label.clone())])).collect::<Vec<_>>(),
-            "snippets": vault.snippets.iter().map(|s| json!([s.label, s.script])).collect::<Vec<_>>(),
+            "snippets": vault.snippets.iter().map(|s| json!([s.label, s.script, s.package.and_then(|p| vault.package(p)).map(|p| p.label.clone()), s.targets.iter().map(|h| label_of_host(Some(*h))).collect::<Vec<_>>()])).collect::<Vec<_>>(),
+            "packages": vault.packages.iter().map(|p| p.label.clone()).collect::<Vec<_>>(),
             "rules": vault.rules.iter().map(|r| json!([r.label, label_of_host(r.host), r.port, r.destination, r.destination_port])).collect::<Vec<_>>(),
         })
     }
@@ -465,7 +496,7 @@ mod tests {
         }
         snapshot["hosts"][0]["backspace"] = json!("ctrl-h");
         snapshot["sshKeys"][0]["certificates"] = json!([{"local_id": 99, "certificate": "cert"}]);
-        snapshot["snippetPackages"] = json!([{"local_id": "pkg", "label": "tools"}]);
+        snapshot["snippetPackages"][0]["analytics_id"] = json!("pkg");
         snapshot["settings"] = json!({"settings_font_size": 14});
         let snapshot = validate_snapshot(&snapshot).unwrap();
         let mut vault = Vault::default();
@@ -478,7 +509,7 @@ mod tests {
         let config = again["sshConfigs"].as_array().unwrap().iter().find(|c| c["local_id"] == config_id).unwrap();
         assert_eq!(config["env_variables"][0]["name"], "LANG");
         assert_eq!(again["sshKeys"][0]["certificates"][0]["certificate"], "cert");
-        assert_eq!(again["snippetPackages"][0]["label"], "tools");
+        assert_eq!((again["snippetPackages"][0]["label"].as_str(), again["snippetPackages"][0]["analytics_id"].as_str()), (Some("tools"), Some("pkg")));
         assert_eq!(again["settings"]["settings_font_size"], 14);
     }
 

@@ -127,19 +127,40 @@ impl Identity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snippet {
     pub id: u64,
+    /// «Action description»; the first line of the script stands in when empty.
     pub label: String,
     pub script: String,
+    #[serde(default)]
+    pub package: Option<u64>,
+    /// «Targets»: hosts «Run» opens the snippet on without asking.
+    #[serde(default)]
+    pub targets: Vec<HostId>,
 }
 
 impl Snippet {
+    /// The legacy `displayLabel`: the label, or the script's first non-empty line.
+    pub fn display_label(&self) -> &str {
+        if !self.label.is_empty() {
+            return &self.label;
+        }
+        self.script.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("")
+    }
+
     /// The card shows the script under the label only when they differ.
     pub fn subtitle(&self) -> Option<&str> {
         let script = self.script.trim();
-        (!script.is_empty() && script != self.label.trim()).then_some(script)
+        (!script.is_empty() && script != self.display_label().trim()).then_some(script)
     }
+}
+
+/// A snippet package: a folder of snippets on the Snippets screen.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SnippetPackage {
+    pub id: u64,
+    pub label: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -248,6 +269,8 @@ pub struct Vault {
     pub keys: Vec<SshKey>,
     pub identities: Vec<Identity>,
     pub snippets: Vec<Snippet>,
+    #[serde(default)]
+    pub packages: Vec<SnippetPackage>,
     pub known_hosts: Vec<KnownHost>,
     /// Newest first.
     #[serde(default)]
@@ -400,7 +423,7 @@ impl Vault {
     pub fn next_id(&self) -> u64 {
         let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id)).chain(self.rules.iter().map(|r| r.id));
         let ids = ids.chain(self.identities.iter().map(|i| i.id));
-        ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).max().unwrap_or(0) + 1
+        ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).chain(self.packages.iter().map(|p| p.id)).max().unwrap_or(0) + 1
     }
 
     pub fn host(&self, id: HostId) -> Option<&Host> {
@@ -533,7 +556,73 @@ impl Vault {
 
     pub fn remove_host(&mut self, id: HostId) -> Option<Host> {
         let index = self.hosts.iter().position(|h| h.id == id)?;
+        for snippet in &mut self.snippets {
+            snippet.targets.retain(|t| *t != id);
+        }
         Some(self.hosts.remove(index))
+    }
+
+    pub fn snippet(&self, id: u64) -> Option<&Snippet> {
+        self.snippets.iter().find(|s| s.id == id)
+    }
+
+    /// Adds the snippet, or replaces the one with the same id.
+    pub fn save_snippet(&mut self, snippet: Snippet) {
+        match self.snippets.iter_mut().find(|s| s.id == snippet.id) {
+            Some(existing) => *existing = snippet,
+            None => self.snippets.push(snippet),
+        }
+    }
+
+    pub fn remove_snippet(&mut self, id: u64) {
+        self.snippets.retain(|s| s.id != id);
+    }
+
+    /// Duplicate in the legacy snippet menu: a copy under a new id, right after the original.
+    pub fn duplicate_snippet(&mut self, id: u64) -> Option<u64> {
+        let index = self.snippets.iter().position(|s| s.id == id)?;
+        let copy = Snippet { id: self.next_id(), ..self.snippets[index].clone() };
+        let new_id = copy.id;
+        self.snippets.insert(index + 1, copy);
+        Some(new_id)
+    }
+
+    pub fn package(&self, id: u64) -> Option<&SnippetPackage> {
+        self.packages.iter().find(|p| p.id == id)
+    }
+
+    pub fn save_package(&mut self, package: SnippetPackage) {
+        match self.packages.iter_mut().find(|p| p.id == package.id) {
+            Some(existing) => *existing = package,
+            None => self.packages.push(package),
+        }
+    }
+
+    /// The package with this name, created when there is none: the legacy
+    /// Package field «Create a new package by typing the name».
+    pub fn package_named(&mut self, label: &str) -> u64 {
+        if let Some(existing) = self.packages.iter().find(|p| p.label == label) {
+            return existing.id;
+        }
+        let id = self.next_id();
+        self.packages.push(SnippetPackage { id, label: label.to_owned() });
+        id
+    }
+
+    pub fn package_snippet_count(&self, id: u64) -> usize {
+        self.snippets.iter().filter(|s| s.package == Some(id)).count()
+    }
+
+    /// Removes a package with its snippets, as legacy «Remove … package and N snippets» does.
+    pub fn remove_package(&mut self, id: u64) {
+        self.packages.retain(|p| p.id != id);
+        self.snippets.retain(|s| s.package != Some(id));
+    }
+
+    /// Snippets on the screen: a package's own, or — at the top — those
+    /// outside packages (all of them while searching), as legacy filters them.
+    pub fn snippets_in(&self, package: Option<u64>, searching: bool) -> Vec<&Snippet> {
+        self.snippets.iter().filter(|s| package.map_or(searching || s.package.is_none(), |p| s.package == Some(p))).collect()
     }
 
     /// Duplicate in the legacy host menu: a copy under a new id, right after the original.
@@ -768,9 +857,29 @@ pub(crate) mod tests {
         let identity = |has_password, has_key| Identity { id: 1, label: "root".into(), has_password, has_key, ..Identity::default() };
         assert_eq!(identity(true, true).subtitle(), "Auth password and key");
         assert_eq!(identity(false, true).subtitle(), "Auth key");
-        let snippet = |label: &str, script: &str| Snippet { id: 1, label: label.into(), script: script.into() };
+        let snippet = |label: &str, script: &str| Snippet { id: 1, label: label.into(), script: script.into(), ..Snippet::default() };
         assert_eq!(snippet("sudo su", "sudo su").subtitle(), None);
         assert_eq!(snippet("get pods", "kubectl get pods").subtitle(), Some("kubectl get pods"));
+        assert_eq!(snippet("", "\n  uptime\n  w\n").display_label(), "uptime");
+        assert_eq!(snippet("", "uptime").subtitle(), None);
+    }
+
+    #[test]
+    fn snippet_packages_and_targets() {
+        let mut v = demo();
+        assert_eq!(v.snippets_in(None, false).iter().map(|s| s.id).collect::<Vec<_>>(), [1, 2], "outside packages");
+        assert_eq!(v.snippets_in(None, true).len(), 3, "searching lists every snippet");
+        assert_eq!(v.snippets_in(Some(30), false).iter().map(|s| s.id).collect::<Vec<_>>(), [3]);
+        assert_eq!(v.package_named("Kubernetes"), 30);
+        let tools = v.package_named("tools");
+        assert!(tools > 30 && v.package(tools).is_some());
+        let copy = v.duplicate_snippet(3).unwrap();
+        assert_eq!(v.package_snippet_count(30), 2);
+        v.remove_host(20);
+        assert_eq!(v.snippet(copy).unwrap().targets, [21], "removed hosts leave the targets");
+        v.remove_package(30);
+        assert!(v.package(30).is_none() && v.snippet(3).is_none() && v.snippet(copy).is_none(), "the package goes with its snippets");
+        assert!(v.snippet(1).is_some());
     }
 
     #[test]
@@ -833,10 +942,11 @@ pub fn demo() -> Vault {
             Identity { id: 3, label: "kazgau".into(), has_password: true, has_key: true, username: "kazgau".into(), ..Identity::default() },
         ],
         snippets: vec![
-            Snippet { id: 1, label: "sudo su".into(), script: "sudo su".into() },
-            Snippet { id: 2, label: "cd /var/docker".into(), script: "cd /var/docker".into() },
-            Snippet { id: 3, label: "get pods".into(), script: "kubectl -n default get pods".into() },
+            Snippet { id: 1, label: "sudo su".into(), script: "sudo su".into(), ..Snippet::default() },
+            Snippet { id: 2, label: "cd /var/docker".into(), script: "cd /var/docker".into(), ..Snippet::default() },
+            Snippet { id: 3, label: "get pods".into(), script: "kubectl -n default get pods".into(), package: Some(30), targets: vec![20, 21] },
         ],
+        packages: vec![SnippetPackage { id: 30, label: "Kubernetes".into() }],
         known_hosts: ["192.168.1.180", "[95.80.105.230]:50703", "10.0.209.12", "[192.168.88.59]:2001"]
             .iter()
             .enumerate()

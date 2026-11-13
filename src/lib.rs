@@ -13,6 +13,7 @@ pub mod remote_fs;
 pub mod session;
 pub mod session_log;
 pub mod shortcuts;
+pub mod snippets;
 pub mod store;
 pub mod self_cloud;
 pub mod sync;

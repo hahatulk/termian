@@ -43,6 +43,13 @@ pub struct Shell {
     keychain_menu: Option<gpui::Point<gpui::Pixels>>,
     group_editor: Option<ui::group_editor::GroupEditor>,
     group_menu: Option<ui::group_editor::GroupMenu>,
+    /// The package open on the Snippets screen.
+    snippet_package: Option<u64>,
+    snippet_editor: Option<ui::snippets::SnippetEditor>,
+    package_editor: Option<ui::snippets::PackageEditor>,
+    snippet_menu: Option<ui::snippets::SnippetMenu>,
+    /// «Save targets» under «Select targets»; on by default and remembered, as in legacy.
+    snippet_save_targets: bool,
     launcher: ui::launcher::Launcher,
     logs_view: ui::logs::LogsView,
     rules: ui::forwarding::Rules,
@@ -162,6 +169,11 @@ impl Shell {
             keychain_menu: None,
             group_editor: None,
             group_menu: None,
+            snippet_package: None,
+            snippet_editor: None,
+            package_editor: None,
+            snippet_menu: None,
+            snippet_save_targets: true,
             launcher: Default::default(),
             logs_view: Default::default(),
             rules: Default::default(),
@@ -308,10 +320,11 @@ impl Shell {
 
     /// Opens an SSH tab that shows the connection screen until the shell is ready.
     pub fn open_ssh(&mut self, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_ssh_for(None, label, os, target, window, cx);
+        self.open_ssh_for(None, label, os, target, None, window, cx);
     }
 
-    fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+    #[allow(clippy::too_many_arguments)]
+    fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         target.options = session::SshOptions::from_vault(&self.vault);
         // Legacy runs the detection only for saved hosts whose system is unknown.
         let unknown = host.and_then(|id| self.vault.hosts.iter().find(|h| h.id == id)).is_some_and(|h| h.os.is_none());
@@ -320,15 +333,20 @@ impl Shell {
         let (history, log) = self.record_session(host, &label, subtitle);
         let connection = Connection { label: label.clone(), os, target };
         let settings = self.vault.terminal.clone();
-        let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log));
+        let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log).with_startup(startup));
         self.add_terminal(label, view, Some(history), cx);
     }
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        self.connect_host_with(host, None, window, cx);
+    }
+
+    /// Connects to a saved host; `startup` is typed once its shell is ready.
+    pub fn connect_host_with(&mut self, host: HostId, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::for_host(entry, &self.vault);
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
-        self.open_ssh_for(Some(host), label, os, target, window, cx);
+        self.open_ssh_for(Some(host), label, os, target, startup, window, cx);
     }
 
     /// Opens a session log read-only in a new tab (FR-L4).
@@ -345,19 +363,6 @@ impl Shell {
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
         self.add_terminal(title, view, None, cx);
-    }
-
-    /// Runs a snippet in the most recently opened terminal, starting a local one if none is open.
-    pub fn run_in_terminal(&mut self, script: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.terminals.is_empty() {
-            self.open_local_terminal(window, cx);
-        }
-        let Some((&id, view)) = self.terminals.iter().max_by_key(|(id, _)| **id) else { return };
-        let view = view.clone();
-        self.tabs.activate(id);
-        view.update(cx, |view, _| view.run(script));
-        view.read(cx).focus(window);
-        cx.notify();
     }
 
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

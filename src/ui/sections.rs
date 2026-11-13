@@ -100,33 +100,6 @@ impl Shell {
         page("keychain-scroll", vec![split], body)
     }
 
-    pub fn render_snippets(&self, cx: &mut Context<Self>) -> Div {
-        let snippets = &self.vault.snippets;
-        let body = if snippets.is_empty() {
-            empty_state("snippets", "Create a snippet", "Save commands you run often.")
-        } else {
-            div().child(section_title("Snippets")).child(grid().children(snippets.iter().map(|snippet| {
-                let script = snippet.script.clone();
-                card(
-                    format!("snippet-{}", snippet.id).into(),
-                    tile("snippets", theme::TILE_BLUE),
-                    snippet.label.clone(),
-                    snippet.subtitle().unwrap_or_default().to_owned(),
-                )
-                .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
-                    if event.click_count() >= 2 {
-                        shell.run_in_terminal(&script, window, cx);
-                    }
-                }))
-            })))
-        };
-        page(
-            "snippets-scroll",
-            vec![tool_button("new-snippet", "snippets", "NEW SNIPPET"), tool_button("shell-history", "logs", "SHELL HISTORY")],
-            body,
-        )
-    }
-
     pub fn render_known_hosts(&self) -> Div {
         let known = &self.vault.known_hosts;
         let body = if known.is_empty() {
