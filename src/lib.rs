@@ -8,4 +8,5 @@ pub mod session;
 pub mod tabs;
 pub mod terminal;
 pub mod theme;
+pub mod transfer;
 pub mod vault;

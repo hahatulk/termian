@@ -2,7 +2,10 @@
 //! the right one shows a remote host once connected.
 
 use futures::StreamExt;
-use gpui::{div, prelude::*, px, rgb, svg, ClickEvent, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
+use gpui::{
+    div, prelude::*, px, rgb, svg, ClickEvent, Context, Div, ExternalPaths, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
+    Stateful, Window,
+};
 use termian_native::files::{crumbs, join, Entry, Panel, SortKey};
 use termian_native::login::{Answer, HostKeyDecision, LoginEvent, LoginState};
 use termian_native::remote_fs::{RemoteEvent, RemoteFs};
@@ -13,10 +16,11 @@ use termian_native::vault::HostId;
 use super::assets::icon;
 use super::hosts::{host_tile, os_tile};
 use super::login_view::{self, LoginActions, LoginTarget};
+use super::sftp_actions::{Actions, DraggedRows, MenuKind};
 use crate::Shell;
 
 /// Folder blue from the legacy file icons.
-const FOLDER: u32 = 0x5ab4f0;
+pub const FOLDER: u32 = 0x5ab4f0;
 const COLUMNS: [(SortKey, &str, f32); 4] =
     [(SortKey::Name, "Name", 0.), (SortKey::Modified, "Date Modified", 175.), (SortKey::Size, "Size", 115.), (SortKey::Kind, "Kind", 115.)];
 
@@ -51,7 +55,7 @@ pub struct Remote {
     label: String,
     os: Option<String>,
     target: SshTarget,
-    connection: RemoteFs,
+    pub connection: RemoteFs,
 }
 
 pub struct SftpState {
@@ -60,6 +64,7 @@ pub struct SftpState {
     pub filtering: Option<Side>,
     pub remote: Option<Remote>,
     pub remote_state: RemoteState,
+    pub actions: Actions,
     /// Bumped on every connect; events from older connections are ignored.
     generation: u64,
 }
@@ -73,6 +78,7 @@ impl SftpState {
             filtering: None,
             remote: None,
             remote_state: RemoteState::Idle,
+            actions: Actions::default(),
             generation: 0,
         };
         state.reload_local();
@@ -92,7 +98,17 @@ impl SftpState {
         }
     }
 
-    fn panel_mut(&mut self, side: Side) -> Option<&mut Panel> {
+    pub fn panel(&self, side: Side) -> Option<&Panel> {
+        match side {
+            Side::Local => Some(&self.local),
+            Side::Remote => match &self.remote_state {
+                RemoteState::Connected { panel, .. } => Some(panel),
+                _ => None,
+            },
+        }
+    }
+
+    pub fn panel_mut(&mut self, side: Side) -> Option<&mut Panel> {
         match side {
             Side::Local => Some(&mut self.local),
             Side::Remote => match &mut self.remote_state {
@@ -116,7 +132,7 @@ impl SftpState {
         self.reload(side);
     }
 
-    fn reload(&mut self, side: Side) {
+    pub fn reload(&mut self, side: Side) {
         match side {
             Side::Local => self.reload_local(),
             Side::Remote => {
@@ -125,6 +141,14 @@ impl SftpState {
                 }
             }
         }
+    }
+
+    /// Transfers and pending copies die with the connection.
+    fn forget_remote_work(&mut self) {
+        self.actions.transfers.clear();
+        self.actions.resolving.clear();
+        self.actions.menu = None;
+        self.actions.dialog = None;
     }
 
     fn handle(&mut self, event: RemoteEvent) {
@@ -150,7 +174,10 @@ impl SftpState {
                     }
                 }
             }
+            (RemoteEvent::Transfer { id, event }, _) => self.on_transfer(id, event),
+            (RemoteEvent::Changed(result), _) => self.on_remote_changed(result),
             (RemoteEvent::Closed(reason), _) => {
+                self.forget_remote_work();
                 self.remote = None;
                 self.remote_state = match reason {
                     Some(reason) => RemoteState::Failed(reason),
@@ -166,6 +193,7 @@ fn icon_button(id: String, name: &str, enabled: bool) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
         .size(px(24.))
+        .flex_none()
         .flex()
         .items_center()
         .justify_center()
@@ -207,6 +235,11 @@ fn centered() -> Div {
 
 impl Shell {
     pub fn render_sftp(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        let panels = self.render_panels(window, cx);
+        div().size_full().flex().flex_col().child(panels.flex_1().min_h_0()).children(self.render_transfer_bar(cx))
+    }
+
+    fn render_panels(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let local = self.render_panel(Side::Local, &self.sftp.local, self.sftp.local_error.as_deref(), window, cx);
         let remote = match &self.sftp.remote_state {
             RemoteState::Connected { panel, error } => self.render_panel(Side::Remote, panel, error.as_deref(), window, cx),
@@ -216,7 +249,7 @@ impl Shell {
             RemoteState::Connecting(login) => self.render_sftp_login(login, window, cx),
         };
         div()
-            .size_full()
+            .w_full()
             .flex()
             .child(local.w_1_2().border_r_1().border_color(rgb(theme::TITLE_BAR)))
             .child(remote.w_1_2())
@@ -258,7 +291,8 @@ impl Shell {
         self.sftp.remote_state = RemoteState::Connecting(LoginState::default());
     }
 
-    fn disconnect_sftp(&mut self) {
+    pub(super) fn disconnect_sftp(&mut self) {
+        self.sftp.forget_remote_work();
         self.sftp.generation += 1;
         self.sftp.remote = None; // dropping the connection closes it
         self.sftp.remote_state = RemoteState::Idle;
@@ -543,7 +577,8 @@ impl Shell {
                             .text_color(rgb(if panel.filter.is_empty() { theme::TEXT } else { theme::ACCENT }))
                             .child(if panel.filter.is_empty() && !filtering { "Filter".to_owned() } else { panel.filter.clone() }),
                     ),
-            );
+            )
+            .child(self.render_actions_button(side, cx));
 
         let navigation = div()
             .h(px(44.))
@@ -569,7 +604,8 @@ impl Shell {
                     cx.notify();
                 },
             )))
-            .children(self.render_crumbs(side, &panel.path, cx));
+            // Long paths are clipped here instead of spilling into the other panel.
+            .child(div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(self.render_crumbs(side, &panel.path, cx)));
 
         let columns = div()
             .h(px(40.))
@@ -598,7 +634,19 @@ impl Shell {
                     }))
             }));
 
-        let mut rows = div().id(SharedString::from(format!("rows-{key}"))).flex_1().overflow_y_scroll();
+        let mut rows = div()
+            .id(SharedString::from(format!("rows-{key}")))
+            .flex_1()
+            .overflow_y_scroll()
+            .on_click(cx.listener(move |shell, _, _, cx| {
+                if let Some(panel) = shell.sftp.panel_mut(side) {
+                    panel.clear_selection();
+                }
+                cx.notify();
+            }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |shell, event: &MouseDownEvent, _, cx| {
+                shell.open_menu(side, event.position, MenuKind::Context, cx);
+            }));
         if let Some(error) = error {
             rows = rows.child(div().p_4().text_color(rgb(theme::TILE_UBUNTU)).child(error.to_owned()));
         }
@@ -606,11 +654,31 @@ impl Shell {
             rows = rows.child(self.render_row(side, None, false, cx));
         }
         for entry in panel.rows() {
-            let selected = panel.selected.as_deref() == Some(entry.name.as_str());
+            let selected = panel.is_selected(&entry.name);
             rows = rows.child(self.render_row(side, Some(entry), selected, cx));
         }
 
-        div().h_full().flex().flex_col().child(header).child(navigation).child(columns).child(rows)
+        // Rows dropped from the other panel, or files from Finder onto the remote one, are copied here.
+        let panel = div()
+            .id(SharedString::from(format!("panel-{key}")))
+            .size_full()
+            .flex()
+            .flex_col()
+            .border_2()
+            .border_color(gpui::transparent_black())
+            .drag_over::<DraggedRows>(move |style, dragged, _, _| {
+                if dragged.side != side { style.border_color(rgb(theme::ACCENT)) } else { style }
+            })
+            .on_drop(cx.listener(move |shell, dragged: &DraggedRows, window, cx| shell.drop_rows(dragged, side, window, cx)))
+            .when(side == Side::Remote, |d| {
+                d.drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme::ACCENT)))
+                    .on_drop(cx.listener(|shell, paths: &ExternalPaths, window, cx| shell.drop_paths(paths, window, cx)))
+            })
+            .child(header)
+            .child(navigation)
+            .child(columns)
+            .child(rows);
+        div().h_full().child(panel)
     }
 
     fn render_crumbs(&self, side: Side, path: &str, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
@@ -625,6 +693,7 @@ impl Shell {
             out.push(
                 div()
                     .id(SharedString::from(format!("crumb-{}-{i}", side.key())))
+                    .min_w_0()
                     .px_1()
                     .flex()
                     .items_center()
@@ -632,8 +701,8 @@ impl Shell {
                     .rounded_sm()
                     .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
                     .text_color(rgb(theme::TEXT))
-                    .child(svg().path(icon("folder")).size(px(16.)).text_color(rgb(FOLDER)))
-                    .child(label)
+                    .child(svg().path(icon("folder")).size(px(16.)).flex_none().text_color(rgb(FOLDER)))
+                    .child(div().min_w_0().truncate().child(label))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if let Some(panel) = shell.sftp.panel_mut(side) {
                             panel.navigate(target.clone());
@@ -658,7 +727,8 @@ impl Shell {
         // Remote rows show permissions under the name, as in the legacy panel.
         let permissions = (side == Side::Remote).then(|| entry.and_then(Entry::permissions_label)).flatten();
         let target = name.clone();
-        div()
+        let menu_target = name.clone();
+        let row = div()
             .id(SharedString::from(format!("row-{}-{name}", side.key())))
             .h(px(if permissions.is_some() { 44. } else { 40. }))
             .px_4()
@@ -669,6 +739,8 @@ impl Shell {
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
+                    .pr_2()
                     .flex()
                     .items_center()
                     .gap_3()
@@ -676,6 +748,8 @@ impl Shell {
                     .child(icon_el)
                     .child(
                         div()
+                            .flex_1()
+                            .min_w_0()
                             .flex()
                             .flex_col()
                             .overflow_hidden()
@@ -687,15 +761,39 @@ impl Shell {
             .child(cell(115., entry.map(Entry::size_label).unwrap_or_default()))
             .child(cell(115., entry.map(Entry::kind).unwrap_or_default()))
             .on_click(cx.listener(move |shell, event: &ClickEvent, _, cx| {
+                cx.stop_propagation();
+                let modifiers = event.modifiers();
                 if event.click_count() >= 2 {
                     shell.sftp.open(side, &target);
                 } else if target != ".." {
                     if let Some(panel) = shell.sftp.panel_mut(side) {
-                        panel.selected = Some(target.clone());
+                        // Cmd adds a row on macOS, Ctrl elsewhere; Shift selects a range.
+                        if modifiers.secondary() {
+                            panel.toggle(&target);
+                        } else if modifiers.shift {
+                            panel.select_range(&target);
+                        } else {
+                            panel.select(&target);
+                        }
                     }
                 }
                 cx.notify();
             }))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |shell, event: &MouseDownEvent, _, cx| {
+                cx.stop_propagation();
+                if menu_target != ".." {
+                    if let Some(panel) = shell.sftp.panel_mut(side) {
+                        if !panel.is_selected(&menu_target) {
+                            panel.select(&menu_target);
+                        }
+                    }
+                }
+                shell.open_menu(side, event.position, MenuKind::Context, cx);
+            }));
+        match entry {
+            Some(_) => row.on_drag(self.drag_value(side, &name), |value, _, _, cx| Shell::drag_preview(value, cx)),
+            None => row,
+        }
     }
 
     fn on_filter_key(&mut self, side: Side, event: &KeyDownEvent, cx: &mut Context<Self>) {

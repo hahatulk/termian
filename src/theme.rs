@@ -26,3 +26,9 @@ pub const TILE_BLUE: u32 = 0x0c4a79;
 pub const TILE_DEBIAN: u32 = 0xd70a53;
 /// Sampled: Ubuntu host tile.
 pub const TILE_UBUNTU: u32 = 0xe95420;
+/// Bundle: `--red`, destructive buttons and errors.
+pub const ERROR: u32 = 0xf25e61;
+/// Bundle: `--dark-grey-3`, dialog header.
+pub const DIALOG_HEADER: u32 = 0x282b3d;
+/// Bundle: `--dark-grey-5`, rows inside dialogs.
+pub const DIALOG_ROW: u32 = 0x3e4257;

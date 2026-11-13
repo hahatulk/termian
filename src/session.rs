@@ -562,7 +562,7 @@ pub(crate) mod tests {
         use russh::keys::PrivateKey;
         use russh::server::{self, Auth, Msg, Session as ServerSession};
         use russh::{Channel, ChannelId};
-        use russh_sftp::protocol::{Attrs, File, FileAttributes, Handle, Name, Status, StatusCode, Version};
+        use russh_sftp::protocol::{Attrs, Data, File, FileAttributes, Handle, Name, OpenFlags, Status, StatusCode, Version};
 
         pub const PASSWORD: &str = "s3cret";
 
@@ -579,10 +579,21 @@ pub(crate) mod tests {
             sftp: Option<ChannelId>,
         }
 
-        /// Read-only SFTP over a local directory, enough for listings.
+        /// SFTP over a local directory: listings, file reads and writes,
+        /// folders, renames and deletes, enough for the SFTP tab.
         struct Files {
             root: std::path::PathBuf,
             listed: std::collections::HashSet<String>,
+            open: std::collections::HashMap<String, std::fs::File>,
+            next: u32,
+        }
+
+        fn ok(id: u32) -> Status {
+            Status { id, status_code: StatusCode::Ok, error_message: "Ok".into(), language_tag: "en".into() }
+        }
+
+        fn failed(_: std::io::Error) -> StatusCode {
+            StatusCode::Failure
         }
 
         impl Files {
@@ -592,6 +603,10 @@ pub(crate) mod tests {
 
             fn attrs(&self, path: &std::path::Path) -> Result<FileAttributes, StatusCode> {
                 std::fs::symlink_metadata(path).map(|m| FileAttributes::from(&m)).map_err(|_| StatusCode::NoSuchFile)
+            }
+
+            fn file(&mut self, handle: &str) -> Result<&mut std::fs::File, StatusCode> {
+                self.open.get_mut(handle).ok_or(StatusCode::Failure)
             }
         }
 
@@ -611,6 +626,9 @@ pub(crate) mod tests {
             }
 
             async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, StatusCode> {
+                if !self.local(&path).is_dir() {
+                    return Err(StatusCode::NoSuchFile);
+                }
                 self.listed.remove(&path);
                 Ok(Handle { id, handle: path })
             }
@@ -626,16 +644,82 @@ pub(crate) mod tests {
                 Ok(Name { id, files })
             }
 
+            async fn open(&mut self, id: u32, path: String, flags: OpenFlags, _: FileAttributes) -> Result<Handle, StatusCode> {
+                let file = std::fs::OpenOptions::new()
+                    .read(flags.contains(OpenFlags::READ))
+                    .write(flags.contains(OpenFlags::WRITE))
+                    .create(flags.contains(OpenFlags::CREATE))
+                    .truncate(flags.contains(OpenFlags::TRUNCATE))
+                    .open(self.local(&path))
+                    .map_err(|_| StatusCode::NoSuchFile)?;
+                self.next += 1;
+                let handle = format!("file{}", self.next);
+                self.open.insert(handle.clone(), file);
+                Ok(Handle { id, handle })
+            }
+
+            async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, StatusCode> {
+                use std::os::unix::fs::FileExt;
+                let mut data = vec![0; len as usize];
+                let read = self.file(&handle)?.read_at(&mut data, offset).map_err(failed)?;
+                if read == 0 {
+                    return Err(StatusCode::Eof);
+                }
+                data.truncate(read);
+                Ok(Data { id, data })
+            }
+
+            async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, StatusCode> {
+                use std::os::unix::fs::FileExt;
+                self.file(&handle)?.write_all_at(&data, offset).map_err(failed)?;
+                Ok(ok(id))
+            }
+
+            async fn fstat(&mut self, id: u32, handle: String) -> Result<Attrs, StatusCode> {
+                let meta = self.file(&handle)?.metadata().map_err(failed)?;
+                Ok(Attrs { id, attrs: FileAttributes::from(&meta) })
+            }
+
+            async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, StatusCode> {
+                use std::os::unix::fs::PermissionsExt;
+                if let Some(mode) = attrs.permissions {
+                    std::fs::set_permissions(self.local(&path), std::fs::Permissions::from_mode(mode & 0o7777)).map_err(failed)?;
+                }
+                Ok(ok(id))
+            }
+
+            async fn mkdir(&mut self, id: u32, path: String, _: FileAttributes) -> Result<Status, StatusCode> {
+                std::fs::create_dir(self.local(&path)).map_err(failed)?;
+                Ok(ok(id))
+            }
+
+            async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+                std::fs::remove_dir(self.local(&path)).map_err(failed)?;
+                Ok(ok(id))
+            }
+
+            async fn remove(&mut self, id: u32, path: String) -> Result<Status, StatusCode> {
+                std::fs::remove_file(self.local(&path)).map_err(failed)?;
+                Ok(ok(id))
+            }
+
+            async fn rename(&mut self, id: u32, from: String, to: String) -> Result<Status, StatusCode> {
+                std::fs::rename(self.local(&from), self.local(&to)).map_err(failed)?;
+                Ok(ok(id))
+            }
+
             async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
-                Ok(Attrs { id, attrs: self.attrs(&self.local(&path))? })
+                let meta = std::fs::metadata(self.local(&path)).map_err(|_| StatusCode::NoSuchFile)?;
+                Ok(Attrs { id, attrs: FileAttributes::from(&meta) })
             }
 
             async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
                 Ok(Attrs { id, attrs: self.attrs(&self.local(&path))? })
             }
 
-            async fn close(&mut self, id: u32, _: String) -> Result<Status, StatusCode> {
-                Ok(Status { id, status_code: StatusCode::Ok, error_message: "Ok".into(), language_tag: "en".into() })
+            async fn close(&mut self, id: u32, handle: String) -> Result<Status, StatusCode> {
+                self.open.remove(&handle);
+                Ok(ok(id))
             }
         }
 
@@ -667,7 +751,7 @@ pub(crate) mod tests {
                     ("sftp", Some(root), Some(stream)) => {
                         session.channel_success(channel)?;
                         self.sftp = Some(channel);
-                        let files = Files { root, listed: Default::default() };
+                        let files = Files { root, listed: Default::default(), open: Default::default(), next: 0 };
                         tokio::spawn(russh_sftp::server::run(stream.into_stream(), files));
                     }
                     _ => session.channel_failure(channel)?,

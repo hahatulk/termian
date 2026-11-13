@@ -1,6 +1,8 @@
 pub mod assets;
+pub mod dialog;
 pub mod hosts;
 pub mod login_view;
 pub mod sections;
 pub mod sftp;
+pub mod sftp_actions;
 pub mod terminal_view;

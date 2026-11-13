@@ -1,0 +1,763 @@
+//! What the SFTP panels can do with files, as in the legacy panel: the
+//! Actions and right-click menus, Rename / New folder / Delete dialogs,
+//! copying to the other panel (menu or drag and drop) with the "File already
+//! exists" question, and the transfer bar with its Transfers dialog.
+
+use std::collections::VecDeque;
+
+use gpui::{
+    div, prelude::*, px, rgb, svg, AnyElement, App, Context, Div, ExternalPaths, FontWeight, KeyDownEvent, MouseButton, Pixels,
+    Point, Render, SharedString, Stateful, Window,
+};
+use termian_native::files::{delete_title, join, name_error, Entry};
+use termian_native::remote_fs::{self, Operation, TransferId};
+use termian_native::theme;
+use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, Item, Job, Progress, Resolver, Step, TransferEvent};
+
+use super::assets::icon;
+use super::dialog::{self, Key, Kind};
+use super::sftp::{RemoteState, Side, SftpState};
+use crate::Shell;
+
+const MENU_WIDTH: f32 = 230.;
+const MENU_ROW: f32 = 32.;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum MenuKind {
+    /// Right click: the short list.
+    Context,
+    /// The Actions button: every item.
+    Actions,
+}
+
+pub struct Menu {
+    pub side: Side,
+    pub position: Point<Pixels>,
+    pub kind: MenuKind,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    CopyToTarget,
+    Rename,
+    Delete,
+    Refresh,
+    NewFolder,
+    ToggleHidden,
+    SelectAll,
+    Close,
+}
+
+pub enum Dialog {
+    Rename { side: Side, from: String, input: String },
+    NewFolder { side: Side, input: String },
+    Delete { side: Side, items: Vec<Entry> },
+    /// "File already exists" for the front of `SftpState::resolving`.
+    Conflict,
+    TransferError(TransferId),
+    Transfers,
+    Error(String),
+}
+
+/// A copy waiting for answers about name clashes.
+pub struct Resolving {
+    resolver: Resolver,
+    direction: Direction,
+    source_dir: String,
+    destination_dir: String,
+    question: Option<ConflictQuestion>,
+    apply_all: bool,
+}
+
+pub struct TransferRow {
+    pub id: TransferId,
+    label: String,
+    is_dir: bool,
+    direction: Direction,
+    progress: Progress,
+    failure: Option<String>,
+}
+
+/// What a row drag carries: the row under the pointer and its panel.
+#[derive(Clone)]
+pub struct DraggedRows {
+    pub side: Side,
+    name: String,
+    count: usize,
+}
+
+struct DragPreview(String);
+
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .rounded_md()
+            .bg(rgb(theme::ACCENT))
+            .text_sm()
+            .text_color(rgb(0xffffff))
+            .child(self.0.clone())
+    }
+}
+
+fn other(side: Side) -> Side {
+    match side {
+        Side::Local => Side::Remote,
+        Side::Remote => Side::Local,
+    }
+}
+
+impl SftpState {
+    /// Handles a transfer event from the remote side.
+    pub fn on_transfer(&mut self, id: TransferId, event: TransferEvent) {
+        let Some(row) = self.actions.transfers.iter_mut().find(|r| r.id == id) else {
+            if matches!(event, TransferEvent::Finished | TransferEvent::Cancelled) {
+                if let Some(remote) = &mut self.remote {
+                    remote.connection.finished(id);
+                }
+            }
+            return;
+        };
+        match event {
+            TransferEvent::Progress(progress) => {
+                row.progress = progress;
+                row.failure = None;
+            }
+            TransferEvent::Failed { error, .. } => row.failure = Some(error),
+            TransferEvent::Finished | TransferEvent::Cancelled => {
+                let destination = if row.direction == Direction::Upload { Side::Remote } else { Side::Local };
+                self.actions.transfers.retain(|r| r.id != id);
+                if let Some(remote) = &mut self.remote {
+                    remote.connection.finished(id);
+                }
+                if matches!(self.actions.dialog, Some(Dialog::TransferError(open)) if open == id)
+                    || (matches!(self.actions.dialog, Some(Dialog::Transfers)) && self.actions.transfers.is_empty())
+                {
+                    self.actions.dialog = None;
+                }
+                self.reload(destination);
+            }
+        }
+    }
+
+    pub fn on_remote_changed(&mut self, result: Result<(), String>) {
+        self.reload(Side::Remote);
+        if let Err(error) = result {
+            self.actions.dialog = Some(Dialog::Error(error));
+        }
+    }
+}
+
+/// State of the actions; part of `SftpState`.
+#[derive(Default)]
+pub struct Actions {
+    pub menu: Option<Menu>,
+    pub dialog: Option<Dialog>,
+    pub resolving: VecDeque<Resolving>,
+    pub transfers: Vec<TransferRow>,
+}
+
+impl Shell {
+    fn connected_remote(&self) -> bool {
+        matches!(self.sftp.remote_state, RemoteState::Connected { .. })
+    }
+
+    fn panel_dir(&self, side: Side) -> Option<String> {
+        self.sftp.panel(side).map(|p| p.path.clone())
+    }
+
+    fn menu_items(&self, side: Side, kind: MenuKind) -> Vec<(Action, &'static str, bool, bool)> {
+        let Some(panel) = self.sftp.panel(side) else { return Vec::new() };
+        let selected = panel.selected.len();
+        let can_copy = selected > 0 && self.connected_remote();
+        let hidden = if panel.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" };
+        // (action, title, red, disabled) in the legacy order.
+        let mut items = vec![
+            (Action::CopyToTarget, "Copy to target directory", false, !can_copy),
+            (Action::Rename, "Rename", false, selected != 1),
+            (Action::Delete, "Delete", true, selected == 0),
+            (Action::Refresh, "Refresh", false, false),
+            (Action::NewFolder, "New Folder", false, false),
+            (Action::ToggleHidden, hidden, false, false),
+            (Action::SelectAll, "Select All", false, false),
+        ];
+        if side == Side::Remote {
+            items.push((Action::Close, "Close", true, false));
+        }
+        if kind == MenuKind::Context {
+            items.retain(|(action, ..)| {
+                matches!(action, Action::CopyToTarget | Action::Rename | Action::Delete | Action::Refresh | Action::NewFolder)
+            });
+        }
+        items
+    }
+
+    pub fn open_menu(&mut self, side: Side, position: Point<Pixels>, kind: MenuKind, cx: &mut Context<Self>) {
+        self.sftp.actions.menu = Some(Menu { side, position, kind });
+        cx.notify();
+    }
+
+    fn run_action(&mut self, side: Side, action: Action, window: &mut Window, cx: &mut Context<Self>) {
+        self.sftp.actions.menu = None;
+        let Some(panel) = self.sftp.panel_mut(side) else { return };
+        let (selected, first, show_hidden) = (panel.selected_entries(), panel.selected.first().cloned(), panel.show_hidden);
+        match action {
+            Action::CopyToTarget => self.start_copy(side, selected, window, cx),
+            Action::Rename => {
+                if let Some(from) = first {
+                    self.open_dialog(Dialog::Rename { side, input: from.clone(), from }, window);
+                }
+            }
+            Action::Delete => self.open_dialog(Dialog::Delete { side, items: selected }, window),
+            Action::Refresh => {
+                panel.clear_selection();
+                self.sftp.reload(side);
+            }
+            Action::NewFolder => self.open_dialog(Dialog::NewFolder { side, input: String::new() }, window),
+            Action::ToggleHidden => {
+                // One setting for both panels, as in the legacy store.
+                self.sftp.local.show_hidden = !show_hidden;
+                if let Some(remote) = self.sftp.panel_mut(Side::Remote) {
+                    remote.show_hidden = !show_hidden;
+                }
+            }
+            Action::SelectAll => panel.select_all(),
+            Action::Close => self.disconnect_sftp(),
+        }
+        cx.notify();
+    }
+
+    fn open_dialog(&mut self, dialog: Dialog, window: &mut Window) {
+        self.sftp.actions.dialog = Some(dialog);
+        window.focus(&self.sftp_dialog_focus);
+    }
+
+    /// Runs file operations on a side, then refreshes it; failures open the Error dialog.
+    fn operate(&mut self, side: Side, operations: Vec<Operation>, cx: &mut Context<Self>) {
+        match side {
+            Side::Remote => {
+                if let Some(remote) = &self.sftp.remote {
+                    remote.connection.operate(operations);
+                }
+            }
+            Side::Local => {
+                let task = cx.background_spawn(async move { remote_fs::operate_locally(operations) });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |shell, cx| {
+                        shell.sftp.reload(Side::Local);
+                        if let Err(error) = result {
+                            shell.sftp.actions.dialog = Some(Dialog::Error(error));
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+        }
+    }
+
+    fn confirm_dialog(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.sftp.actions.dialog.take() else { return };
+        match dialog {
+            Dialog::Rename { side, from, input } => {
+                let (Some(dir), Some(panel)) = (self.panel_dir(side), self.sftp.panel(side)) else { return };
+                if name_error(&input, &panel.names(), Some(&from)).is_some() {
+                    self.sftp.actions.dialog = Some(Dialog::Rename { side, from, input });
+                    return;
+                }
+                if input != from {
+                    self.operate(side, vec![Operation::Rename { from: join(&dir, &from), to: join(&dir, &input) }], cx);
+                }
+            }
+            Dialog::NewFolder { side, input } => {
+                let (Some(dir), Some(panel)) = (self.panel_dir(side), self.sftp.panel(side)) else { return };
+                if name_error(&input, &panel.names(), None).is_some() {
+                    self.sftp.actions.dialog = Some(Dialog::NewFolder { side, input });
+                    return;
+                }
+                self.operate(side, vec![Operation::MakeDir(join(&dir, &input))], cx);
+            }
+            Dialog::Delete { side, items } => {
+                let Some(dir) = self.panel_dir(side) else { return };
+                let operations =
+                    items.iter().map(|e| Operation::Remove { path: join(&dir, &e.name), is_dir: e.is_dir && !e.is_link }).collect();
+                if let Some(panel) = self.sftp.panel_mut(side) {
+                    panel.clear_selection();
+                }
+                self.operate(side, operations, cx);
+            }
+            // These dialogs have no default button: Enter leaves them open.
+            dialog @ (Dialog::Conflict | Dialog::TransferError(_)) => self.sftp.actions.dialog = Some(dialog),
+            Dialog::Transfers | Dialog::Error(_) => {}
+        }
+        cx.notify();
+    }
+
+    fn close_dialog(&mut self, cx: &mut Context<Self>) {
+        if matches!(self.sftp.actions.dialog, Some(Dialog::Conflict)) {
+            // Stop: the whole copy is called off.
+            self.sftp.actions.resolving.pop_front();
+        }
+        self.sftp.actions.dialog = None;
+        cx.notify();
+    }
+
+    fn on_dialog_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let paste = cx.read_from_clipboard().and_then(|item| item.text());
+        let input = match &mut self.sftp.actions.dialog {
+            Some(Dialog::Rename { input, .. } | Dialog::NewFolder { input, .. }) => Some(input),
+            _ => None,
+        };
+        match dialog::edit(input, &event.keystroke, paste) {
+            Key::Edited => {}
+            Key::Enter => self.confirm_dialog(window, cx),
+            Key::Escape => self.close_dialog(cx),
+            Key::Ignored => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Copies entries of one panel into the folder open in the other.
+    pub fn start_copy(&mut self, side: Side, items: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(source_dir), Some(destination)) = (self.panel_dir(side), self.sftp.panel(other(side))) else { return };
+        if items.is_empty() || !self.connected_remote() {
+            return;
+        }
+        let items = items.into_iter().map(|e| Item { name: e.name, is_dir: e.is_dir }).collect();
+        let direction = if side == Side::Local { Direction::Upload } else { Direction::Download };
+        self.sftp.actions.resolving.push_back(Resolving {
+            resolver: Resolver::new(items, &destination.names()),
+            direction,
+            source_dir,
+            destination_dir: destination.path.clone(),
+            question: None,
+            apply_all: false,
+        });
+        self.advance_copies(window, cx);
+    }
+
+    /// Plans queued copies until one needs an answer; starts the planned items.
+    fn advance_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(front) = self.sftp.actions.resolving.front_mut() {
+            match front.resolver.step() {
+                Step::Ask(question) => {
+                    front.question = Some(question);
+                    front.apply_all = false;
+                    self.open_dialog(Dialog::Conflict, window);
+                    return;
+                }
+                Step::Done(planned) => {
+                    let Some(copy) = self.sftp.actions.resolving.pop_front() else { return };
+                    let Some(remote) = &mut self.sftp.remote else { return };
+                    for planned in planned {
+                        let label = planned.target.clone();
+                        let is_dir = planned.item.is_dir;
+                        let job = Job { direction: copy.direction, source_dir: copy.source_dir.clone(), destination_dir: copy.destination_dir.clone(), planned };
+                        let id = remote.connection.transfer(job);
+                        self.sftp.actions.transfers.push(TransferRow { id, label, is_dir, direction: copy.direction, progress: Progress::default(), failure: None });
+                    }
+                }
+            }
+        }
+        if matches!(self.sftp.actions.dialog, Some(Dialog::Conflict)) {
+            self.sftp.actions.dialog = None;
+        }
+        cx.notify();
+    }
+
+    fn answer_conflict(&mut self, conflict: Conflict, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(front) = self.sftp.actions.resolving.front_mut() {
+            front.resolver.answer(conflict, front.apply_all);
+            front.question = None;
+        }
+        self.advance_copies(window, cx);
+    }
+
+    fn control_transfer(&mut self, id: TransferId, control: Control) {
+        if let Some(remote) = &mut self.sftp.remote {
+            remote.connection.control(id, control);
+        }
+        if let Some(row) = self.sftp.actions.transfers.iter_mut().find(|r| r.id == id) {
+            row.failure = None;
+        }
+        if control == Control::Cancel {
+            self.sftp.actions.transfers.retain(|r| r.id != id);
+        }
+        if matches!(self.sftp.actions.dialog, Some(Dialog::TransferError(open)) if open == id) {
+            self.sftp.actions.dialog = None;
+        }
+    }
+
+    /// Drop of rows from the other panel.
+    pub fn drop_rows(&mut self, dragged: &DraggedRows, target: Side, window: &mut Window, cx: &mut Context<Self>) {
+        if dragged.side == target {
+            return;
+        }
+        let Some(panel) = self.sftp.panel(dragged.side) else { return };
+        let items = if panel.is_selected(&dragged.name) {
+            panel.selected_entries()
+        } else {
+            panel.entry(&dragged.name).cloned().into_iter().collect()
+        };
+        self.start_copy(dragged.side, items, window, cx);
+    }
+
+    /// Files dragged in from Finder or Explorer onto the remote panel.
+    pub fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(destination) = self.sftp.panel(Side::Remote) else { return };
+        let (destination_dir, taken) = (destination.path.clone(), destination.names());
+        // One copy per source folder, since a copy reads from one folder.
+        let mut groups: Vec<(String, Vec<Item>)> = Vec::new();
+        for path in paths.paths() {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { continue };
+            let (parent, name) = (parent.to_string_lossy().into_owned(), name.to_string_lossy().into_owned());
+            let item = Item { name, is_dir: path.is_dir() };
+            match groups.iter_mut().find(|(dir, _)| *dir == parent) {
+                Some((_, items)) => items.push(item),
+                None => groups.push((parent, vec![item])),
+            }
+        }
+        for (source_dir, items) in groups {
+            self.sftp.actions.resolving.push_back(Resolving {
+                resolver: Resolver::new(items, &taken),
+                direction: Direction::Upload,
+                source_dir,
+                destination_dir: destination_dir.clone(),
+                question: None,
+                apply_all: false,
+            });
+        }
+        self.advance_copies(window, cx);
+    }
+
+    pub fn drag_value(&self, side: Side, name: &str) -> DraggedRows {
+        let count = self.sftp.panel(side).filter(|p| p.is_selected(name)).map(|p| p.selected.len()).unwrap_or(1);
+        DraggedRows { side, name: name.to_owned(), count }
+    }
+
+    pub fn drag_preview(value: &DraggedRows, cx: &mut App) -> gpui::Entity<impl Render> {
+        let label = if value.count > 1 { format!("{} items", value.count) } else { value.name.clone() };
+        cx.new(|_| DragPreview(label))
+    }
+
+    /// The Actions button in a panel header.
+    pub fn render_actions_button(&self, side: Side, cx: &mut Context<Self>) -> Stateful<Div> {
+        let open = self.sftp.actions.menu.as_ref().is_some_and(|m| m.side == side && m.kind == MenuKind::Actions);
+        div()
+            .id(SharedString::from(format!("actions-{}", side_key(side))))
+            .h(px(28.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded_md()
+            .text_sm()
+            .text_color(rgb(if open { theme::ACCENT } else { theme::TEXT }))
+            .hover(|s| s.text_color(rgb(theme::ACCENT)))
+            .child("Actions")
+            .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
+            .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
+                let at = event.position();
+                shell.open_menu(side, Point { x: at.x - px(MENU_WIDTH - 40.), y: at.y + px(14.) }, MenuKind::Actions, cx);
+            }))
+    }
+
+    /// Menus and dialogs, drawn over the whole window.
+    pub fn render_sftp_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if let Some(dialog) = &self.sftp.actions.dialog {
+            let card = self.render_dialog(dialog, window, cx);
+            return Some(
+                dialog::backdrop(card)
+                    .track_focus(&self.sftp_dialog_focus)
+                    .on_key_down(cx.listener(Self::on_dialog_key))
+                    .into_any_element(),
+            );
+        }
+        let menu = self.sftp.actions.menu.as_ref()?;
+        let items = self.menu_items(menu.side, menu.kind);
+        let viewport = window.viewport_size();
+        let height = px(items.len() as f32 * MENU_ROW + 8.);
+        let left = menu.position.x.min(viewport.width - px(MENU_WIDTH + 8.)).max(px(8.));
+        let top = menu.position.y.min(viewport.height - height - px(8.)).max(px(8.));
+        let side = menu.side;
+        let rows = items.into_iter().map(|(action, title, red, disabled)| {
+            div()
+                .id(SharedString::from(format!("menu-{title}")))
+                .h(px(MENU_ROW))
+                .px_3()
+                .flex()
+                .items_center()
+                .rounded_sm()
+                .text_sm()
+                .text_color(rgb(match (disabled, red) {
+                    (true, _) => theme::TEXT_MUTED,
+                    (false, true) => theme::ERROR,
+                    (false, false) => theme::TEXT,
+                }))
+                .when(!disabled, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+                .child(title)
+                .when(!disabled, |d| {
+                    d.on_click(cx.listener(move |shell, _, window, cx| {
+                        cx.stop_propagation();
+                        shell.run_action(side, action, window, cx);
+                    }))
+                })
+        });
+        Some(
+            div()
+                .id("menu-dismiss")
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|shell, _, _, cx| {
+                    shell.sftp.actions.menu = None;
+                    cx.notify();
+                }))
+                .on_mouse_down(MouseButton::Right, cx.listener(|shell, _, _, cx| {
+                    shell.sftp.actions.menu = None;
+                    cx.notify();
+                }))
+                .child(
+                    div()
+                        .id("menu")
+                        .absolute()
+                        .left(left)
+                        .top(top)
+                        .w(px(MENU_WIDTH))
+                        .p_1()
+                        .rounded_md()
+                        .bg(rgb(theme::SURFACE))
+                        .border_1()
+                        .border_color(rgb(theme::SURFACE_ACTIVE))
+                        .shadow_lg()
+                        // Clicks on the menu itself must not dismiss it before the item runs.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_dialog(&self, dialog: &Dialog, window: &Window, cx: &mut Context<Self>) -> Div {
+        let close = dialog::close_button("dialog-close").on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx)));
+        let confirm = |id: &str, label: &str, kind: Kind, disabled: bool| {
+            let button = dialog::button(id, label, kind, disabled);
+            if disabled { button } else { button.on_click(cx.listener(|shell, _, window, cx| shell.confirm_dialog(window, cx))) }
+        };
+        let focused = self.sftp_dialog_focus.is_focused(window);
+        match dialog {
+            Dialog::Rename { side, from, input } => {
+                let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
+                let error = name_error(input, &taken, Some(from));
+                dialog::card("Rename", false, close, dialog::field("New filename *", input, error, focused), vec![
+                    confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
+                ])
+            }
+            Dialog::NewFolder { side, input } => {
+                let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
+                let error = name_error(input, &taken, None);
+                dialog::card("New folder", false, close, dialog::field("Foldername *", input, error, focused), vec![
+                    confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
+                ])
+            }
+            Dialog::Delete { items, .. } => {
+                let names = items.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join("\n");
+                dialog::card(&delete_title(items), false, close, dialog::text(&names), vec![
+                    confirm("dialog-confirm", "Delete", Kind::Error, false).into_any_element(),
+                ])
+            }
+            Dialog::Conflict => self.render_conflict(close, cx),
+            Dialog::TransferError(id) => {
+                let id = *id;
+                let error = self.sftp.actions.transfers.iter().find(|r| r.id == id).and_then(|r| r.failure.clone()).unwrap_or_default();
+                let send = |control: Control| cx.listener(move |shell: &mut Shell, _, _, cx| {
+                    shell.control_transfer(id, control);
+                    cx.notify();
+                });
+                dialog::card("Error during transfer", true, close, dialog::text(&format!("{error} What do you want to do?")), vec![
+                    dialog::button("transfer-cancel", "Cancel transfer", Kind::Error, false).on_click(send(Control::Cancel)).into_any_element(),
+                    div().flex_1().into_any_element(),
+                    dialog::button("transfer-skip-all", "Skip all", Kind::Text, false).on_click(send(Control::SkipAll)).into_any_element(),
+                    dialog::button("transfer-skip", "Skip", Kind::Text, false).on_click(send(Control::Skip)).into_any_element(),
+                    dialog::button("transfer-retry", "Retry", Kind::Accent, false).on_click(send(Control::Retry)).into_any_element(),
+                ])
+            }
+            Dialog::Transfers => {
+                let rows = self.sftp.actions.transfers.iter().rev().map(|row| self.render_transfer(row, true, cx));
+                let body = div().id("transfer-list").max_h(window.viewport_size().height * 0.5).overflow_y_scroll().flex().flex_col().gap(px(6.)).children(rows);
+                dialog::card("Transfers", false, close, div().child(body), vec![
+                    dialog::button("transfers-discard", "Discard all", Kind::Error, false)
+                        .on_click(cx.listener(|shell, _, _, cx| {
+                            let ids: Vec<_> = shell.sftp.actions.transfers.iter().map(|r| r.id).collect();
+                            for id in ids {
+                                shell.control_transfer(id, Control::Cancel);
+                            }
+                            shell.sftp.actions.dialog = None;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                    div().flex_1().into_any_element(),
+                    dialog::button("transfers-close", "Close", Kind::Accent, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
+                ])
+            }
+            Dialog::Error(error) => dialog::card("Error", false, close, dialog::text(error), Vec::new()),
+        }
+    }
+
+    fn render_conflict(&self, close: Stateful<Div>, cx: &mut Context<Self>) -> Div {
+        let Some(Resolving { question: Some(question), apply_all, .. }) = self.sftp.actions.resolving.front() else {
+            return dialog::card("File already exists", false, close, div(), Vec::new());
+        };
+        let answer = |conflict: Conflict| cx.listener(move |shell: &mut Shell, _, window, cx| shell.answer_conflict(conflict, window, cx));
+        let mut body = dialog::text(&format!(
+            "An item named \"{}\" already exists in this location.\nDo you want to replace it with the one you are moving?",
+            question.name
+        ));
+        if !question.single {
+            body = div().child(body).child(div().mt(px(25.)).child(dialog::checkbox("apply-all", "Apply to All", *apply_all).on_click(
+                cx.listener(|shell, _, _, cx| {
+                    if let Some(front) = shell.sftp.actions.resolving.front_mut() {
+                        front.apply_all = !front.apply_all;
+                    }
+                    cx.notify();
+                }),
+            )));
+        }
+        let mut buttons = vec![
+            dialog::button("conflict-stop", "Stop", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
+            div().flex_1().into_any_element(),
+            dialog::button("conflict-skip", "Skip", Kind::Text, false).on_click(answer(Conflict::Skip)).into_any_element(),
+            dialog::button("conflict-replace", "Replace", Kind::Regular, false).on_click(answer(Conflict::Replace)).into_any_element(),
+            dialog::button("conflict-duplicate", "Duplicate", Kind::Accent, false).on_click(answer(Conflict::Duplicate)).into_any_element(),
+        ];
+        if question.is_dir {
+            buttons.push(dialog::button("conflict-merge", "Merge", Kind::Regular, false).on_click(answer(Conflict::Merge)).into_any_element());
+        }
+        dialog::card("File already exists", false, close, body, buttons)
+    }
+
+    /// One transfer: icon, path and numbers, then the bar or the failure, Retry and Discard.
+    fn render_transfer(&self, row: &TransferRow, in_dialog: bool, cx: &mut Context<Self>) -> Stateful<Div> {
+        let id = row.id;
+        let link = |key: &str, label: &str| {
+            div()
+                .id(SharedString::from(format!("{key}-{id}-{in_dialog}")))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(theme::TEXT))
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .child(label.to_owned())
+        };
+        let percentage = row.progress.percentage().clamp(0., 100.);
+        let end = match &row.failure {
+            Some(error) => div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(
+                    div()
+                        .id(SharedString::from(format!("failed-{id}-{in_dialog}")))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_color(rgb(theme::ERROR))
+                        .child(svg().path(icon("alert")).size(px(14.)).text_color(rgb(theme::ERROR)))
+                        .child(if row.direction == Direction::Upload { "Upload failed" } else { "Download failed" })
+                        .tooltip({
+                            let error = error.clone();
+                            move |_, cx| cx.new(|_| DragPreview(error.clone())).into()
+                        })
+                        .on_click(cx.listener(move |shell, _, window, cx| {
+                            shell.open_dialog(Dialog::TransferError(id), window);
+                            cx.notify();
+                        })),
+                )
+                .child(link("retry", "Retry").on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.control_transfer(id, Control::Retry);
+                    cx.notify();
+                }))),
+            // Legacy bar: 30% of the row, between 80 and 300 px.
+            None => div().w(gpui::relative(0.3)).min_w(px(80.)).max_w(px(300.)).flex_none().px(px(10.)).child(
+                div()
+                    .h(px(4.))
+                    .rounded_full()
+                    .bg(rgb(theme::SURFACE_ACTIVE))
+                    .child(div().h_full().rounded_full().bg(rgb(theme::ACCENT)).w(gpui::relative(percentage / 100.))),
+            ),
+        };
+        div()
+            .id(SharedString::from(format!("transfer-{id}-{in_dialog}")))
+            .h(px(40.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .when(in_dialog, |d| d.rounded_lg().bg(rgb(theme::DIALOG_ROW)))
+            .child(svg().path(icon(if row.is_dir { "folder" } else { "file" })).size(px(18.)).flex_none().text_color(rgb(if row.is_dir { super::sftp::FOLDER } else { theme::TEXT })))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(div().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(row.label.clone()))
+                    .when(row.failure.is_none(), |d| {
+                        d.child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(row.progress.summary(row.is_dir)))
+                    }),
+            )
+            .child(end)
+            .child(link("discard", "Discard").on_click(cx.listener(move |shell, _, _, cx| {
+                shell.control_transfer(id, Control::Cancel);
+                cx.notify();
+            })))
+    }
+
+    /// The bar under both panels: newest transfer and the way to see all.
+    pub fn render_transfer_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let newest = self.sftp.actions.transfers.last()?;
+        let count = self.sftp.actions.transfers.len();
+        let details = if count > 1 { format!("All transfers ({count})") } else { "Details".to_owned() };
+        Some(
+            div()
+                .flex_none()
+                .pr(px(10.))
+                .flex()
+                .items_center()
+                .bg(rgb(theme::DIALOG_HEADER))
+                .border_t_1()
+                .border_color(rgb(theme::TITLE_BAR))
+                .child(div().flex_1().min_w_0().child(self.render_transfer(newest, false, cx)))
+                .child(
+                    div()
+                        .id("transfers-details")
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(rgb(theme::TEXT))
+                        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                        .child(details)
+                        .on_click(cx.listener(|shell, _, window, cx| {
+                            shell.open_dialog(Dialog::Transfers, window);
+                            cx.notify();
+                        })),
+                ),
+        )
+    }
+}
+
+fn side_key(side: Side) -> &'static str {
+    match side {
+        Side::Local => "local",
+        Side::Remote => "remote",
+    }
+}

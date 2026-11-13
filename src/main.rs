@@ -34,6 +34,7 @@ pub struct Shell {
     sftp: ui::sftp::SftpState,
     sftp_filter_focus: FocusHandle,
     sftp_answer_focus: FocusHandle,
+    sftp_dialog_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -65,6 +66,7 @@ impl Shell {
             sftp: ui::sftp::SftpState::new(),
             sftp_filter_focus: cx.focus_handle(),
             sftp_answer_focus: cx.focus_handle(),
+            sftp_dialog_focus: cx.focus_handle(),
         }
     }
 
@@ -186,6 +188,7 @@ impl Render for Shell {
 
         div()
             .size_full()
+            .relative()
             .flex()
             .flex_col()
             .bg(rgb(theme::BACKGROUND))
@@ -214,6 +217,7 @@ impl Render for Shell {
                     .children(toolbar),
             )
             .child(div().flex_1().min_h_0().child(content))
+            .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))
     }
 }
 

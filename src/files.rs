@@ -111,7 +111,10 @@ pub struct Panel {
     pub filter: String,
     /// Dotfiles are hidden unless this is set, as in the legacy panel.
     pub show_hidden: bool,
-    pub selected: Option<String>,
+    /// Selected names, in the order they were picked.
+    pub selected: Vec<String>,
+    /// Last clicked name: the start of a Shift-click range.
+    anchor: Option<String>,
     back: Vec<String>,
     forward: Vec<String>,
 }
@@ -125,7 +128,8 @@ impl Panel {
             descending: false,
             filter: String::new(),
             show_hidden: false,
-            selected: None,
+            selected: Vec::new(),
+            anchor: None,
             back: Vec::new(),
             forward: Vec::new(),
         }
@@ -133,8 +137,10 @@ impl Panel {
 
     pub fn set_entries(&mut self, entries: Vec<Entry>) {
         self.entries = entries.into_iter().filter(|e| e.name != "." && e.name != "..").collect();
-        if self.selected.as_ref().is_some_and(|s| !self.entries.iter().any(|e| &e.name == s)) {
-            self.selected = None;
+        let entries = &self.entries;
+        self.selected.retain(|name| entries.iter().any(|e| &e.name == name));
+        if self.anchor.as_ref().is_some_and(|a| !self.selected.contains(a)) {
+            self.anchor = None;
         }
     }
 
@@ -216,12 +222,86 @@ impl Panel {
 
     fn reset_view(&mut self) {
         self.entries.clear();
-        self.selected = None;
+        self.clear_selection();
         self.filter.clear();
+    }
+
+    pub fn is_selected(&self, name: &str) -> bool {
+        self.selected.iter().any(|s| s == name)
+    }
+
+    /// Plain click: only this row.
+    pub fn select(&mut self, name: &str) {
+        self.selected = vec![name.to_owned()];
+        self.anchor = Some(name.to_owned());
+    }
+
+    /// Cmd-click (Ctrl on Windows and Linux): adds or removes one row.
+    pub fn toggle(&mut self, name: &str) {
+        if self.is_selected(name) {
+            self.selected.retain(|s| s != name);
+        } else {
+            self.selected.push(name.to_owned());
+        }
+        self.anchor = Some(name.to_owned());
+    }
+
+    /// Shift-click: the visible rows from the last clicked one to this one.
+    /// Like the legacy table, the clicked row becomes the next range start.
+    pub fn select_range(&mut self, name: &str) {
+        let names: Vec<String> = self.rows().iter().map(|e| e.name.clone()).collect();
+        let Some(end) = names.iter().position(|n| n == name) else { return };
+        let start = self.anchor.as_ref().and_then(|a| names.iter().position(|n| n == a)).unwrap_or(0);
+        let (from, to) = if start <= end { (start, end) } else { (end, start) };
+        self.selected = names[from..=to].to_vec();
+        self.anchor = Some(name.to_owned());
+    }
+
+    pub fn select_all(&mut self) {
+        self.selected = self.rows().iter().map(|e| e.name.clone()).collect();
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+    }
+
+    /// Selected entries in listing order.
+    pub fn selected_entries(&self) -> Vec<Entry> {
+        self.rows().into_iter().filter(|e| self.is_selected(&e.name)).cloned().collect()
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        self.entries.iter().map(|e| e.name.clone()).collect()
     }
 
     pub fn entry(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name == name)
+    }
+}
+
+/// `Do you want to delete these files?` wording of the legacy confirmation.
+pub fn delete_title(entries: &[Entry]) -> String {
+    let folders = entries.iter().filter(|e| e.is_dir && !e.is_link).count();
+    let files = entries.len() - folders;
+    let what = |count: usize, one: &str, many: &str| if count == 1 { format!("this {one}") } else { format!("these {many}") };
+    let subject = match (folders, files) {
+        (0, n) => what(n, "file", "files"),
+        (n, 0) => what(n, "folder", "folders"),
+        _ => "these items".to_owned(),
+    };
+    format!("Do you want to delete {subject}?")
+}
+
+/// Error under the name field of Rename and New folder, as in the legacy
+/// dialogs. `current` is the name being renamed, which may be kept.
+pub fn name_error(name: &str, taken: &[String], current: Option<&str>) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("Required")
+    } else if Some(name) != current && taken.iter().any(|t| t == name) {
+        Some("Name is already used")
+    } else {
+        None
     }
 }
 
@@ -312,9 +392,9 @@ mod tests {
     #[test]
     fn history_back_forward_and_up() {
         let mut p = panel();
-        p.selected = Some("docs".into());
+        p.select("docs");
         p.navigate("/home/u/docs".into());
-        assert_eq!(p.selected, None);
+        assert!(p.selected.is_empty());
         assert!(p.up());
         assert_eq!(p.path, "/home/u");
         assert!(p.go_back());
@@ -324,6 +404,44 @@ mod tests {
         p.navigate("/".into());
         assert!(!p.can_go_forward());
         assert!(!p.up());
+    }
+
+    #[test]
+    fn click_cmd_click_and_shift_click_select_like_the_legacy_table() {
+        let mut p = panel();
+        p.select("tauri");
+        assert_eq!(p.selected, ["tauri"]);
+        p.toggle("README.md");
+        assert_eq!(p.selected, ["tauri", "README.md"]);
+        p.toggle("tauri");
+        assert_eq!(p.selected, ["README.md"]);
+        p.select("docs");
+        p.select_range("AGENTS.md");
+        assert_eq!(p.selected, ["docs", "tauri", "AGENTS.md"]);
+        p.select_range("tauri");
+        assert_eq!(p.selected, ["tauri", "AGENTS.md"], "the next range starts at the last clicked row");
+        p.select_all();
+        assert_eq!(p.selected_entries().len(), 4);
+        p.set_entries(vec![entry("docs", true, 0, 10)]);
+        assert_eq!(p.selected, ["docs"], "vanished rows leave the selection");
+    }
+
+    #[test]
+    fn delete_title_names_what_is_selected() {
+        let (dir, file) = (entry("docs", true, 0, 0), entry("a.txt", false, 1, 0));
+        assert_eq!(delete_title(std::slice::from_ref(&file)), "Do you want to delete this file?");
+        assert_eq!(delete_title(&[file.clone(), file.clone()]), "Do you want to delete these files?");
+        assert_eq!(delete_title(&[dir.clone(), dir.clone()]), "Do you want to delete these folders?");
+        assert_eq!(delete_title(&[dir, file]), "Do you want to delete these items?");
+    }
+
+    #[test]
+    fn name_errors_match_the_legacy_dialogs() {
+        let taken = ["docs".to_owned(), "a.txt".to_owned()];
+        assert_eq!(name_error("", &taken, None), Some("Required"));
+        assert_eq!(name_error("docs", &taken, None), Some("Name is already used"));
+        assert_eq!(name_error("a.txt", &taken, Some("a.txt")), None, "renaming to the same name is allowed");
+        assert_eq!(name_error("new", &taken, None), None);
     }
 
     #[test]
