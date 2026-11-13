@@ -40,7 +40,7 @@ impl Shell {
         let active = self.tabs.active();
         match &active.kind {
             TabKind::Session { .. } => {
-                if let Some(view) = self.terminals.get(&active.id) {
+                if let Some(view) = self.focused_view(active.id) {
                     view.read(cx).focus(window);
                 }
             }

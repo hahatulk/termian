@@ -1,14 +1,14 @@
 mod ui;
 
 use gpui::{
-    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, Entity, FocusHandle, SharedString, Stateful,
+    div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, FocusHandle, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
 };
 use std::collections::HashMap;
 use termian_native::session::{self, SshTarget};
 use termian_native::tabs::TabId;
 use termian_native::vault::HostId;
-use ui::terminal_view::{Connection, TerminalEvent, TerminalView};
+use ui::terminal_view::{Connection, TerminalView};
 use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
 use termian_native::store::Store;
@@ -66,9 +66,13 @@ pub struct Shell {
     editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
-    terminals: HashMap<TabId, Entity<TerminalView>>,
-    /// The history entry (and log) behind each session tab.
-    tab_history: HashMap<TabId, u64>,
+    /// Each terminal tab's panes (one unless split).
+    workspaces: HashMap<TabId, ui::workspace::Workspace>,
+    next_pane: u64,
+    /// The next terminal opened goes beside this pane instead of a new tab.
+    split_into: Option<(TabId, u64)>,
+    /// A terminal tab's right-click menu.
+    tab_menu: Option<(TabId, gpui::Point<gpui::Pixels>)>,
     query: String,
     search_focus: FocusHandle,
     sftp: ui::sftp::SftpState,
@@ -210,8 +214,10 @@ impl Shell {
             root_focus: cx.focus_handle(),
             editor_focus: cx.focus_handle(),
             group: None,
-            terminals: HashMap::new(),
-            tab_history: HashMap::new(),
+            workspaces: HashMap::new(),
+            next_pane: 0,
+            split_into: None,
+            tab_menu: None,
             query: String::new(),
             search_focus: cx.focus_handle(),
             sftp: ui::sftp::SftpState::new(),
@@ -262,51 +268,25 @@ impl Shell {
             .bg(rgb(if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
-                if let Some(view) = shell.terminals.get(&id) {
+                if let Some(view) = shell.focused_view(id) {
                     view.read(cx).focus(window);
                 }
                 cx.notify();
             }))
+            .when(matches!(tab.kind, TabKind::Session { .. }), |d| {
+                d.on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                    shell.tab_menu = Some((id, event.position));
+                    cx.notify();
+                }))
+            })
             .child(leading)
-            .child(div().truncate().child(SharedString::from(tab.title().to_owned())))
+            .child(div().flex_1().truncate().child(SharedString::from(tab.title().to_owned())))
+            // Legacy «Broadcast indicator» on a broadcasting tab.
+            .when(self.is_broadcasting(id), |d| d.child(div().size(px(8.)).rounded_full().bg(rgb(theme::ERROR))))
     }
 }
 
 impl Shell {
-    fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, history: Option<u64>, cx: &mut Context<Self>) {
-        let id = self.tabs.open(TabKind::Session { title });
-        if self.side_panel.is_some() {
-            view.update(cx, |view, cx| view.set_right_inset(ui::side_panel::WIDTH, cx));
-        }
-        cx.subscribe(&view, move |shell, view, event: &TerminalEvent, cx| {
-            // A Serial tab gets its Logs row only once the port opens.
-            if let TerminalEvent::SerialConnected(label) = event {
-                let (entry, log) = shell.record_session(None, label, "serial".into());
-                shell.tab_history.insert(id, entry);
-                view.update(cx, |view, _| view.set_log(log));
-                return;
-            }
-            let history = shell.tab_history.get(&id).copied().or(history);
-            if let TerminalEvent::Os(os) = event {
-                shell.host_os_detected(history, os);
-                return;
-            }
-            if shell.session_ended(history) {
-                shell.backup_logs_soon(cx);
-            }
-            if let TerminalEvent::Close = event {
-                shell.close_terminal_tab(id);
-            }
-            cx.notify();
-        })
-        .detach();
-        if let Some(history) = history {
-            self.tab_history.insert(id, history);
-        }
-        self.terminals.insert(id, view);
-        cx.notify();
-    }
-
     /// «Detect OS»: a saved host without a system gets the one its server reported.
     fn host_os_detected(&mut self, history: Option<u64>, os: &str) {
         let host = history.and_then(|h| self.vault.history.iter().find(|e| e.id == h)).and_then(|e| e.host);
@@ -324,14 +304,6 @@ impl Shell {
             return true;
         }
         false
-    }
-
-    /// Closes a tab; dropping its terminal ends the session and finishes its log.
-    fn close_terminal_tab(&mut self, id: TabId) {
-        let history = self.tab_history.remove(&id);
-        self.session_ended(history);
-        self.tabs.close(id);
-        self.terminals.remove(&id);
     }
 
     /// Adds a history entry with a fresh encrypted session log (FR-L1, FR-L2).
@@ -356,7 +328,7 @@ impl Shell {
         let (history, log) = self.record_session(None, &title, "local".into());
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::new(session, &settings, window, cx).with_log(log));
-        self.add_terminal(title, view, Some(history), cx);
+        self.add_terminal(title, view, Some(history), ui::workspace::Origin::Local, cx);
     }
 
     /// Opens an SSH tab that shows the connection screen until the shell is ready.
@@ -372,10 +344,14 @@ impl Shell {
         target.options.detect_os = self.vault.terminal.detect_os && unknown;
         let subtitle = std::iter::once("ssh").chain(target.username.as_deref()).collect::<Vec<_>>().join(", ");
         let (history, log) = self.record_session(host, &label, subtitle);
+        let origin = match host {
+            Some(host) => ui::workspace::Origin::Host(host),
+            None => ui::workspace::Origin::Ssh { label: label.clone(), os: os.clone(), target: Box::new(target.clone()) },
+        };
         let connection = Connection { label: label.clone(), os, target };
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log).with_startup(startup));
-        self.add_terminal(label, view, Some(history), cx);
+        self.add_terminal(label, view, Some(history), origin, cx);
     }
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
@@ -432,14 +408,14 @@ impl Shell {
         let title = entry.label.clone();
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
-        self.add_terminal(title, view, None, cx);
+        self.add_terminal(title, view, None, ui::workspace::Origin::None, cx);
     }
 
     /// «SERIAL» / «Open Serial Connection»: a tab with the legacy serial form.
     pub fn open_serial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::serial(&settings, window, cx));
-        self.add_terminal("Serial".into(), view, None, cx);
+        self.add_terminal("Serial".into(), view, None, ui::workspace::Origin::None, cx);
     }
 
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -458,10 +434,10 @@ impl Render for Shell {
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
             TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
-            TabKind::Session { .. } => match self.terminals.get(&self.tabs.active().id) {
-                Some(view) => div().size_full().flex().child(div().flex_1().min_w_0().h_full().child(view.clone())).children(self.render_side_panel(window, cx)).into_any_element(),
-                None => div().into_any_element(),
-            },
+            TabKind::Session { .. } => {
+                let tab = self.tabs.active().id;
+                div().size_full().flex().child(div().flex_1().min_w_0().h_full().child(self.render_workspace(tab, window, cx))).children(self.render_side_panel(window, cx)).into_any_element()
+            }
             TabKind::Launcher => self.render_launcher(window, cx),
         };
 
@@ -495,6 +471,7 @@ impl Render for Shell {
                     )
                     .child(div().flex_1())
                     .children(toolbar)
+                    .children(self.render_broadcast_button(cx))
                     .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx))),
             )
             .child(div().flex_1().min_h_0().child(content))
@@ -504,6 +481,7 @@ impl Render for Shell {
             })
             .track_focus(&self.root_focus)
             .children(self.render_palette(window, cx))
+            .children(self.render_tab_menu(window, cx))
             .children(self.render_update_notice(cx))
             .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))

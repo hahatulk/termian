@@ -34,6 +34,8 @@ pub enum TerminalEvent {
     Os(String),
     /// A serial port opened (its label); the window records the session.
     SerialConnected(String),
+    /// Bytes the user typed or pasted (for Broadcast input).
+    Input(Vec<u8>),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -74,8 +76,9 @@ pub struct TerminalView {
     search: Option<String>,
     search_found: bool,
     search_focus: FocusHandle,
-    /// Width the window gives to the side panel, beside the terminal.
-    right_inset: f32,
+    /// The pane's place in the window (x, y, width, height); the whole area
+    /// under the tab bar until the window sets it.
+    area: Option<(f32, f32, f32, f32)>,
     /// The Serial tab's form, until it connects.
     serial_form: Option<serial_form::SerialForm>,
 }
@@ -122,7 +125,7 @@ impl TerminalView {
             search: None,
             search_found: true,
             search_focus: cx.focus_handle(),
-            right_inset: 0.,
+            area: None,
             serial_form: None,
         }
     }
@@ -467,7 +470,9 @@ impl TerminalView {
                 }
             } else if keystroke.key == "v" {
                 if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.session.write(&paste_bytes(&text, self.terminal.bracketed_paste()));
+                    let bytes = paste_bytes(&text, self.terminal.bracketed_paste());
+                    self.session.write(&bytes);
+                    cx.emit(TerminalEvent::Input(bytes));
                 }
             }
             return; // other Cmd shortcuts belong to the app
@@ -480,6 +485,7 @@ impl TerminalView {
             self.terminal.scroll(i32::MIN / 2); // typing jumps back to the prompt
             self.terminal.clear_selection();
             self.session.write(&bytes);
+            cx.emit(TerminalEvent::Input(bytes));
             cx.stop_propagation();
             cx.notify();
         }
@@ -487,8 +493,9 @@ impl TerminalView {
 
     /// Grid cell under a window position.
     fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
-        let x = (f32::from(position.x) - PADDING).max(0.);
-        let y = (f32::from(position.y) - TOP_INSET - PADDING).max(0.);
+        let (left, top) = self.area.map_or((0., TOP_INSET), |(x, y, _, _)| (x, y));
+        let x = (f32::from(position.x) - left - PADDING).max(0.);
+        let y = (f32::from(position.y) - top - PADDING).max(0.);
         ((y / self.line_height()) as usize, (x / self.cell_width.unwrap_or(8.)).round() as usize)
     }
 
@@ -529,15 +536,24 @@ impl TerminalView {
         }
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
             self.terminal.scroll(i32::MIN / 2);
-            self.session.write(&paste_bytes(&text, self.terminal.bracketed_paste()));
+            let bytes = paste_bytes(&text, self.terminal.bracketed_paste());
+            self.session.write(&bytes);
+            cx.emit(TerminalEvent::Input(bytes));
         }
         cx.stop_propagation();
     }
 
-    /// Room taken by the side panel; the grid refits on the next frame.
-    pub fn set_right_inset(&mut self, width: f32, cx: &mut Context<Self>) {
-        self.right_inset = width;
-        cx.notify();
+    /// The pane's place in the window; the grid refits when it renders.
+    pub fn set_area(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        self.area = Some((x, y, width, height));
+    }
+
+    /// Input from another pane while broadcasting, as if typed here.
+    pub fn write_input(&mut self, bytes: &[u8]) {
+        if !self.closed && self.serial_form.is_none() && self.login.is_none() {
+            self.terminal.scroll(i32::MIN / 2);
+            self.session.write(bytes);
+        }
     }
 
     /// Pastes `text` into the session without running it (legacy «Paste»).
@@ -674,7 +690,8 @@ impl Render for TerminalView {
             return form.into_any_element();
         }
         let viewport = window.viewport_size();
-        self.fit(viewport.width - px(self.right_inset), viewport.height - px(TOP_INSET), window);
+        let (width, height) = self.area.map_or((viewport.width, viewport.height - px(TOP_INSET)), |(_, _, w, h)| (px(w), px(h)));
+        self.fit(width, height, window);
         let snapshot = self.terminal.snapshot();
         let focused = self.focus.is_focused(window);
         let cell_width = self.cell_width.unwrap_or(8.);
@@ -720,7 +737,9 @@ impl Render for TerminalView {
             .on_action(cx.listener(|view, _: &PasteToTerminal, _, cx| {
                 if let (false, Some(text)) = (view.closed, cx.read_from_clipboard().and_then(|item| item.text())) {
                     view.terminal.scroll(i32::MIN / 2);
-                    view.session.write(&paste_bytes(&text, view.terminal.bracketed_paste()));
+                    let bytes = paste_bytes(&text, view.terminal.bracketed_paste());
+                    view.session.write(&bytes);
+                    cx.emit(TerminalEvent::Input(bytes));
                 }
             }))
             .on_action(cx.listener(|view, _: &SelectAllInTerminal, _, cx| {

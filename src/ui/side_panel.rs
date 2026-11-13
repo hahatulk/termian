@@ -53,12 +53,8 @@ impl Shell {
             Some(_) => None,
             None => Some(SidePanel::default()),
         };
-        let inset = if self.side_panel.is_some() { WIDTH } else { 0. };
-        for view in self.terminals.values() {
-            view.update(cx, |view, cx| view.set_right_inset(inset, cx));
-        }
         if self.side_panel.is_none() {
-            if let Some(view) = self.terminals.get(&self.tabs.active().id) {
+            if let Some(view) = self.focused_view(self.tabs.active().id) {
                 view.read(cx).focus(window);
             }
         }
@@ -81,7 +77,7 @@ impl Shell {
     }
 
     fn active_terminal(&self) -> Option<gpui::Entity<super::terminal_view::TerminalView>> {
-        self.terminals.get(&self.tabs.active().id).cloned()
+        self.focused_view(self.tabs.active().id)
     }
 
     /// Run types the script and Enter; Paste only types it.
@@ -97,7 +93,7 @@ impl Shell {
     }
 
     fn run_in_all_tabs(&mut self, script: &str, cx: &mut Context<Self>) {
-        for view in self.terminals.values() {
+        for view in self.all_views() {
             view.update(cx, |view, _| view.run(script));
         }
         if let Some(panel) = &mut self.side_panel {

@@ -46,7 +46,7 @@ impl Shell {
         self.save_vault();
         self.load_terminal_font(cx);
         let settings = self.vault.terminal.clone();
-        for view in self.terminals.values() {
+        for view in self.all_views() {
             view.update(cx, |view, cx| view.apply_settings(&settings, cx));
         }
         cx.notify();

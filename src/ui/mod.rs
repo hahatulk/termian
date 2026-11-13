@@ -23,3 +23,4 @@ pub mod sftp;
 pub mod sftp_actions;
 pub mod terminal_view;
 pub mod update;
+pub mod workspace;

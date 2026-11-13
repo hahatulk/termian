@@ -3,6 +3,7 @@
 //! rest act on the main window.
 
 use gpui::{App, Context, KeyBinding, Window};
+use termian_native::split_tree::Direction;
 use termian_native::shortcuts::{self, ShortcutSettings};
 use termian_native::tabs::TabKind;
 
@@ -40,6 +41,10 @@ gpui::actions!(
         SwitchToTab7,
         SwitchToTab8,
         SwitchToTab9,
+        FocusPaneUp,
+        FocusPaneDown,
+        FocusPaneLeft,
+        FocusPaneRight,
     ]
 );
 
@@ -103,6 +108,14 @@ pub fn bind(settings: &ShortcutSettings, cx: &mut App) {
     if !tab_mod.is_empty() {
         bindings.extend((1..=9).map(|n| tab_binding(&format!("{tab_mod}-{n}"), n)));
     }
+    // «Move focus between Split View panes»: the modifier with the arrows.
+    let pane_mod = shortcuts::modifier_keystroke(&scheme.pane_mod);
+    if !pane_mod.is_empty() {
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-up"), FocusPaneUp, Some("Terminal")));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-down"), FocusPaneDown, Some("Terminal")));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-left"), FocusPaneLeft, Some("Terminal")));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-right"), FocusPaneRight, Some("Terminal")));
+    }
     cx.bind_keys(bindings);
 }
 
@@ -136,7 +149,7 @@ impl Shell {
 
     /// A terminal tab takes the keyboard; other tabs give it to the window.
     fn focus_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.terminals.get(&self.tabs.active().id) {
+        match self.focused_view(self.tabs.active().id) {
             Some(view) => view.read(cx).focus(window),
             None => window.focus(&self.root_focus),
         }
@@ -164,6 +177,11 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| shell.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|shell, _: &JumpTo, window, cx| shell.open_palette(String::new(), window, cx)))
             .on_action(cx.listener(|shell, _: &ToggleSidepanel, window, cx| shell.toggle_side_panel(window, cx)))
+            .on_action(cx.listener(|shell, _: &ToggleBroadcastMode, _, cx| shell.toggle_broadcast(cx)))
+            .on_action(cx.listener(|shell, _: &FocusPaneUp, window, cx| shell.focus_pane(Direction::Up, window, cx)))
+            .on_action(cx.listener(|shell, _: &FocusPaneDown, window, cx| shell.focus_pane(Direction::Down, window, cx)))
+            .on_action(cx.listener(|shell, _: &FocusPaneLeft, window, cx| shell.focus_pane(Direction::Left, window, cx)))
+            .on_action(cx.listener(|shell, _: &FocusPaneRight, window, cx| shell.focus_pane(Direction::Right, window, cx)))
             .on_action(cx.listener(|shell, _: &NewTab, window, cx| {
                 shell.tabs.open(TabKind::Launcher);
                 window.focus(&shell.launcher_focus);
