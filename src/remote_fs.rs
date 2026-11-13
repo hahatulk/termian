@@ -26,6 +26,8 @@ pub enum RemoteEvent {
     Transfer { id: TransferId, event: TransferEvent },
     /// A rename, delete or new folder finished.
     Changed(Result<(), String>),
+    /// Fresh names in a folder, asked for with [`RemoteFs::names`].
+    Names { request: u64, result: Result<Vec<String>, String> },
     Closed(Option<String>),
 }
 
@@ -41,6 +43,7 @@ pub enum Operation {
 
 enum Work {
     List(String),
+    Names { request: u64, path: String },
     Transfer { id: TransferId, job: Job, controls: UnboundedReceiver<Control> },
     Operate(Vec<Operation>),
 }
@@ -87,6 +90,11 @@ impl RemoteFs {
 
     pub fn list(&self, path: &str) {
         let _ = self.commands.unbounded_send(Command::Work(Work::List(path.to_owned())));
+    }
+
+    /// Reads the names in a folder again, e.g. right before a copy into it.
+    pub fn names(&self, request: u64, path: &str) {
+        let _ = self.commands.unbounded_send(Command::Work(Work::Names { request, path: path.to_owned() }));
     }
 
     /// Starts copying between the local disk and this host.
@@ -164,6 +172,12 @@ async fn run(
                     add_owners(raw, &path, entries).await;
                 }
                 if events.unbounded_send(RemoteEvent::Listed { path, result }).is_err() {
+                    break;
+                }
+            }
+            Work::Names { request, path } => {
+                let result = sftp.read_dir(&path).await.map(|dir| dir.map(|e| e.file_name()).collect()).map_err(|e| format!("{path}: {e}"));
+                if events.unbounded_send(RemoteEvent::Names { request, result }).is_err() {
                     break;
                 }
             }
@@ -503,6 +517,13 @@ mod tests {
 
         remote.operate(vec![Operation::Remove { path: "/nothing".into(), is_dir: false }]);
         assert!(matches!(next(&mut events), RemoteEvent::Changed(Err(_))));
+
+        remote.names(7, "/");
+        let RemoteEvent::Names { request: 7, result: Ok(mut names) } = next(&mut events) else { panic!("expected names") };
+        names.sort();
+        assert_eq!(names, ["new", "todo.txt"]);
+        remote.names(8, "/missing");
+        assert!(matches!(next(&mut events), RemoteEvent::Names { request: 8, result: Err(_) }));
     }
 
     #[test]

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use termian_native::edits::{open_path, Associations, EditId, Edited, Edits};
-use termian_native::files::{delete_title, format_size, format_time, join, name_error, parent, Entry, PERMISSION_BITS};
+use termian_native::files::{delete_title, format_size, format_time, join, list_local, name_error, parent, Entry, PERMISSION_BITS};
 use termian_native::remote_fs::{self, Operation, TransferId};
 use termian_native::theme;
 use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, Item, Job, Planned, Progress, Resolver, Step, TransferEvent};
@@ -71,7 +71,11 @@ pub enum Dialog {
 
 /// A copy waiting for answers about name clashes.
 pub struct Resolving {
-    resolver: Resolver,
+    /// `None` until the destination folder has been read again.
+    resolver: Option<Resolver>,
+    items: Vec<Item>,
+    /// The request for the destination's names, when it is remote.
+    waiting: Option<u64>,
     direction: Direction,
     source_dir: String,
     destination_dir: String,
@@ -195,6 +199,8 @@ pub struct Actions {
     pub dialog: Option<Dialog>,
     pub resolving: VecDeque<Resolving>,
     pub transfers: Vec<TransferRow>,
+    /// Counter for [`RemoteFs::names`] requests.
+    next_request: u64,
     /// Remote files opened in local apps.
     pub edits: Edits,
     associations: Associations,
@@ -211,6 +217,7 @@ impl Default for Actions {
             dialog: None,
             resolving: VecDeque::new(),
             transfers: Vec::new(),
+            next_request: 0,
             edits: Edits::in_temp_dir(),
             associations: Associations::load_default(),
             watching: false,
@@ -548,21 +555,57 @@ impl Shell {
         }
         let items = items.into_iter().map(|e| Item { name: e.name, is_dir: e.is_dir }).collect();
         let direction = if side == Side::Local { Direction::Upload } else { Direction::Download };
-        self.sftp.actions.resolving.push_back(Resolving {
-            resolver: Resolver::new(items, &destination.names()),
-            direction,
-            source_dir,
-            destination_dir: destination.path.clone(),
-            question: None,
-            apply_all: false,
-        });
+        let destination_dir = destination.path.clone();
+        self.queue_copy(items, direction, source_dir, destination_dir, window, cx);
+    }
+
+    /// Queues a copy. Like the legacy panel, clashes are checked against the
+    /// destination folder as it is now, not as it was last listed.
+    fn queue_copy(&mut self, items: Vec<Item>, direction: Direction, source_dir: String, destination_dir: String, window: &mut Window, cx: &mut Context<Self>) {
+        let mut copy = Resolving { resolver: None, items, waiting: None, direction, source_dir, destination_dir, question: None, apply_all: false };
+        match direction {
+            Direction::Download => match list_local(&copy.destination_dir) {
+                Ok(entries) => {
+                    let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
+                    copy.resolver = Some(Resolver::new(std::mem::take(&mut copy.items), &names));
+                }
+                Err(error) => return self.open_dialog(Dialog::Error(error), window),
+            },
+            Direction::Upload => {
+                let Some(remote) = &self.sftp.remote else { return };
+                self.sftp.actions.next_request += 1;
+                let request = self.sftp.actions.next_request;
+                remote.connection.names(request, &copy.destination_dir);
+                copy.waiting = Some(request);
+            }
+        }
+        self.sftp.actions.resolving.push_back(copy);
+        self.advance_copies(window, cx);
+    }
+
+    /// The destination of a queued upload has been read.
+    pub fn on_names(&mut self, request: u64, result: Result<Vec<String>, String>, window: &mut Window, cx: &mut Context<Self>) {
+        let queue = &mut self.sftp.actions.resolving;
+        let Some(index) = queue.iter().position(|c| c.waiting == Some(request)) else { return };
+        match result {
+            Ok(names) => {
+                let copy = &mut queue[index];
+                copy.waiting = None;
+                copy.resolver = Some(Resolver::new(std::mem::take(&mut copy.items), &names));
+            }
+            Err(error) => {
+                queue.remove(index);
+                self.open_dialog(Dialog::Error(error), window);
+            }
+        }
         self.advance_copies(window, cx);
     }
 
     /// Plans queued copies until one needs an answer; starts the planned items.
     fn advance_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         while let Some(front) = self.sftp.actions.resolving.front_mut() {
-            match front.resolver.step() {
+            let Some(resolver) = &mut front.resolver else { break };
+            match resolver.step() {
                 Step::Ask(question) => {
                     front.question = Some(question);
                     front.apply_all = false;
@@ -598,7 +641,9 @@ impl Shell {
 
     fn answer_conflict(&mut self, conflict: Conflict, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(front) = self.sftp.actions.resolving.front_mut() {
-            front.resolver.answer(conflict, front.apply_all);
+            if let Some(resolver) = &mut front.resolver {
+                resolver.answer(conflict, front.apply_all);
+            }
             front.question = None;
         }
         self.advance_copies(window, cx);
@@ -636,7 +681,7 @@ impl Shell {
     /// Files dragged in from Finder or Explorer onto the remote panel.
     pub fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
         let Some(destination) = self.sftp.panel(Side::Remote) else { return };
-        let (destination_dir, taken) = (destination.path.clone(), destination.names());
+        let destination_dir = destination.path.clone();
         // One copy per source folder, since a copy reads from one folder.
         let mut groups: Vec<(String, Vec<Item>)> = Vec::new();
         for path in paths.paths() {
@@ -649,16 +694,8 @@ impl Shell {
             }
         }
         for (source_dir, items) in groups {
-            self.sftp.actions.resolving.push_back(Resolving {
-                resolver: Resolver::new(items, &taken),
-                direction: Direction::Upload,
-                source_dir,
-                destination_dir: destination_dir.clone(),
-                question: None,
-                apply_all: false,
-            });
+            self.queue_copy(items, Direction::Upload, source_dir, destination_dir.clone(), window, cx);
         }
-        self.advance_copies(window, cx);
     }
 
     pub fn drag_value(&self, side: Side, name: &str) -> DraggedRows {

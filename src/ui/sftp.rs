@@ -280,7 +280,10 @@ impl Shell {
                         if shell.sftp.generation != generation {
                             return; // a newer connection replaced this one
                         }
-                        shell.sftp.handle(event);
+                        match event {
+                            RemoteEvent::Names { request, result } => shell.on_names(request, result, window, cx),
+                            event => shell.sftp.handle(event),
+                        }
                         if asks_text {
                             window.focus(&shell.sftp_answer_focus);
                         }
