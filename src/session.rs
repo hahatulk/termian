@@ -28,6 +28,8 @@ pub enum SessionEvent {
     Login(LoginEvent),
     /// The session ended; `Some` carries the reason when it failed.
     Closed(Option<String>),
+    /// «Detect OS» found the host's system (`debian`, `ubuntu`, ...).
+    Os(String),
 }
 
 enum Input {
@@ -184,18 +186,20 @@ pub struct SshOptions {
     pub keepalive: u32,
     /// «Post-Quantum Key Exchange»: offer `mlkem768x25519-sha256` first.
     pub pqc_kex: bool,
+    /// «Detect OS»: find the system of a saved host that has none yet.
+    pub detect_os: bool,
 }
 
 impl Default for SshOptions {
     fn default() -> Self {
-        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true }
+        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true, detect_os: false }
     }
 }
 
 impl SshOptions {
     pub fn from_vault(vault: &crate::vault::Vault) -> Self {
         let terminal = &vault.terminal;
-        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex }
+        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false }
     }
 
     /// Key exchanges to offer: russh's order, without the hybrid
@@ -336,6 +340,8 @@ pub(crate) struct Verifier {
     io: SharedPrompter,
     /// Remote port forwarding: where connections the server sends back go.
     pub(crate) forward_to: Option<(String, u16)>,
+    /// The server's version line, recorded once a channel opens.
+    server_id: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 fn key_label(key: &PublicKey) -> String {
@@ -344,6 +350,14 @@ fn key_label(key: &PublicKey) -> String {
 
 impl client::Handler for Verifier {
     type Error = russh::Error;
+
+    async fn channel_open_confirmation(&mut self, _: russh::ChannelId, _: u32, _: u32, session: &mut client::Session) -> Result<(), Self::Error> {
+        let mut id = self.server_id.lock().unwrap();
+        if id.is_none() {
+            *id = Some(String::from_utf8_lossy(session.remote_sshid()).into_owned());
+        }
+        Ok(())
+    }
 
     async fn server_channel_open_forwarded_tcpip(
         &mut self,
@@ -451,13 +465,126 @@ async fn run_ssh(
         },
         answers,
     }));
-    let handle = connect(&target, prompter.clone()).await?;
+    let server_id = Arc::<std::sync::Mutex<Option<String>>>::default();
+    let handle = Arc::new(open(&target, prompter.clone(), None, server_id.clone()).await?);
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
     let (cols, rows) = *latest_size.lock().unwrap();
     channel.request_pty(true, &target.options.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
     channel.request_shell(true).await.map_err(|e| e.to_string())?;
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
-    pump(channel, shell_input, events).await
+    if target.options.detect_os {
+        let (handle, events) = (handle.clone(), events.clone());
+        tokio::spawn(async move {
+            let version = server_id.lock().unwrap().clone().unwrap_or_default();
+            if let Some(os) = detect_os(&handle, &version).await {
+                let _ = events.unbounded_send(SessionEvent::Os(os.to_owned()));
+            }
+        });
+    }
+    let result = pump(channel, shell_input, events).await;
+    drop(handle);
+    result
+}
+
+/// Legacy `osTypesMap`, in its order: the first name found wins.
+const OS_TYPES: [(&str, &str); 28] = [
+    ("raspbian", "raspbian"),
+    ("centos", "centos"),
+    ("darwin", "osx"),
+    ("ubuntu", "ubuntu"),
+    ("openbsd", "openbsd"),
+    ("netbsd", "netbsd"),
+    ("freebsd", "freebsd"),
+    ("suse", "suse"),
+    ("fedora", "fedora"),
+    ("mageia", "mageia"),
+    ("arch", "arch"),
+    ("gentoo", "gentoo"),
+    ("debian", "debian"),
+    ("linux", "linux"),
+    ("android", "android"),
+    ("mikrotik", "routeros"),
+    ("routeros", "routeros"),
+    ("redhat", "redhat"),
+    ("red", "redhat"),
+    ("msys_nt", "windows"),
+    ("win", "windows"),
+    ("windows", "windows"),
+    ("cisco", "cisco"),
+    ("gloria-ops-agent", "gloria_ops_agent"),
+    ("rocky", "rocky"),
+    ("almalinux", "alma"),
+    ("alpine", "alpine"),
+    ("amazon", "amazon"),
+];
+
+const DETECT_OS_SCRIPT: &str = "HISTFILE=; SA_OS_TYPE=\"Linux\" REAL_OS_NAME=`uname` if [ \"$REAL_OS_NAME\" != \"$SA_OS_TYPE\" ] ; then echo `uname` else DISTRIB_ID=\\\"`cat /etc/*release`\\\" echo $DISTRIB_ID; fi; exit; ";
+const DETECT_OS_FISH_SCRIPT: &str = "if set name (uname) = \"Linux\"     cat /etc/*release else     uname end ";
+const DETECT_ROUTEROS_SCRIPT: &str = ":put [/system resource get platform] ";
+
+/// The system named in the server's version line (`getOsFromSoftwareVersion`).
+pub fn os_from_version(version: &str) -> Option<&'static str> {
+    let version = version.to_lowercase();
+    OS_TYPES.iter().find(|(name, _)| version.contains(name)).map(|(_, os)| *os)
+}
+
+/// The system in the detection script's output (`parseOS`): a bare name such
+/// as `Darwin`, or `NAME=` of `/etc/os-release`.
+pub fn parse_os(output: &str) -> Option<&'static str> {
+    let output = output.trim();
+    let exact = |name: &str| OS_TYPES.iter().find(|(n, _)| *n == name.to_lowercase()).map(|(_, os)| *os);
+    if let Some(os) = exact(output) {
+        return Some(os);
+    }
+    for word in output.replace("Linux\n", "").split_whitespace() {
+        let word = word.replace('"', "");
+        if let Some(("NAME", name)) = word.split_once('=') {
+            if let Some(os) = exact(name) {
+                return Some(os);
+            }
+        }
+    }
+    output.to_lowercase().contains("msys_nt").then_some("windows")
+}
+
+/// The detection script for a login shell (`getDetectOSScriptByShellType`);
+/// a shell that cannot `echo` is taken for RouterOS.
+fn detect_script(shell: &str) -> &'static str {
+    let shell = shell.trim();
+    if shell.is_empty() || !shell.contains('/') {
+        DETECT_ROUTEROS_SCRIPT
+    } else if shell.contains("fish") {
+        DETECT_OS_FISH_SCRIPT
+    } else {
+        DETECT_OS_SCRIPT
+    }
+}
+
+/// Runs `command` on its own channel and returns what it printed.
+async fn exec(handle: &Handle<Verifier>, command: &str) -> Option<String> {
+    let mut channel = handle.channel_open_session().await.ok()?;
+    channel.exec(true, command).await.ok()?;
+    let mut output = Vec::new();
+    let collect = async {
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => output.extend_from_slice(&data),
+                ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+    };
+    tokio::time::timeout(Duration::from_secs(10), collect).await.ok()?;
+    Some(String::from_utf8_lossy(&output).into_owned())
+}
+
+/// Legacy `getOS`: the version line first, then the script for the login shell.
+async fn detect_os(handle: &Handle<Verifier>, version: &str) -> Option<&'static str> {
+    if let Some(os) = os_from_version(version) {
+        return Some(os);
+    }
+    let shell = exec(handle, "echo $SHELL").await.unwrap_or_default();
+    parse_os(&exec(handle, detect_script(&shell)).await?)
 }
 
 /// Opens an authenticated SSH connection, asking `io` whatever login needs.
@@ -467,6 +594,15 @@ pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Ha
 
 /// [`connect`] that also accepts connections the server forwards back (remote forwarding).
 pub(crate) async fn connect_forwarding(target: &SshTarget, io: SharedPrompter, forward_to: Option<(String, u16)>) -> Result<Handle<Verifier>, String> {
+    open(target, io, forward_to, Arc::default()).await
+}
+
+async fn open(
+    target: &SshTarget,
+    io: SharedPrompter,
+    forward_to: Option<(String, u16)>,
+    server_id: Arc<std::sync::Mutex<Option<String>>>,
+) -> Result<Handle<Verifier>, String> {
     let address = format!("{}:{}", target.host, target.port);
     {
         let mut io = io.lock().await;
@@ -481,8 +617,7 @@ pub(crate) async fn connect_forwarding(target: &SshTarget, io: SharedPrompter, f
     io.lock().await.log("TCP connection established".into());
 
     let config = target.options.config();
-    let verifier =
-        Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to };
+    let verifier = Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to, server_id };
     let mut handle = client::connect_stream(Arc::new(config), stream, verifier).await.map_err(|error| match error {
         russh::Error::UnknownKey => "Host key verification failed.".to_string(),
         other => format!("SSH handshake failed: {other}"),
@@ -596,6 +731,38 @@ async fn keyboard_interactive(handle: &mut Handle<Verifier>, user: &str, io: &Sh
 }
 
 /// Copies shell output to the terminal and keystrokes to the shell until either side closes.
+/// How a session that was running ends when the network or server goes away
+/// without closing the shell; the tab reconnects after it («Autoreconnect»).
+pub const CONNECTION_LOST: &str = "Connection lost";
+
+/// When to reconnect a lost session, as the legacy reconnect queue paces it:
+/// six attempts, then a 30-second pause before the next six.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Backoff {
+    left: u8,
+}
+
+impl Default for Backoff {
+    fn default() -> Self {
+        Self { left: Self::ATTEMPTS }
+    }
+}
+
+impl Backoff {
+    const ATTEMPTS: u8 = 6;
+
+    /// The wait before the next attempt.
+    pub fn next_delay(&mut self) -> Duration {
+        if self.left == 0 {
+            self.left = Self::ATTEMPTS - 1;
+            Duration::from_secs(30)
+        } else {
+            self.left -= 1;
+            Duration::from_secs(2)
+        }
+    }
+}
+
 async fn pump(
     channel: russh::Channel<client::Msg>,
     mut input: UnboundedReceiver<Input>,
@@ -611,11 +778,13 @@ async fn pump(
                 Some(ChannelMsg::ExitStatus { exit_status }) if exit_status != 0 => {
                     return Err(format!("Remote shell exited with code {exit_status}"));
                 }
-                Some(ChannelMsg::Close | ChannelMsg::Eof) | None => return Ok(()),
+                Some(ChannelMsg::Close | ChannelMsg::Eof) => return Ok(()),
+                // The channel went away without the shell closing it.
+                None => return Err(CONNECTION_LOST.into()),
                 _ => {}
             },
             item = input.next() => match item {
-                Some(Input::Data(bytes)) => writer.data_bytes(bytes).await.map_err(|e| e.to_string())?,
+                Some(Input::Data(bytes)) => writer.data_bytes(bytes).await.map_err(|e| format!("{CONNECTION_LOST}: {e}"))?,
                 Some(Input::Resize(cols, rows)) => {
                     let _ = writer.window_change(cols as u32, rows as u32, 0, 0).await;
                 }
@@ -662,6 +831,12 @@ pub(crate) mod tests {
                     Some(SessionEvent::Closed(reason)) => {
                         seen.extend(format!("<closed {reason:?}>").bytes());
                         break;
+                    }
+                    Some(SessionEvent::Os(os)) => {
+                        seen.extend(format!("<os {os}>").bytes());
+                        if String::from_utf8_lossy(&seen).contains(needle) {
+                            break;
+                        }
                     }
                     None => continue,
                 }
@@ -921,6 +1096,19 @@ pub(crate) mod tests {
                 session.channel_success(channel)
             }
 
+            async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {
+                let reply: &[u8] = match data {
+                    b"echo $SHELL" => b"/bin/bash\n",
+                    script if script.starts_with(b"HISTFILE=;") => b"PRETTY_NAME=\"Ubuntu 24.04 LTS\" NAME=\"Ubuntu\" VERSION_ID=\"24.04\"\n",
+                    _ => b"",
+                };
+                session.channel_success(channel)?;
+                session.data(channel, reply.to_vec())?;
+                session.exit_status_request(channel, 0)?;
+                session.eof(channel)?;
+                session.close(channel)
+            }
+
             async fn shell_request(&mut self, channel: ChannelId, session: &mut ServerSession) -> Result<(), Self::Error> {
                 session.data(channel, b"welcome\r\n".to_vec())?;
                 session.channel_success(channel)
@@ -970,7 +1158,15 @@ pub(crate) mod tests {
                 if self.sftp.contains(&channel) {
                     return Ok(()); // the SFTP task reads this channel itself
                 }
-                session.data(channel, [b"echo:".as_slice(), data].concat())
+                match data {
+                    b"exit" => {
+                        session.exit_status_request(channel, 0)?;
+                        session.eof(channel)?;
+                        session.close(channel)
+                    }
+                    b"drop" => session.disconnect(russh::Disconnect::ByApplication, "gone", ""),
+                    _ => session.data(channel, [b"echo:".as_slice(), data].concat()),
+                }
             }
         }
 
@@ -1027,7 +1223,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut target = target(server::start(), dir.path().join("known_hosts"));
         target.password = Some(server::PASSWORD.into());
-        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false };
+        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false, detect_os: false };
         assert!(!target.options.kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert!(SshOptions::default().kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert_eq!(target.options.config().keepalive_interval, Some(Duration::from_secs(5)));
@@ -1037,6 +1233,58 @@ pub(crate) mod tests {
         session.answer(Answer::HostKey(HostKeyDecision::Once));
         let output = collect_until(&mut session, "welcome");
         assert!(output.contains("pty xterm-16color 80x24"), "without the post-quantum exchange too: {output:?}");
+    }
+
+    #[test]
+    fn the_os_is_read_as_the_legacy_detector_reads_it() {
+        assert_eq!(os_from_version("SSH-2.0-OpenSSH_9.2p1 Debian-2+deb12u3"), Some("debian"));
+        assert_eq!(os_from_version("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13"), Some("ubuntu"));
+        assert_eq!(os_from_version("SSH-2.0-OpenSSH_9.8"), None);
+        assert_eq!(parse_os("Darwin\n"), Some("osx"));
+        assert_eq!(parse_os("FreeBSD"), Some("freebsd"));
+        assert_eq!(parse_os("PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\" NAME=\"Debian GNU/Linux\" ID=debian"), Some("debian"));
+        assert_eq!(parse_os("NAME=\"CentOS Linux\" VERSION=\"7\""), Some("centos"));
+        assert_eq!(parse_os("MSYS_NT-10.0"), Some("windows"));
+        assert_eq!(parse_os("something else"), None);
+        assert_eq!(detect_script("/usr/bin/fish"), DETECT_OS_FISH_SCRIPT);
+        assert_eq!(detect_script("/bin/bash"), DETECT_OS_SCRIPT);
+        assert_eq!(detect_script("bad command \"echo\""), DETECT_ROUTEROS_SCRIPT);
+    }
+
+    #[test]
+    fn detects_the_os_of_a_host_after_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.password = Some(server::PASSWORD.into());
+        target.options.detect_os = true;
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "<os ");
+        assert!(output.contains("welcome") && output.contains("<os ubuntu>"), "{output:?}");
+    }
+
+    #[test]
+    fn reconnects_six_times_then_pauses() {
+        let mut backoff = Backoff::default();
+        let delays: Vec<u64> = (0..14).map(|_| backoff.next_delay().as_secs()).collect();
+        assert_eq!(delays, [2, 2, 2, 2, 2, 2, 30, 2, 2, 2, 2, 2, 30, 2]);
+    }
+
+    #[test]
+    fn a_lost_connection_is_told_apart_from_exit() {
+        for (command, expected) in [("exit", "<closed None>".to_owned()), ("drop", format!("<closed Some(\"{CONNECTION_LOST}\")>"))] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut target = target(server::start(), dir.path().join("known_hosts"));
+            target.password = Some(server::PASSWORD.into());
+            let mut session = ssh(target, 80, 24);
+            collect_until(&mut session, "<hostkey");
+            session.answer(Answer::HostKey(HostKeyDecision::Once));
+            collect_until(&mut session, "welcome");
+            session.write(command.as_bytes());
+            let output = collect_until(&mut session, "<closed");
+            assert!(output.contains(&expected), "{command}: {output:?}");
+        }
     }
 
     #[test]

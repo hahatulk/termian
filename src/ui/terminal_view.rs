@@ -25,6 +25,8 @@ pub enum TerminalEvent {
     Close,
     /// The session ended (the tab may stay open).
     Ended,
+    /// «Detect OS» found the host's system.
+    Os(String),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -55,6 +57,10 @@ pub struct TerminalView {
     last_bell: Option<std::time::Instant>,
     /// Font family the faces below were worked out for, and the faces.
     faces: Option<(String, Faces)>,
+    /// The shell was ready at least once (only then a lost session reconnects).
+    was_ready: bool,
+    /// «Autoreconnect» is retrying a lost session.
+    reconnect: Option<session::Backoff>,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -93,6 +99,8 @@ impl TerminalView {
             settings: settings.clone(),
             last_bell: None,
             faces: None,
+            was_ready: false,
+            reconnect: None,
         }
     }
 
@@ -135,6 +143,32 @@ impl TerminalView {
         faces
     }
 
+    /// The next reconnect attempt of a lost session, after the backoff delay.
+    fn schedule_reconnect(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(backoff) = self.reconnect.as_mut() else { return };
+        let delay = backoff.next_delay();
+        let generation = self.generation;
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = this.update_in(cx, |view, window, cx| {
+                if view.generation == generation && view.reconnect.is_some() {
+                    view.reconnect_now(window, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Opens a new session in place of the lost one; the screen and log stay.
+    fn reconnect_now(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(connection) = self.connection.clone() else { return };
+        let (columns, rows) = self.terminal.size();
+        self.generation += 1;
+        self.session = session::ssh(connection.target, columns as u16, rows as u16);
+        Self::listen(&mut self.session, self.generation, window, cx);
+        cx.notify();
+    }
+
     /// «Bell sound»: the legacy bell, at most a few times a second.
     fn ring(&mut self) {
         if !self.settings.bell_sound || self.last_bell.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150)) {
@@ -168,7 +202,7 @@ impl TerminalView {
                         if view.generation != generation {
                             return;
                         }
-                        view.handle(event, window);
+                        view.handle(event, window, cx);
                         if std::mem::take(&mut view.ended) {
                             cx.emit(TerminalEvent::Ended);
                         }
@@ -183,11 +217,29 @@ impl TerminalView {
         }
     }
 
-    fn handle(&mut self, event: SessionEvent, window: &mut Window) {
+    fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
                 self.login = None;
+                self.closed = false;
+                self.was_ready = true;
+                if self.reconnect.take().is_some() {
+                    self.terminal.feed(b"\r\n\x1b[2m[Reconnected]\x1b[0m\r\n");
+                }
                 window.focus(&self.focus);
+            }
+            // A reconnect that needs an answer from the user shows the connection screen.
+            SessionEvent::Login(event @ (LoginEvent::Prompt { .. } | LoginEvent::HostKey(_) | LoginEvent::HostKeyChanged(_))) if self.reconnect.is_some() => {
+                self.reconnect = None;
+                let mut login = LoginState::default();
+                login.apply(event);
+                self.login = Some(login);
+                window.focus(&self.login_focus);
+            }
+            SessionEvent::Closed(reason) if self.reconnect.is_some() => {
+                let reason = reason.unwrap_or_else(|| "The connection was closed.".into());
+                self.terminal.feed(format!("\x1b[2m[Reconnect failed: {reason}]\x1b[0m\r\n").as_bytes());
+                self.schedule_reconnect(window, cx);
             }
             SessionEvent::Login(event) => {
                 let asks_text = matches!(event, LoginEvent::Prompt { .. });
@@ -216,6 +268,20 @@ impl TerminalView {
                 if !replies.is_empty() {
                     self.session.write(&replies);
                 }
+            }
+            SessionEvent::Closed(Some(reason))
+                if reason.starts_with(session::CONNECTION_LOST) && self.was_ready && self.settings.autoreconnect && self.connection.is_some() =>
+            {
+                self.closed = true;
+                self.terminal.feed(format!("\r\n\x1b[33m[{reason}. Reconnecting…]\x1b[0m\r\n").as_bytes());
+                self.reconnect = Some(session::Backoff::default());
+                self.schedule_reconnect(window, cx);
+            }
+            SessionEvent::Os(os) => {
+                if let Some(connection) = self.connection.as_mut() {
+                    connection.os.get_or_insert_with(|| os.clone());
+                }
+                cx.emit(TerminalEvent::Os(os));
             }
             SessionEvent::Closed(_) => {
                 self.closed = true;
@@ -355,6 +421,7 @@ impl TerminalView {
 
     fn login_retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.clone() else { return };
+        self.reconnect = None;
         self.generation += 1;
         self.session = session::ssh(connection.target, 80, 24);
         Self::listen(&mut self.session, self.generation, window, cx);

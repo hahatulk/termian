@@ -196,6 +196,10 @@ impl Shell {
     fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, history: Option<u64>, cx: &mut Context<Self>) {
         let id = self.tabs.open(TabKind::Session { title });
         cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| {
+            if let TerminalEvent::Os(os) = event {
+                shell.host_os_detected(history, os);
+                return;
+            }
             shell.session_ended(history);
             if let TerminalEvent::Close = event {
                 shell.close_terminal_tab(id);
@@ -208,6 +212,15 @@ impl Shell {
         }
         self.terminals.insert(id, view);
         cx.notify();
+    }
+
+    /// «Detect OS»: a saved host without a system gets the one its server reported.
+    fn host_os_detected(&mut self, history: Option<u64>, os: &str) {
+        let host = history.and_then(|h| self.vault.history.iter().find(|e| e.id == h)).and_then(|e| e.host);
+        if let Some(host) = host.and_then(|id| self.vault.hosts.iter_mut().find(|h| h.id == id)).filter(|h| h.os.is_none()) {
+            host.os = Some(os.to_owned());
+            self.save_vault();
+        }
     }
 
     /// Writes a session's end time into its Logs row, once.
@@ -258,6 +271,9 @@ impl Shell {
 
     fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
         target.options = session::SshOptions::from_vault(&self.vault);
+        // Legacy runs the detection only for saved hosts whose system is unknown.
+        let unknown = host.and_then(|id| self.vault.hosts.iter().find(|h| h.id == id)).is_some_and(|h| h.os.is_none());
+        target.options.detect_os = self.vault.terminal.detect_os && unknown;
         let subtitle = std::iter::once("ssh").chain(target.username.as_deref()).collect::<Vec<_>>().join(", ");
         let (history, log) = self.record_session(host, &label, subtitle);
         let connection = Connection { label: label.clone(), os, target };
