@@ -40,6 +40,7 @@ pub struct HostEditor {
     port: String,
     groups_open: bool,
     keys_open: bool,
+    identities_open: bool,
     menu_open: bool,
     /// "Remove a host" is showing.
     confirm_remove: bool,
@@ -50,6 +51,15 @@ pub struct HostMenu {
     host: HostId,
     position: Point<Pixels>,
     confirm_remove: bool,
+}
+
+/// `deploy (root)`; just the label when the username is the same or unknown.
+fn identity_label(identity: &termian_native::vault::Identity) -> String {
+    if identity.username.is_empty() || identity.username == identity.label {
+        identity.label.clone()
+    } else {
+        format!("{} ({})", identity.label, identity.username)
+    }
 }
 
 pub(super) fn field_box(focused: bool) -> Div {
@@ -145,6 +155,7 @@ impl Shell {
             port: None,
             password: None,
             key: None,
+            identity: None,
         };
         self.open_editor(host, true, window, cx);
     }
@@ -169,6 +180,7 @@ impl Shell {
             port,
             groups_open: false,
             keys_open: false,
+            identities_open: false,
             menu_open: false,
             confirm_remove: false,
         });
@@ -515,9 +527,13 @@ impl Shell {
                     .child(self.input(Field::Port, "22", &editor.port, false, window, cx).w(px(90.)))
                     .child("port"),
             )
-            .child(self.input(Field::Username, "Username", host.username.as_deref().unwrap_or(""), false, window, cx))
-            .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx))
-            .child(self.render_key_picker(cx));
+            .child(self.render_identity_picker(cx))
+            // With an identity, its username, password and key are used instead.
+            .when(host.identity.is_none(), |card| {
+                card.child(self.input(Field::Username, "Username", host.username.as_deref().unwrap_or(""), false, window, cx))
+                    .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx))
+                    .child(self.render_key_picker(cx))
+            });
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(
@@ -590,6 +606,45 @@ impl Shell {
             Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
             None => slider,
         })
+    }
+
+    /// "Identity": credentials saved in the Keychain, or the host's own.
+    fn render_identity_picker(&self, cx: &mut Context<Self>) -> Div {
+        let Some(editor) = &self.host_editor else { return div() };
+        let chosen = editor.host.identity.and_then(|i| self.vault.identity(i));
+        let label = chosen.map(identity_label);
+        let picker = div()
+            .id("editor-identity")
+            .child(
+                field_box(editor.identities_open)
+                    .child(svg().path(icon("identity")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+                    .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Identity".into())))
+                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                if let Some(editor) = &mut shell.host_editor {
+                    editor.identities_open = !editor.identities_open;
+                }
+                cx.notify();
+            }));
+        let list = editor.identities_open.then(|| {
+            let choice = |id: Option<u64>, label: String, cx: &mut Context<Self>| {
+                menu_row(format!("editor-identity-{id:?}"), &label, false, false).on_click(cx.listener(move |shell, _, _, cx| {
+                    if let Some(editor) = &mut shell.host_editor {
+                        editor.host.identity = id;
+                        editor.identities_open = false;
+                    }
+                    shell.autosave();
+                    cx.notify();
+                }))
+            };
+            let mut list = div().id("editor-identity-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No identity".into(), cx));
+            for identity in &self.vault.identities {
+                list = list.child(choice(Some(identity.id), identity_label(identity), cx));
+            }
+            gpui::deferred(div().absolute().bottom_full().left_0().right_0().mb_1().child(list))
+        });
+        div().relative().child(picker).children(list)
     }
 
     /// "Key" under the password: one of the Keychain keys, or none.

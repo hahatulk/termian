@@ -31,6 +31,8 @@ pub struct Shell {
     host_editor: Option<ui::host_editor::HostEditor>,
     host_menu: Option<ui::host_editor::HostMenu>,
     key_editor: Option<ui::key_editor::KeyEditor>,
+    identity_editor: Option<ui::identity_editor::IdentityEditor>,
+    keychain_menu: Option<gpui::Point<gpui::Pixels>>,
     group_editor: Option<ui::group_editor::GroupEditor>,
     group_menu: Option<ui::group_editor::GroupMenu>,
     launcher: ui::launcher::Launcher,
@@ -89,6 +91,8 @@ impl Shell {
             host_editor: None,
             host_menu: None,
             key_editor: None,
+            identity_editor: None,
+            keychain_menu: None,
             group_editor: None,
             group_menu: None,
             launcher: Default::default(),
@@ -185,7 +189,7 @@ impl Shell {
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::for_host(entry, entry.key.and_then(|k| self.vault.key(k)));
+        let target = SshTarget::for_host(entry, &self.vault);
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.open_ssh(label, os, target, window, cx);
         // The New Tab screen lists recent connections.

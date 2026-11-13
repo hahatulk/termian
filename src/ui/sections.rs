@@ -72,19 +72,32 @@ impl Shell {
         }
         if !vault.identities.is_empty() {
             body = body.child(section_title("Identities")).child(grid().children(vault.identities.iter().map(|identity| {
-                card(
-                    format!("identity-{}", identity.id).into(),
-                    tile("identity", theme::TILE_BLUE),
-                    identity.label.clone(),
-                    identity.subtitle().to_owned(),
-                )
+                let id = identity.id;
+                card(format!("identity-{id}").into(), tile("identity", theme::TILE_BLUE), identity.label.clone(), identity.subtitle().to_owned())
+                    .on_click(cx.listener(move |shell, _, window, cx| shell.edit_identity(id, window, cx)))
             })));
         }
         if vault.keys.is_empty() && vault.identities.is_empty() {
             body = body.child(empty_state("keychain", "Add a key", "Keys and identities you save appear here."));
         }
-        let add_key = tool_button("new-key", "keychain", "KEY").on_click(cx.listener(|shell, _, window, cx| shell.new_key(window, cx)));
-        page("keychain-scroll", vec![add_key], body)
+        let add_key = tool_button("new-key", "keychain", "KEY").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_key(window, cx)));
+        // The split button's arrow, as in the legacy Keychain toolbar.
+        let menu = div()
+            .id("key-menu")
+            .h(px(26.))
+            .px_2()
+            .flex()
+            .items_center()
+            .rounded_r_md()
+            .bg(rgb(theme::INPUT))
+            .child(svg().path(icon("chevron")).size(px(8.)).text_color(rgb(theme::TEXT)))
+            .on_click(cx.listener(|shell, event: &ClickEvent, _, cx| {
+                let at = event.position();
+                shell.keychain_menu = Some(gpui::Point { x: at.x - px(20.), y: at.y + px(14.) });
+                cx.notify();
+            }));
+        let split = div().id("key-split").flex().items_center().gap(px(1.)).child(add_key).child(menu);
+        page("keychain-scroll", vec![split], body)
     }
 
     pub fn render_snippets(&self, cx: &mut Context<Self>) -> Div {

@@ -84,6 +84,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             port: link(v, "ssh_config").and_then(|config| config_ports.get(&config)).copied(),
             password: None,
             key: None,
+            identity: None,
         })
         .collect();
 
@@ -105,6 +106,8 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             label: text(v.get("label")).filter(|l| !l.is_empty()).or_else(|| usernames.get(id).cloned()).unwrap_or_default(),
             has_password: v.get("password").and_then(Value::as_str).is_some_and(|p| !p.is_empty()),
             has_key: link(v, "ssh_key").is_some(),
+            username: usernames.get(id).cloned().unwrap_or_default(),
+            ..Identity::default()
         })
         .collect();
     let snippets = store("snippets")

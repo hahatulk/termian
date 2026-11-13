@@ -172,11 +172,13 @@ impl SshTarget {
 
 impl SshTarget {
     /// A saved host: its address and port, user and saved password.
-    pub fn for_host(host: &crate::vault::Host, key: Option<&crate::vault::SshKey>) -> Self {
+    /// A saved host with the credentials it logs in with (its identity's, if set).
+    pub fn for_host(host: &crate::vault::Host, vault: &crate::vault::Vault) -> Self {
+        let (username, password, key) = vault.credentials(host);
         Self {
-            password: host.password.clone(),
+            password,
             key: key.and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone()))),
-            ..Self::new(&host.destination(), host.username.clone())
+            ..Self::new(&host.destination(), username)
         }
     }
 }

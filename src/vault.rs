@@ -31,6 +31,9 @@ pub struct Host {
     /// Key from the Keychain to log in with.
     #[serde(default)]
     pub key: Option<u64>,
+    /// Identity from the Keychain: its username, password and key replace the host's own.
+    #[serde(default)]
+    pub identity: Option<u64>,
 }
 
 impl Host {
@@ -98,12 +101,19 @@ pub fn key_kind(public_key: &str) -> String {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Identity {
     pub id: u64,
     pub label: String,
     pub has_password: bool,
     pub has_key: bool,
+    #[serde(default)]
+    pub username: String,
+    /// Saved in the native vault only; legacy passwords are not decrypted.
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub key: Option<u64>,
 }
 
 impl Identity {
@@ -285,6 +295,7 @@ impl Vault {
     /// A free id for a new record of any kind.
     pub fn next_id(&self) -> u64 {
         let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id)).chain(self.rules.iter().map(|r| r.id));
+        let ids = ids.chain(self.identities.iter().map(|i| i.id));
         ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).max().unwrap_or(0) + 1
     }
 
@@ -356,6 +367,42 @@ impl Vault {
 
     pub fn remove_rule(&mut self, id: u64) {
         self.rules.retain(|r| r.id != id);
+    }
+
+    pub fn identity(&self, id: u64) -> Option<&Identity> {
+        self.identities.iter().find(|i| i.id == id)
+    }
+
+    /// Adds or replaces an identity, keeping its "Auth …" subtitle in step.
+    pub fn save_identity(&mut self, mut identity: Identity) {
+        identity.has_password = identity.password.is_some();
+        identity.has_key = identity.key.is_some();
+        match self.identities.iter_mut().find(|i| i.id == identity.id) {
+            Some(existing) => *existing = identity,
+            None => self.identities.push(identity),
+        }
+    }
+
+    /// Removes an identity and unlinks it from hosts.
+    pub fn remove_identity(&mut self, id: u64) {
+        self.identities.retain(|i| i.id != id);
+        for host in &mut self.hosts {
+            if host.identity == Some(id) {
+                host.identity = None;
+            }
+        }
+    }
+
+    /// Username, password and key a host logs in with: its identity's when it has one.
+    pub fn credentials(&self, host: &Host) -> (Option<String>, Option<String>, Option<&SshKey>) {
+        match host.identity.and_then(|id| self.identity(id)) {
+            Some(identity) => (
+                Some(identity.username.clone()).filter(|u| !u.is_empty()),
+                identity.password.clone(),
+                identity.key.and_then(|k| self.key(k)),
+            ),
+            None => (host.username.clone(), host.password.clone(), host.key.and_then(|k| self.key(k))),
+        }
     }
 
     pub fn key(&self, id: u64) -> Option<&SshKey> {
@@ -432,6 +479,7 @@ pub(crate) mod tests {
             port: None,
             password: None,
             key: None,
+            identity: None,
         }
     }
 
@@ -474,6 +522,24 @@ pub(crate) mod tests {
         let dynamic = ForwardingRule { kind: RuleKind::Dynamic, destination: String::new(), destination_port: None, ..rule };
         assert!(dynamic.is_valid());
         assert_eq!(dynamic.rule_text(&v), "From Office VPN:8080");
+    }
+
+    #[test]
+    fn an_identity_supplies_the_host_credentials() {
+        let mut v = vault();
+        v.keys.push(SshKey { id: 70, label: "deploy".into(), kind: "ED25519".into(), private_key: Some("k".into()), ..SshKey::default() });
+        let id = v.next_id();
+        v.save_identity(Identity { id, label: "deploy".into(), username: "deploy".into(), password: Some("pw".into()), key: Some(70), ..Identity::default() });
+        assert_eq!(v.identity(id).unwrap().subtitle(), "Auth password and key");
+        let mut host = v.host(10).unwrap().clone();
+        host.username = Some("root".into());
+        assert_eq!(v.credentials(&host).0.as_deref(), Some("root"));
+        host.identity = Some(id);
+        let (user, password, key) = v.credentials(&host);
+        assert_eq!((user.as_deref(), password.as_deref(), key.map(|k| k.id)), (Some("deploy"), Some("pw"), Some(70)));
+        v.save_host(host);
+        v.remove_identity(id);
+        assert_eq!(v.host(10).unwrap().identity, None);
     }
 
     #[test]
@@ -574,7 +640,7 @@ pub(crate) mod tests {
 
     #[test]
     fn identity_and_snippet_subtitles() {
-        let identity = |has_password, has_key| Identity { id: 1, label: "root".into(), has_password, has_key };
+        let identity = |has_password, has_key| Identity { id: 1, label: "root".into(), has_password, has_key, ..Identity::default() };
         assert_eq!(identity(true, true).subtitle(), "Auth password and key");
         assert_eq!(identity(false, true).subtitle(), "Auth key");
         let snippet = |label: &str, script: &str| Snippet { id: 1, label: label.into(), script: script.into() };
@@ -607,6 +673,7 @@ pub fn demo() -> Vault {
         port: None,
         password: None,
         key: None,
+        identity: None,
     };
     Vault {
         groups: vec![
@@ -636,9 +703,9 @@ pub fn demo() -> Vault {
             SshKey { id: 2, label: "My".into(), kind: "ECDSA".into(), ..SshKey::default() },
         ],
         identities: vec![
-            Identity { id: 1, label: "root".into(), has_password: false, has_key: true },
-            Identity { id: 2, label: "pt".into(), has_password: true, has_key: false },
-            Identity { id: 3, label: "kazgau".into(), has_password: true, has_key: true },
+            Identity { id: 1, label: "root".into(), has_password: false, has_key: true, username: "root".into(), ..Identity::default() },
+            Identity { id: 2, label: "pt".into(), has_password: true, has_key: false, username: "pt".into(), ..Identity::default() },
+            Identity { id: 3, label: "kazgau".into(), has_password: true, has_key: true, username: "kazgau".into(), ..Identity::default() },
         ],
         snippets: vec![
             Snippet { id: 1, label: "sudo su".into(), script: "sudo su".into() },

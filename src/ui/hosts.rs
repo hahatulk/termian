@@ -122,7 +122,7 @@ impl Shell {
         };
         let editor = match self.section {
             Section::Hosts => self.render_host_editor(window, cx).or_else(|| self.render_group_editor(window, cx)),
-            Section::Keychain => self.render_key_editor(window, cx),
+            Section::Keychain => self.render_key_editor(window, cx).or_else(|| self.render_identity_editor(window, cx)).or_else(|| self.render_keychain_menu(cx)),
             Section::PortForwarding => self.render_forwarding_overlay(window, cx),
             _ => None,
         };

@@ -34,6 +34,8 @@ fn caret() -> Div {
 impl Shell {
     pub fn new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let key = SshKey { id: self.vault.next_id(), ..SshKey::default() };
+        self.identity_editor = None;
+        self.keychain_menu = None;
         self.key_editor = Some(KeyEditor { key, is_new: true, created_here: true, field: Field::PrivateKey, confirm_remove: false });
         window.focus(&self.editor_focus);
         cx.notify();
@@ -41,6 +43,7 @@ impl Shell {
 
     pub fn edit_key(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(key) = self.vault.key(id).cloned() else { return };
+        self.identity_editor = None;
         self.key_editor = Some(KeyEditor { key, is_new: false, created_here: false, field: Field::Label, confirm_remove: false });
         window.focus(&self.editor_focus);
         cx.notify();

@@ -123,7 +123,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        let target = SshTarget::for_host(host, host.key.and_then(|k| self.vault.key(k)));
+        let target = SshTarget::for_host(host, &self.vault);
         let spec = Spec {
             kind: rule.kind,
             bind_address: if rule.bind_address.trim().is_empty() { "127.0.0.1".into() } else { rule.bind_address.clone() },
