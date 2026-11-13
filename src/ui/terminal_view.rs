@@ -98,6 +98,19 @@ pub struct TerminalView {
     serial_form: Option<serial_form::SerialForm>,
     integration: Integration,
     last_output: std::time::Instant,
+    autocomplete: Autocomplete,
+}
+
+/// The inline autocomplete popup of this terminal.
+#[derive(Default)]
+struct Autocomplete {
+    /// Settings allow it and the pane is not split (legacy keeps it off there).
+    enabled: bool,
+    candidates: std::sync::Arc<termian_native::autocomplete::Candidates>,
+    line: termian_native::autocomplete::Line,
+    shown: Vec<termian_native::autocomplete::Suggestion>,
+    selected: Option<usize>,
+    dismissed: bool,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -152,6 +165,7 @@ impl TerminalView {
             serial_form: None,
             integration: Integration::default(),
             last_output: std::time::Instant::now(),
+            autocomplete: Autocomplete::default(),
         }
     }
 
@@ -508,9 +522,15 @@ impl TerminalView {
                     let bytes = paste_bytes(&text, self.terminal.bracketed_paste());
                     self.session.write(&bytes);
                     cx.emit(TerminalEvent::Input(bytes));
+                    self.autocomplete.line.insert(&text);
+                    self.refresh_suggestions();
                 }
             }
             return; // other Cmd shortcuts belong to the app
+        }
+        if !mods.control && !mods.alt && self.autocomplete_key(&keystroke.key, cx) {
+            cx.stop_propagation();
+            return;
         }
         // Without «Use Option as Meta key» Option types the character macOS composes.
         let arrow = matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right");
@@ -521,6 +541,8 @@ impl TerminalView {
             self.terminal.clear_selection();
             self.session.write(&bytes);
             cx.emit(TerminalEvent::Input(bytes));
+            self.autocomplete.line.key(&keystroke.key, keystroke.key_char.as_deref(), mods.control || mods.alt);
+            self.refresh_suggestions();
             cx.stop_propagation();
             cx.notify();
         }
@@ -664,7 +686,16 @@ impl TerminalView {
                 state.ready = true;
             }
             // Events before Ready come from the install line itself.
-            ShellEvent::CommandStarted(command) if state.ready => state.command = Some(command),
+            ShellEvent::CommandStarted(command) if state.ready => {
+                state.command = Some(command);
+                self.autocomplete.line.stop();
+                self.refresh_suggestions();
+            }
+            ShellEvent::PromptEnds if state.ready => {
+                self.autocomplete.line.reset();
+                self.autocomplete.dismissed = false;
+                self.refresh_suggestions();
+            }
             ShellEvent::CommandExited(_) => {
                 if let Some(command) = state.command.take() {
                     cx.emit(TerminalEvent::Command(command));
@@ -672,6 +703,127 @@ impl TerminalView {
             }
             _ => {}
         }
+    }
+
+    /// Autocomplete is allowed here, with these candidates (the window keeps them current).
+    pub fn set_autocomplete(&mut self, enabled: bool, candidates: std::sync::Arc<termian_native::autocomplete::Candidates>) {
+        let changed = !std::sync::Arc::ptr_eq(&self.autocomplete.candidates, &candidates) || self.autocomplete.enabled != enabled;
+        self.autocomplete.enabled = enabled;
+        self.autocomplete.candidates = candidates;
+        if changed {
+            self.refresh_suggestions();
+        }
+    }
+
+    fn refresh_suggestions(&mut self) {
+        let a = &mut self.autocomplete;
+        a.shown = match a.line.text() {
+            Some(typed) if a.enabled && !a.dismissed => a.candidates.matching(typed),
+            _ => Vec::new(),
+        };
+        if a.selected.is_some_and(|i| i >= a.shown.len()) {
+            a.selected = None;
+        }
+    }
+
+    /// Keys the open popup takes: ↑/↓ choose, Tab or → insert, Enter runs a
+    /// chosen suggestion, Escape closes it until the next prompt.
+    fn autocomplete_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+        let a = &mut self.autocomplete;
+        if a.shown.is_empty() {
+            return false;
+        }
+        let count = a.shown.len();
+        match key {
+            "down" => a.selected = Some(a.selected.map_or(0, |i| (i + 1) % count)),
+            "up" => a.selected = Some(a.selected.map_or(count - 1, |i| (i + count - 1) % count)),
+            "escape" => {
+                a.dismissed = true;
+                a.selected = None;
+                a.shown.clear();
+            }
+            "tab" | "right" => {
+                let index = a.selected.unwrap_or(0);
+                self.accept_suggestion(index, false, cx);
+            }
+            "enter" if a.selected.is_some() => {
+                let index = a.selected.unwrap_or(0);
+                self.accept_suggestion(index, true, cx);
+            }
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
+    fn accept_suggestion(&mut self, index: usize, run: bool, cx: &mut Context<Self>) {
+        let a = &mut self.autocomplete;
+        let (Some(typed), Some(suggestion)) = (a.line.text().map(str::to_owned), a.shown.get(index).cloned()) else { return };
+        let rest = suggestion.rest(&typed).to_owned();
+        a.line.insert(&rest);
+        a.selected = None;
+        let mut bytes = rest.into_bytes();
+        if run {
+            bytes.push(b'\r');
+            self.autocomplete.line.stop();
+        }
+        self.terminal.scroll(i32::MIN / 2);
+        self.session.write(&bytes);
+        cx.emit(TerminalEvent::Input(bytes));
+        self.refresh_suggestions();
+    }
+
+    /// The popup under the cursor (above it near the bottom), as legacy draws it.
+    fn render_autocomplete(&self, cursor: Option<(usize, usize)>, cell_width: f32, line_height: f32, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let a = &self.autocomplete;
+        let (row, column) = cursor?;
+        let typed = a.line.text()?;
+        if a.shown.is_empty() {
+            return None;
+        }
+        let (_, rows) = self.terminal.size();
+        let start = column.saturating_sub(typed.chars().count());
+        let left = PADDING + start as f32 * cell_width;
+        let height = a.shown.len() as f32 * 26. + 8.;
+        let below = PADDING + (row + 1) as f32 * line_height;
+        let top = if row + 1 + (height / line_height).ceil() as usize > rows { (PADDING + row as f32 * line_height - height).max(0.) } else { below };
+        let rows = a.shown.iter().enumerate().map(|(i, s)| {
+            let selected = a.selected == Some(i);
+            let source = match &s.source {
+                termian_native::autocomplete::Source::History => "history".to_owned(),
+                termian_native::autocomplete::Source::Snippet(label) => label.clone(),
+            };
+            div()
+                .id(SharedString::from(format!("suggestion-{i}")))
+                .h(px(26.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_sm()
+                .when(selected, |d| d.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
+                .child(div().flex_1().min_w_0().truncate().child(div().flex().child(div().text_color(rgb(termian_native::theme::TEXT)).child(typed.to_owned())).child(div().text_color(rgb(termian_native::theme::TEXT_MUTED)).child(s.rest(typed).to_owned()))))
+                .child(div().flex_none().text_xs().font_family(".SystemUIFont").text_color(rgb(termian_native::theme::TEXT_MUTED)).child(source))
+                .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, _, cx| {
+                    cx.stop_propagation();
+                    view.accept_suggestion(i, false, cx);
+                    cx.notify();
+                }))
+        });
+        Some(
+            div()
+                .absolute()
+                .left(px(left))
+                .top(px(top))
+                .w(px(420.))
+                .p_1()
+                .rounded_md()
+                .bg(rgb(termian_native::theme::SURFACE))
+                .border_1()
+                .border_color(rgb(termian_native::theme::SURFACE_ACTIVE))
+                .shadow_lg()
+                .children(rows),
+        )
     }
 
     /// Pastes `text` into the session without running it (legacy «Paste»).
@@ -889,6 +1041,7 @@ impl Render for TerminalView {
             .line_height(px(line_height))
             .children(lines)
             .children(cursor)
+            .children(self.render_autocomplete(snapshot.cursor.filter(|_| !self.closed && focused), cell_width, line_height, cx))
             .children(self.render_search(window, cx))
             .into_any_element()
     }

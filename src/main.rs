@@ -75,6 +75,9 @@ pub struct Shell {
     tab_menu: Option<(TabId, gpui::Point<gpui::Pixels>)>,
     /// The pointer over the terminal area, for where a dragged tab lands.
     pointer: gpui::Point<gpui::Pixels>,
+    /// Autocomplete candidates per host, and what they were built from.
+    candidates: HashMap<Option<HostId>, std::sync::Arc<termian_native::autocomplete::Candidates>>,
+    candidates_key: (usize, Option<(String, i64)>, usize, usize),
     query: String,
     search_focus: FocusHandle,
     sftp: ui::sftp::SftpState,
@@ -221,6 +224,8 @@ impl Shell {
             split_into: None,
             tab_menu: None,
             pointer: Default::default(),
+            candidates: HashMap::new(),
+            candidates_key: Default::default(),
             query: String::new(),
             search_focus: cx.focus_handle(),
             sftp: ui::sftp::SftpState::new(),

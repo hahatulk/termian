@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, MouseButton, Window};
+use termian_native::autocomplete::Candidates;
 use termian_native::session::SshTarget;
 use termian_native::vault::HostId;
 use termian_native::split_tree::{Direction, Layout, Position, SplitTree};
@@ -330,6 +331,12 @@ impl Shell {
                 }
             }
         }
+        // Autocomplete candidates are rebuilt when history or snippets change.
+        let key = (self.vault.shell_history.len(), self.vault.shell_history.first().map(|c| (c.script.clone(), c.completed_at)), self.vault.snippets.len(), self.vault.snippets.iter().map(|s| s.script.len()).sum::<usize>());
+        if self.candidates_key != key {
+            self.candidates_key = key;
+            self.candidates.clear();
+        }
         let Some(workspace) = self.workspaces.get(&tab) else { return div().into_any_element() };
         let viewport = window.viewport_size();
         let panel = if self.side_panel.is_some() { super::side_panel::WIDTH } else { 0. };
@@ -345,7 +352,16 @@ impl Shell {
             let (w, h) = ((rect.right - rect.left) * width, (rect.bottom - rect.top) * height);
             // A split pane has a header with its title and a close cross.
             let header = if split { PANE_HEADER } else { 0. };
-            pane.view.update(cx, |view, _| view.set_area(left, TOP_INSET + top + header, w, h - header));
+            let host = match pane.origin {
+                Origin::Host(host) => Some(host),
+                _ => None,
+            };
+            let candidates = self.candidates.entry(host).or_insert_with(|| std::sync::Arc::new(Candidates::for_host(&self.vault, host))).clone();
+            let enabled = self.vault.terminal.autocomplete && !split;
+            pane.view.update(cx, |view, _| {
+                view.set_area(left, TOP_INSET + top + header, w, h - header);
+                view.set_autocomplete(enabled, candidates);
+            });
             let focused = split && id == workspace.focused;
             let border = if workspace.broadcast { theme::ERROR } else { theme::ACCENT };
             area = area.child(

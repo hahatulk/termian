@@ -44,6 +44,8 @@ pub struct TerminalSettings {
     pub shell_history_import: bool,
     /// Installs the shell hooks that record commands (Shell History).
     pub shell_integration: bool,
+    /// Suggestions from Shell History and snippets at the prompt.
+    pub autocomplete: bool,
     /// «Select text to copy & Right click to paste».
     pub copy_on_select: bool,
     pub bell_sound: bool,
@@ -71,6 +73,7 @@ impl Default for TerminalSettings {
             autoreconnect: true,
             shell_history_import: true,
             shell_integration: true,
+            autocomplete: true,
             copy_on_select: false,
             bell_sound: false,
             option_is_meta: true,

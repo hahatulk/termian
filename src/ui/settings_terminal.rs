@@ -260,7 +260,13 @@ impl SettingsWindow {
                         .child(label("Autocomplete"))
                         .child(div().px(px(5.)).rounded(px(4.)).border_1().border_color(rgb(MUTED)).text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(rgb(MUTED)).child("BETA")),
                 )
-                .child(div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(MUTED)).child("Disabled"))
+                .child(
+                    switch("term-autocomplete", if t.autocomplete { "Enabled" } else { "Disabled" }, t.autocomplete)
+                        .on_click(cx.listener({
+                            let on = t.autocomplete;
+                            move |settings, _, _, cx| settings.change(cx, move |t| t.autocomplete = !on)
+                        })),
+                )
                 .into_any_element(),
             self.switch_row("term-autoreconnect", "Autoreconnect", t.autoreconnect, |t, v| t.autoreconnect = v, cx),
             self.switch_row("term-history", "Import shell history", t.shell_history_import, |t, v| t.shell_history_import = v, cx),
