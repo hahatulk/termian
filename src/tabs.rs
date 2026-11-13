@@ -93,6 +93,13 @@ impl Tabs {
     }
 
     /// Closing the active tab activates its left neighbour; pinned tabs ignore close.
+    /// Renames a session tab.
+    pub fn set_title(&mut self, id: TabId, title: &str) {
+        if let Some(Tab { kind: TabKind::Session { title: current }, .. }) = self.tabs.iter_mut().find(|t| t.id == id) {
+            *current = title.to_owned();
+        }
+    }
+
     pub fn close(&mut self, id: TabId) {
         let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
         if !self.tabs[index].closable() {

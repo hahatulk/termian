@@ -340,15 +340,17 @@ impl Shell {
             window.focus(&self.editor_focus);
             cx.notify();
         } else {
-            self.run_snippet(&snippet.script, &targets, window, cx);
+            self.run_snippet(snippet.display_label(), &snippet.script, &targets, window, cx);
         }
     }
 
     /// An SSH tab per target; each types the script once its shell is ready.
-    fn run_snippet(&mut self, script: &str, targets: &[HostId], window: &mut Window, cx: &mut Context<Self>) {
+    /// One target opens a tab; several open one Split View workspace, as legacy does.
+    fn run_snippet(&mut self, title: &str, script: &str, targets: &[HostId], window: &mut Window, cx: &mut Context<Self>) {
         self.close_snippet_sliders();
-        for host in targets {
-            self.connect_host_with(*host, Some(script.to_owned()), window, cx);
+        match targets {
+            [host] => self.connect_host_with(*host, Some(script.to_owned()), window, cx),
+            hosts => self.open_workspace_for(title, hosts, script, window, cx),
         }
         cx.notify();
     }
@@ -864,11 +866,12 @@ impl Shell {
                     let Some(editor) = &mut shell.snippet_editor else { return };
                     let targets = editor.picked.clone();
                     let script = editor.snippet.script.clone();
+                    let title = editor.snippet.display_label().to_owned();
                     if shell.snippet_save_targets {
                         editor.snippet.targets = targets.clone();
                         shell.save_snippet_draft();
                     }
-                    shell.run_snippet(&script, &targets, window, cx);
+                    shell.run_snippet(&title, &script, &targets, window, cx);
                 }))
             });
             Some(div().flex().flex_col().gap(px(15.)).child(toggle).child(run).into_any_element())

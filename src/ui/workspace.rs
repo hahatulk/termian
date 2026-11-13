@@ -176,6 +176,28 @@ impl Shell {
         cx.notify();
     }
 
+    /// Legacy «Run» on several targets: one workspace named after the
+    /// snippet, its panes laid out as a balanced tree.
+    pub fn open_workspace_for(&mut self, title: &str, hosts: &[HostId], script: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((first, rest)) = hosts.split_first() else { return };
+        self.connect_host_with(*first, Some(script.to_owned()), window, cx);
+        let tab = self.tabs.active().id;
+        for host in rest {
+            let target = self.workspaces.get(&tab).map(|w| w.focused);
+            self.split_into = target.map(|pane| (tab, pane));
+            self.connect_host_with(*host, Some(script.to_owned()), window, cx);
+        }
+        self.split_into = None;
+        if let Some(workspace) = self.workspaces.get_mut(&tab) {
+            let mut panes: Vec<u64> = workspace.panes.keys().copied().collect();
+            panes.sort();
+            workspace.tree = SplitTree::balanced(&panes);
+            workspace.focused = panes[0];
+        }
+        self.tabs.set_title(tab, title);
+        cx.notify();
+    }
+
     pub fn can_reopen(&self, tab: TabId) -> bool {
         self.workspaces.get(&tab).and_then(|w| w.panes.get(&w.focused)).is_some_and(|p| !matches!(p.origin, Origin::None))
     }
