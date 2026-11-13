@@ -226,6 +226,7 @@ impl SettingsWindow {
                 }
             }
             Field::FontSize | Field::KeepAlive | Field::App(_) => {}
+            Field::SchemeName => self.rename_scheme(text, cx),
         }
     }
 

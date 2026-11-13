@@ -78,6 +78,20 @@ impl Tabs {
         }
     }
 
+    /// «Next Tab» (`1`) / «Previous Tab» (`-1`), wrapping around.
+    pub fn cycle(&mut self, step: isize) {
+        let count = self.tabs.len() as isize;
+        let at = self.tabs.iter().position(|t| t.id == self.active).unwrap_or(0) as isize;
+        self.active = self.tabs[(at + step).rem_euclid(count) as usize].id;
+    }
+
+    /// «Switch to specific Tab [1…9]»: the tab at that position, if any.
+    pub fn activate_nth(&mut self, number: usize) {
+        if let Some(tab) = number.checked_sub(1).and_then(|i| self.tabs.get(i)) {
+            self.active = tab.id;
+        }
+    }
+
     /// Closing the active tab activates its left neighbour; pinned tabs ignore close.
     pub fn close(&mut self, id: TabId) {
         let Some(index) = self.tabs.iter().position(|t| t.id == id) else { return };
@@ -98,6 +112,20 @@ mod tests {
 
     fn session(title: &str) -> TabKind {
         TabKind::Session { title: title.into() }
+    }
+
+    #[test]
+    fn shortcuts_cycle_and_pick_tabs() {
+        let mut tabs = Tabs::default();
+        tabs.open(session("a"));
+        tabs.cycle(1);
+        assert_eq!(tabs.active().title(), "Vaults", "wraps forward");
+        tabs.cycle(-1);
+        assert_eq!(tabs.active().title(), "a", "wraps back");
+        tabs.activate_nth(2);
+        assert_eq!(tabs.active().title(), "SFTP");
+        tabs.activate_nth(9);
+        assert_eq!(tabs.active().title(), "SFTP", "no ninth tab");
     }
 
     #[test]

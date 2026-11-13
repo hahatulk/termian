@@ -382,15 +382,12 @@ impl Render for Shell {
             .children(self.render_update_notice(cx))
             .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
+            .map(|root| self.on_shortcut_actions(root, cx))
     }
 }
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
-        #[cfg(target_os = "macos")]
-        cx.bind_keys([gpui::KeyBinding::new("cmd-k", ui::palette::OpenPalette, None)]);
-        #[cfg(not(target_os = "macos"))]
-        cx.bind_keys([gpui::KeyBinding::new("ctrl-k", ui::palette::OpenPalette, None)]);
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         let main = cx.open_window(
             WindowOptions {
@@ -417,6 +414,9 @@ fn main() {
         .expect("failed to open the main window");
         let _ = main.update(cx, |shell, _, _| shell.main_window = Some(main));
         ui::settings::install_menus(main, cx);
+        if let Ok(settings) = main.read(cx).map(|shell| shell.vault.shortcuts.clone()) {
+            ui::shortcut_actions::bind(&settings, cx);
+        }
         cx.activate(true);
     });
 }

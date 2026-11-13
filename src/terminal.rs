@@ -204,6 +204,27 @@ impl Terminal {
         }
     }
 
+    /// «Select All in Terminal»: history and screen.
+    pub fn select_all(&mut self) {
+        let start = Point::new(alacritty_terminal::index::Line(-(self.term.history_size() as i32)), Column(0));
+        let end = Point::new(alacritty_terminal::index::Line(self.term.screen_lines() as i32 - 1), Column(self.term.columns() - 1));
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        self.term.selection = Some(selection);
+    }
+
+    /// «Clear Terminal Buffer», as xterm's `clear()`: the cursor line moves to
+    /// the top and everything else, history included, goes.
+    pub fn clear_buffer(&mut self) {
+        let row = self.term.grid().cursor.point.line.0.max(0);
+        self.term.scroll_display(Scroll::Bottom);
+        if row > 0 {
+            self.feed(format!("\x1b[{row}S\x1b[{row}A").as_bytes());
+        }
+        self.feed(b"\x1b[3J");
+        self.term.selection = None;
+    }
+
     pub fn clear_selection(&mut self) {
         self.term.selection = None;
     }
@@ -495,6 +516,20 @@ mod tests {
         assert!(runs[0].text.starts_with("hello") && runs[0].bg != selection);
         t.clear_selection();
         assert_eq!(t.selection_text(), None);
+    }
+
+    #[test]
+    fn select_all_and_clear_buffer() {
+        let mut t = Terminal::new(10, 2);
+        t.feed(b"one\r\ntwo\r\nthree\r\n$ ");
+        t.select_all();
+        assert_eq!(t.selection_text().as_deref().map(str::trim_end), Some("one\ntwo\nthree\n$"));
+        t.clear_buffer();
+        let s = t.snapshot();
+        assert_eq!((s.line_text(0).trim_end(), s.line_text(1).trim_end()), ("$", ""));
+        assert_eq!(s.cursor, Some((0, 2)));
+        t.scroll(5);
+        assert_eq!(t.snapshot().line_text(0).trim_end(), "$", "history is gone");
     }
 
     #[test]

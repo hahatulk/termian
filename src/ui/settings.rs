@@ -71,6 +71,10 @@ pub struct SettingsWindow {
     pub(super) menu: Option<Menu>,
     /// Terminal: «Detect OS Script» is expanded.
     pub(super) script_open: bool,
+    /// Shortcuts: the row taking a new key combination.
+    pub(super) recording: Option<super::settings_shortcuts::Recording>,
+    /// Shortcuts: the scheme waiting for «Remove».
+    pub(super) remove_scheme: Option<String>,
     _observe: Subscription,
 }
 
@@ -86,6 +90,8 @@ pub(super) enum Field {
     Shell,
     /// A font name typed into the font picker.
     Font,
+    /// Shortcuts: the name of the current user scheme.
+    SchemeName,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -93,6 +99,7 @@ pub(super) enum Menu {
     Emulation,
     Font,
     Shell,
+    Scheme,
 }
 
 impl Shell {
@@ -140,6 +147,8 @@ impl Shell {
                             sftp_error: None,
                             menu: None,
                             script_open: false,
+                            recording: None,
+                            remove_scheme: None,
                             _observe: observe,
                         }
                     })
@@ -171,11 +180,9 @@ impl Shell {
 
 /// The application menu (legacy `buildMacApplicationMenu`) and its keys.
 pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
-    use gpui::{KeyBinding, Menu, MenuItem};
-    #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None), KeyBinding::new("cmd-q", Quit, None)]);
-    #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("ctrl-,", OpenSettings, None), KeyBinding::new("ctrl-1", OpenVaults, None), KeyBinding::new("ctrl-2", OpenSftp, None)]);
+    use gpui::{Menu, MenuItem};
+    // Keys come from Settings → Shortcuts (`shortcut_actions::bind`); on
+    // Windows the scheme's Ctrl+1 / Ctrl+2 reach Vaults and SFTP, as in legacy.
     // Menu actions arrive while the focused window is being updated, so the
     // main window is reached once that dispatch is over.
     cx.on_action(move |_: &OpenSettings, cx| {
@@ -274,6 +281,10 @@ impl SettingsWindow {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.recording.is_some() {
+            self.record_key(event, cx);
+            return;
+        }
         let keystroke = &event.keystroke;
         if keystroke.key == "w" && (keystroke.modifiers.platform || keystroke.modifiers.control) && self.editing.is_none() {
             window.remove_window();
@@ -689,13 +700,6 @@ impl SettingsWindow {
             .into_any_element()]
     }
 
-    fn render_not_ported(&self, tab: Tab) -> Vec<gpui::AnyElement> {
-        vec![section(vec![
-            section_title(tab.title()).into_any_element(),
-            body_text("Этот раздел настроек ещё не перенесён в нативный клиент: пока он доступен в legacy-клиенте.").into_any_element(),
-        ])
-        .into_any_element()]
-    }
 }
 
 impl Render for SettingsWindow {
@@ -706,7 +710,7 @@ impl Render for SettingsWindow {
             Tab::Logs => self.render_logs(cx),
             Tab::Version => self.render_version(cx),
             Tab::Terminal => self.render_terminal(cx),
-            tab @ Tab::Shortcuts => self.render_not_ported(tab),
+            Tab::Shortcuts => self.render_shortcuts(cx),
         };
         let tabs = Tab::ALL.into_iter().map(|tab| {
             let selected = tab == self.tab;
@@ -726,6 +730,7 @@ impl Render for SettingsWindow {
                 .child(tab.title())
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     settings.commit_edit(cx);
+                    settings.submit_recording(cx);
                     settings.menu = None;
                     settings.tab = tab;
                     cx.notify();
@@ -739,6 +744,7 @@ impl Render for SettingsWindow {
             .text_color(rgb(theme::TEXT))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            .on_modifiers_changed(cx.listener(Self::record_modifiers))
             .child(
                 div()
                     .h(px(80.))

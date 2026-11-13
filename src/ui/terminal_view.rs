@@ -11,6 +11,7 @@ use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::login_view::{self, LoginActions, LoginTarget};
+use super::shortcut_actions::{ClearTerminalBuffer, CopyFromTerminal, PasteToTerminal, SelectAllInTerminal};
 
 /// Where an SSH tab connects to; kept so the connection can be retried.
 #[derive(Clone)]
@@ -533,6 +534,25 @@ impl Render for TerminalView {
             .track_focus(&self.focus)
             .key_context("Terminal")
             .on_key_down(cx.listener(Self::on_key))
+            .on_action(cx.listener(|view, _: &CopyFromTerminal, _, cx| {
+                if let Some(text) = view.terminal.selection_text() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
+            .on_action(cx.listener(|view, _: &PasteToTerminal, _, cx| {
+                if let (false, Some(text)) = (view.closed, cx.read_from_clipboard().and_then(|item| item.text())) {
+                    view.terminal.scroll(i32::MIN / 2);
+                    view.session.write(&paste_bytes(&text, view.terminal.bracketed_paste()));
+                }
+            }))
+            .on_action(cx.listener(|view, _: &SelectAllInTerminal, _, cx| {
+                view.terminal.select_all();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|view, _: &ClearTerminalBuffer, _, cx| {
+                view.terminal.clear_buffer();
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

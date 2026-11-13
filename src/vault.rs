@@ -273,6 +273,9 @@ pub struct Vault {
     /// interval, which is in `foreign.settings`.
     #[serde(default)]
     pub terminal: crate::terminal_settings::TerminalSettings,
+    /// Settings → Shortcuts; device-local like legacy.
+    #[serde(default)]
+    pub shortcuts: crate::shortcuts::ShortcutSettings,
     #[serde(default)]
     pub cloud: Option<crate::cloud::CloudConfig>,
     #[serde(default)]
