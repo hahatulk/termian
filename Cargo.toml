@@ -35,6 +35,10 @@ dirs = "7.0.0"
 futures = "0.3.34"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 russh-sftp = "3.0.1"
+minisign-verify = "0.3"
+semver = "1"
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

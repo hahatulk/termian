@@ -19,4 +19,5 @@ pub mod tabs;
 pub mod terminal;
 pub mod theme;
 pub mod transfer;
+pub mod updater;
 pub mod vault;

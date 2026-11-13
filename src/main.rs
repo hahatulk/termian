@@ -65,6 +65,7 @@ pub struct Shell {
     sftp_answer_focus: FocusHandle,
     sftp_dialog_focus: FocusHandle,
     cloud: ui::cloud::CloudState,
+    update: ui::update::UpdateState,
     cloud_focus: FocusHandle,
 }
 
@@ -134,6 +135,7 @@ impl Shell {
             sftp_answer_focus: cx.focus_handle(),
             sftp_dialog_focus: cx.focus_handle(),
             cloud: Default::default(),
+            update: Default::default(),
             cloud_focus: cx.focus_handle(),
         }
     }
@@ -349,6 +351,7 @@ impl Render for Shell {
             })
             .track_focus(&self.root_focus)
             .children(self.render_palette(window, cx))
+            .children(self.render_update_notice(cx))
             .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
     }
@@ -373,7 +376,10 @@ fn main() {
             },
             |window, cx| {
                 let shell = cx.new(Shell::new);
-                shell.update(cx, |shell, cx| shell.start_cloud(cx));
+                shell.update(cx, |shell, cx| {
+                    shell.start_cloud(cx);
+                    shell.start_updates(cx);
+                });
                 let focus = shell.read(cx).root_focus.clone();
                 window.focus(&focus);
                 shell
