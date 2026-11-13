@@ -11,7 +11,7 @@ use termian_native::login::{Answer, HostKeyDecision, LoginEvent, LoginState};
 use termian_native::remote_fs::{RemoteEvent, RemoteFs};
 use termian_native::session::SshTarget;
 use termian_native::theme;
-use termian_native::vault::HostId;
+use termian_native::vault::{GroupId, HostId};
 
 use super::assets::icon;
 use super::hosts::{host_tile, os_tile};
@@ -58,7 +58,7 @@ impl Side {
 pub enum RemoteState {
     Idle,
     /// Choosing a saved host, or typing `user@host` to connect directly.
-    Picking { query: String },
+    Picking { query: String, group: Option<GroupId> },
     /// Logging in: the connection screen.
     Connecting(LoginState),
     Connected { panel: Panel, error: Option<String> },
@@ -302,7 +302,7 @@ impl Shell {
             RemoteState::Connected { panel, error } => self.render_panel(side, panel, error.as_deref(), window, cx),
             RemoteState::Idle => self.render_connect_placeholder(side, None, cx),
             RemoteState::Failed(reason) => self.render_connect_placeholder(side, Some(reason), cx),
-            RemoteState::Picking { query } => self.render_host_picker(side, query, window, cx),
+            RemoteState::Picking { query, group } => self.render_host_picker(side, query, *group, window, cx),
             RemoteState::Connecting(login) => self.render_sftp_login(side, login, window, cx),
         }
     }
@@ -382,6 +382,14 @@ impl Shell {
         }
     }
 
+    /// The legacy green «Local» button: this panel shows the disk.
+    fn show_local(&mut self, side: Side) {
+        self.disconnect_sftp(side);
+        let panel = self.sftp.side_mut(side);
+        panel.host = false;
+        panel.reload_local();
+    }
+
     /// Back from choosing a host: the left panel shows the disk again.
     fn cancel_pick(&mut self, side: Side) {
         let panel = self.sftp.side_mut(side);
@@ -417,7 +425,7 @@ impl Shell {
                     .flex()
                     .gap_2()
                     .child(button(&format!("select-host-{key}"), "Select host", false).on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.sftp.side_mut(side).state = RemoteState::Picking { query: String::new() };
+                        shell.sftp.side_mut(side).state = RemoteState::Picking { query: String::new(), group: None };
                         cx.notify();
                     })))
                     .when(side == Side::Left, |d| {
@@ -431,7 +439,7 @@ impl Shell {
 
     /// Enter in the picker: first matching saved host, else a typed `user@host`.
     fn pick_query(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
-        let RemoteState::Picking { query } = &self.sftp.side(side).state else { return };
+        let RemoteState::Picking { query, .. } = &self.sftp.side(side).state else { return };
         let query = query.clone();
         if query.trim().is_empty() {
             return;
@@ -453,7 +461,7 @@ impl Shell {
             if keystroke.key == "escape" {
                 self.cancel_pick(side);
             } else {
-                let RemoteState::Picking { query } = &mut self.sftp.side_mut(side).state else { return };
+                let RemoteState::Picking { query, .. } = &mut self.sftp.side_mut(side).state else { return };
                 match keystroke.key.as_str() {
                     _ if keystroke.modifiers.platform && keystroke.key == "v" => {
                         query.push_str(paste.as_deref().and_then(|p| p.lines().next()).unwrap_or(""));
@@ -473,9 +481,71 @@ impl Shell {
         cx.notify();
     }
 
-    fn render_host_picker(&self, side: Side, query: &str, window: &Window, cx: &mut Context<Self>) -> Div {
+    /// The legacy «Select Host» panel: back, «Vaults», the green Local
+    /// button, search, then Groups (opened in place, with breadcrumbs) and
+    /// the hosts of the open group, as on the Hosts screen.
+    fn render_host_picker(&self, side: Side, query: &str, group: Option<GroupId>, window: &Window, cx: &mut Context<Self>) -> Div {
         let key = side.key();
         let focused = self.sftp_answer_focus.is_focused(window);
+        let set_group = move |target: Option<GroupId>| {
+            move |shell: &mut Shell, _: &ClickEvent, _: &mut Window, cx: &mut Context<Shell>| {
+                if let RemoteState::Picking { group, .. } = &mut shell.sftp.side_mut(side).state {
+                    *group = target;
+                }
+                cx.notify();
+            }
+        };
+        let header = div()
+            .h(px(64.))
+            .flex_none()
+            .px_4()
+            .flex()
+            .items_center()
+            .gap_3()
+            .bg(rgb(theme::SIDEBAR))
+            .child(
+                div()
+                    .id(SharedString::from(format!("pick-back-{key}")))
+                    .size(px(28.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_md()
+                    .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .child(svg().path(icon("arrow_left")).size(px(14.)).text_color(rgb(theme::TEXT)))
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.cancel_pick(side);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Select Host"))
+                    .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Vaults")),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id(SharedString::from(format!("pick-local-{key}")))
+                    .h(px(30.))
+                    .px_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .bg(rgb(theme::ACCENT))
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(0xffffff))
+                    .child(svg().path(icon("local")).size(px(14.)).text_color(rgb(0xffffff)))
+                    .child("Local")
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.show_local(side);
+                        cx.notify();
+                    })),
+            );
         let field = div()
             .id(SharedString::from(format!("pick-query-{key}")))
             .track_focus(&self.sftp_answer_focus)
@@ -484,24 +554,29 @@ impl Shell {
                 window.focus(&shell.sftp_answer_focus);
                 cx.notify();
             }))
-            .mx_3()
-            .mt_3()
-            .h(px(36.))
-            .px_3()
+            .h(px(44.))
+            .flex_none()
+            .px_4()
             .flex()
             .items_center()
-            .rounded_md()
-            .bg(rgb(theme::INPUT))
-            .border_1()
-            .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-            .text_color(rgb(if query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-            .child(if query.is_empty() { "Find a host or user@hostname...".to_owned() } else { query.to_owned() })
-            .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))));
-        let hosts = self.vault.search(query).into_iter().map(|host| {
-            let id = host.id;
+            .gap_2()
+            .bg(rgb(theme::SIDEBAR))
+            .border_t_1()
+            .border_color(rgb(theme::TITLE_BAR))
+            .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .text_color(rgb(if query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
+                    .child(if query.is_empty() { "Search".to_owned() } else { query.to_owned() })
+                    .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT)))),
+            );
+        let row = |id: String, tile: Div, title: String, subtitle: String| {
             div()
-                .id(SharedString::from(format!("pick-{key}-{id}")))
-                .h(px(60.))
+                .id(SharedString::from(id))
+                .h(px(64.))
                 .flex_none()
                 .px_3()
                 .flex()
@@ -509,69 +584,58 @@ impl Shell {
                 .gap_3()
                 .rounded_lg()
                 .hover(|s| s.bg(rgb(theme::SURFACE)))
-                .child(host_tile(host))
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .child(div().text_color(rgb(theme::TEXT)).child(host.label.clone()))
-                        .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(host.subtitle())),
-                )
-                .on_click(cx.listener(move |shell, _, window, cx| {
+                .child(tile)
+                .child(div().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child(title)).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
+        };
+        let title = |text: &str| div().px_3().pt_4().pb_2().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(text.to_owned());
+        let mut list = div().flex().flex_col();
+        let searching = !query.trim().is_empty();
+        if !searching {
+            if let Some(open) = group {
+                let mut crumbs = div().px_3().pt_4().flex().items_center().gap_2().text_sm().child(
+                    div().id(SharedString::from(format!("pick-crumb-root-{key}"))).text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(set_group(None))),
+                );
+                for g in self.vault.breadcrumbs(Some(open)) {
+                    crumbs = crumbs.child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(
+                        div()
+                            .id(SharedString::from(format!("pick-crumb-{key}-{}", g.id)))
+                            .text_color(rgb(if g.id == open { theme::TEXT } else { theme::ACCENT }))
+                            .child(g.label.clone())
+                            .on_click(cx.listener(set_group(Some(g.id)))),
+                    );
+                }
+                list = list.child(crumbs);
+            }
+            let groups = self.vault.child_groups(group);
+            if !groups.is_empty() {
+                list = list.child(title("Groups"));
+                for g in groups {
+                    let count = self.vault.hosts_under(Some(g.id)).len();
+                    list = list.child(
+                        row(format!("pick-group-{key}-{}", g.id), super::hosts::tile("group", theme::TILE_BLUE), g.label.clone(), format!("{count} {}", if count == 1 { "Host" } else { "Hosts" }))
+                            .on_click(cx.listener(set_group(Some(g.id)))),
+                    );
+                }
+            }
+        }
+        let hosts = if searching { self.vault.search(query) } else { self.vault.hosts_under(group) };
+        if !hosts.is_empty() {
+            list = list.child(title("Hosts"));
+            for host in hosts {
+                let id = host.id;
+                list = list.child(row(format!("pick-{key}-{id}"), host_tile(host), host.display_label().to_owned(), host.subtitle()).on_click(cx.listener(move |shell, _, window, cx| {
                     shell.connect_sftp(side, id, window, cx);
                     cx.notify();
-                }))
-        });
-        // The left panel can go back to the local disk from here.
-        let local = (side == Side::Left).then(|| {
-            div()
-                .id("pick-left-local")
-                .h(px(60.))
-                .flex_none()
-                .px_3()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_lg()
-                .hover(|s| s.bg(rgb(theme::SURFACE)))
-                .child(
-                    div()
-                        .size(px(40.))
-                        .rounded_lg()
-                        .bg(rgb(theme::TILE_BLUE))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(svg().path(icon("local")).size(px(20.)).text_color(rgb(0xffffff))),
-                )
-                .child(div().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child("Local")).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("This computer")))
-                .on_click(cx.listener(|shell, _, _, cx| {
-                    shell.disconnect_sftp(Side::Left);
-                    cx.notify();
-                }))
-        });
+                })));
+            }
+        }
         div()
             .h_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .h(px(56.))
-                    .px_4()
-                    .flex()
-                    .items_center()
-                    .bg(rgb(theme::SIDEBAR))
-                    .text_color(rgb(theme::TEXT))
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child("Select host")
-                    .child(div().flex_1())
-                    .child(button(&format!("pick-cancel-{key}"), "Cancel", false).on_click(cx.listener(move |shell, _, _, cx| {
-                        shell.cancel_pick(side);
-                        cx.notify();
-                    }))),
-            )
+            .child(header)
             .child(field)
-            .child(div().id(SharedString::from(format!("pick-list-{key}"))).flex_1().overflow_y_scroll().p_3().flex().flex_col().gap_1().children(local).children(hosts))
+            .child(div().id(SharedString::from(format!("pick-list-{key}"))).flex_1().overflow_y_scroll().px_3().pb_3().child(list))
     }
 
     fn render_sftp_login(&self, side: Side, login: &LoginState, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -663,10 +727,11 @@ impl Shell {
                         .child(svg().path(icon("local")).size(px(14.)).text_color(rgb(0xffffff))),
                 )
                 .child(div().text_color(rgb(theme::TEXT)).child("Local"))
-                .when(side == Side::Left, |row| {
+                .child({
+                    let row = div();
                     row.child(
                         div()
-                            .id("left-choose-host")
+                            .id(SharedString::from(format!("choose-host-{key}")))
                             .px_2()
                             .py_1()
                             .rounded_sm()
@@ -675,10 +740,10 @@ impl Shell {
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(theme::TEXT))
                             .child("HOST…")
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                let panel = shell.sftp.side_mut(Side::Left);
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                let panel = shell.sftp.side_mut(side);
                                 panel.host = true;
-                                panel.state = RemoteState::Picking { query: String::new() };
+                                panel.state = RemoteState::Picking { query: String::new(), group: None };
                                 cx.notify();
                             })),
                     )
