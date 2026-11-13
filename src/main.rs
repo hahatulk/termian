@@ -13,7 +13,13 @@ use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
 use termian_native::store::Store;
 use termian_native::theme;
-use termian_native::vault::{GroupId, Vault};
+use termian_native::session_log;
+use termian_native::vault::{GroupId, HistoryEntry, LogRef, Vault};
+
+/// Seconds since the Unix epoch.
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+}
 use ui::assets::{icon, Assets};
 use ui::hosts::Section;
 
@@ -27,6 +33,8 @@ pub struct Shell {
     tabs: Tabs,
     vault: Vault,
     store: Option<Store>,
+    /// Encrypted session logs (`session-logs-v2`).
+    logs_dir: std::path::PathBuf,
     vault_error: Option<String>,
     host_editor: Option<ui::host_editor::HostEditor>,
     host_menu: Option<ui::host_editor::HostMenu>,
@@ -36,6 +44,7 @@ pub struct Shell {
     group_editor: Option<ui::group_editor::GroupEditor>,
     group_menu: Option<ui::group_editor::GroupMenu>,
     launcher: ui::launcher::Launcher,
+    logs_view: ui::logs::LogsView,
     rules: ui::forwarding::Rules,
     forward_focus: FocusHandle,
     launcher_focus: FocusHandle,
@@ -47,6 +56,8 @@ pub struct Shell {
     section: Section,
     group: Option<GroupId>,
     terminals: HashMap<TabId, Entity<TerminalView>>,
+    /// The history entry (and log) behind each session tab.
+    tab_history: HashMap<TabId, u64>,
     query: String,
     search_focus: FocusHandle,
     sftp: ui::sftp::SftpState,
@@ -87,7 +98,14 @@ fn open_vault() -> (Vault, Option<Store>, Option<String>) {
 impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
         let (vault, store, vault_error) = open_vault();
-        Self { tabs: Tabs::default(), vault, store, vault_error, section: Section::Hosts,
+        let logs_dir = if std::env::var_os("TERMIAN_DEMO").is_some() {
+            std::env::temp_dir().join("termian-native-demo").join("session-logs-v2")
+        } else {
+            session_log::default_dir()
+        };
+        // Logs older than 60 days are deleted at start (FR-L5).
+        session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
+        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error, section: Section::Hosts,
             host_editor: None,
             host_menu: None,
             key_editor: None,
@@ -96,6 +114,7 @@ impl Shell {
             group_editor: None,
             group_menu: None,
             launcher: Default::default(),
+            logs_view: Default::default(),
             rules: Default::default(),
             forward_focus: cx.focus_handle(),
             launcher_focus: cx.focus_handle(),
@@ -105,6 +124,7 @@ impl Shell {
             editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
+            tab_history: HashMap::new(),
             query: String::new(),
             search_focus: cx.focus_handle(),
             sftp: ui::sftp::SftpState::new(),
@@ -129,8 +149,7 @@ impl Shell {
                 .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(theme::TEXT)))
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     cx.stop_propagation();
-                    shell.tabs.close(id);
-                    shell.terminals.remove(&id);
+                    shell.close_terminal_tab(id);
                     cx.notify();
                 }))
         } else {
@@ -161,41 +180,96 @@ impl Shell {
 }
 
 impl Shell {
-    fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, cx: &mut Context<Self>) {
+    fn add_terminal(&mut self, title: String, view: Entity<TerminalView>, history: Option<u64>, cx: &mut Context<Self>) {
         let id = self.tabs.open(TabKind::Session { title });
-        cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| match event {
-            TerminalEvent::Close => {
-                shell.tabs.close(id);
-                shell.terminals.remove(&id);
-                cx.notify();
+        cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| {
+            shell.session_ended(history);
+            if let TerminalEvent::Close = event {
+                shell.close_terminal_tab(id);
             }
+            cx.notify();
         })
         .detach();
+        if let Some(history) = history {
+            self.tab_history.insert(id, history);
+        }
         self.terminals.insert(id, view);
         cx.notify();
     }
 
+    /// Writes a session's end time into its Logs row, once.
+    fn session_ended(&mut self, history: Option<u64>) {
+        if let Some(entry) = history.and_then(|h| self.vault.history_entry_mut(h)).filter(|e| e.disconnected_at.is_none()) {
+            entry.disconnected_at = Some(now());
+            self.save_vault();
+        }
+    }
+
+    /// Closes a tab; dropping its terminal ends the session and finishes its log.
+    fn close_terminal_tab(&mut self, id: TabId) {
+        let history = self.tab_history.remove(&id);
+        self.session_ended(history);
+        self.tabs.close(id);
+        self.terminals.remove(&id);
+    }
+
+    /// Adds a history entry with a fresh encrypted session log (FR-L1, FR-L2).
+    fn record_session(&mut self, host: Option<HostId>, label: &str, subtitle: String) -> (u64, Option<session_log::SessionLog>) {
+        let key = session_log::new_key();
+        let name = format!("{}-{}", now(), self.vault.history.iter().map(|e| e.id).max().unwrap_or(0) + 1);
+        let log = session_log::SessionLog::start(&self.logs_dir, &name, key).ok();
+        let entry = HistoryEntry {
+            host,
+            connected_at: now(),
+            label: label.to_owned(),
+            subtitle,
+            log: log.as_ref().map(|_| LogRef { name, key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key) }),
+            ..HistoryEntry::default()
+        };
+        let id = self.vault.record_connection(entry);
+        self.save_vault();
+        (id, log)
+    }
+
     pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
-        let view = cx.new(|cx| TerminalView::new(session, window, cx));
-        self.add_terminal(title, view, cx);
+        let (history, log) = self.record_session(None, &title, "local".into());
+        let view = cx.new(|cx| TerminalView::new(session, window, cx).with_log(log));
+        self.add_terminal(title, view, Some(history), cx);
     }
 
     /// Opens an SSH tab that shows the connection screen until the shell is ready.
     pub fn open_ssh(&mut self, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_ssh_for(None, label, os, target, window, cx);
+    }
+
+    fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let subtitle = std::iter::once("ssh").chain(target.username.as_deref()).collect::<Vec<_>>().join(", ");
+        let (history, log) = self.record_session(host, &label, subtitle);
         let connection = Connection { label: label.clone(), os, target };
-        let view = cx.new(|cx| TerminalView::ssh(connection, window, cx));
-        self.add_terminal(label, view, cx);
+        let view = cx.new(|cx| TerminalView::ssh(connection, window, cx).with_log(log));
+        self.add_terminal(label, view, Some(history), cx);
     }
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::for_host(entry, &self.vault);
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
-        self.open_ssh(label, os, target, window, cx);
-        // The New Tab screen lists recent connections.
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
-        self.vault.record_connection(host, now);
-        self.save_vault();
+        self.open_ssh_for(Some(host), label, os, target, window, cx);
+    }
+
+    /// Opens a session log read-only in a new tab (FR-L4).
+    pub fn open_log(&mut self, history: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.vault.history.iter().find(|e| e.id == history) else { return };
+        let Some(log) = &entry.log else { return };
+        let key: Option<[u8; 32]> = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &log.key).ok().and_then(|k| k.try_into().ok());
+        let (data, note) = match key.map(|key| session_log::read(&self.logs_dir, &log.name, &key)) {
+            Some(Ok((data, error))) => (data, error.map(str::to_owned)),
+            Some(Err(error)) => (Vec::new(), Some(error)),
+            None => (Vec::new(), Some(session_log::UNREADABLE_LOG.to_owned())),
+        };
+        let title = entry.label.clone();
+        let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), window, cx));
+        self.add_terminal(title, view, None, cx);
     }
 
     /// Runs a snippet in the most recently opened terminal, starting a local one if none is open.

@@ -22,6 +22,8 @@ pub struct Connection {
 /// Requests from the tab to the window.
 pub enum TerminalEvent {
     Close,
+    /// The session ended (the tab may stay open).
+    Ended,
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -44,6 +46,10 @@ pub struct TerminalView {
     login_focus: FocusHandle,
     /// Bumped on retry; events from the replaced session are ignored.
     generation: u64,
+    /// Where the output is recorded; dropping it finishes the log.
+    log: Option<termian_native::session_log::SessionLog>,
+    /// Set when the session closes; reported as [`TerminalEvent::Ended`].
+    ended: bool,
 }
 
 impl TerminalView {
@@ -72,7 +78,25 @@ impl TerminalView {
             connection,
             login_focus,
             generation: 0,
+            log: None,
+            ended: false,
         }
+    }
+
+    /// Records everything the session prints to an encrypted session log.
+    pub fn with_log(mut self, log: Option<termian_native::session_log::SessionLog>) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// A recorded session, read-only.
+    pub fn replay(data: Vec<u8>, note: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::build(session::replay(data), None, window, cx);
+        view.closed = true;
+        if let Some(note) = note {
+            view.terminal.feed(format!("\r\n\x1b[31m{note}\x1b[0m\r\n").as_bytes());
+        }
+        view
     }
 
     fn listen(session: &mut Session, generation: u64, window: &mut Window, cx: &mut Context<Self>) {
@@ -84,6 +108,9 @@ impl TerminalView {
                             return;
                         }
                         view.handle(event, window);
+                        if std::mem::take(&mut view.ended) {
+                            cx.emit(TerminalEvent::Ended);
+                        }
                         cx.notify();
                     });
                     if alive.is_err() {
@@ -117,6 +144,9 @@ impl TerminalView {
                 }
             }
             SessionEvent::Output(bytes) => {
+                if let Some(log) = &self.log {
+                    log.append(&bytes);
+                }
                 self.terminal.feed(&bytes);
                 let replies = self.terminal.take_replies();
                 if !replies.is_empty() {
@@ -125,6 +155,8 @@ impl TerminalView {
             }
             SessionEvent::Closed(_) => {
                 self.closed = true;
+                self.log = None;
+                self.ended = true;
                 self.terminal.feed(b"\r\n\x1b[2m[Session closed]\x1b[0m\r\n");
             }
         }

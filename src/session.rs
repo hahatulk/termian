@@ -75,6 +75,13 @@ fn channels() -> (UnboundedSender<Input>, UnboundedReceiver<Input>, UnboundedSen
     (input.clone(), input_rx, events_tx, Session { input, events: Some(events) })
 }
 
+/// A finished session's output, replayed read-only (Logs).
+pub fn replay(data: Vec<u8>) -> Session {
+    let (_, _, events, session) = channels();
+    let _ = events.unbounded_send(SessionEvent::Output(data));
+    session
+}
+
 // ------------------------------------------------------------------ local --
 
 /// Starts the user's login shell.

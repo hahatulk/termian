@@ -139,11 +139,4 @@ impl Shell {
         page("known-scroll", vec![tool_button("import-known", "download", "IMPORT")], body)
     }
 
-    pub fn render_logs(&self) -> Div {
-        page(
-            "logs-scroll",
-            vec![],
-            empty_state("logs", "Logs are not ported yet", "Session history from the legacy client is not read by the native client yet."),
-        )
-    }
 }

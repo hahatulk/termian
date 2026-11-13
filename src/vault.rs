@@ -206,12 +206,36 @@ impl ForwardingRule {
     }
 }
 
-/// One connection in the history the New Tab screen lists.
+/// Where a session's encrypted log is and its key (base64), as the legacy
+/// `session_log_data`. Kept only inside the encrypted vault.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogRef {
+    pub name: String,
+    pub key: String,
+}
+
+/// One connection: listed by New Tab (Recent connections) and Logs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
-    pub host: HostId,
+    #[serde(default)]
+    pub id: u64,
+    /// `None` for a local terminal.
+    pub host: Option<HostId>,
     /// Seconds since the Unix epoch.
     pub connected_at: i64,
+    #[serde(default)]
+    pub disconnected_at: Option<i64>,
+    /// Name shown in Logs, kept even if the host is removed later.
+    #[serde(default)]
+    pub label: String,
+    /// `ssh, root` or `local`.
+    #[serde(default)]
+    pub subtitle: String,
+    #[serde(default)]
+    pub log: Option<LogRef>,
+    /// The Saved (bookmark) mark in Logs.
+    #[serde(default)]
+    pub saved: bool,
 }
 
 /// How many connections are remembered.
@@ -268,9 +292,32 @@ impl Vault {
         self.hosts.iter().filter(|h| query.is_empty() || h.matches(query)).collect()
     }
 
-    pub fn record_connection(&mut self, host: HostId, connected_at: i64) {
-        self.history.insert(0, HistoryEntry { host, connected_at });
-        self.history.truncate(HISTORY_LIMIT);
+    /// Adds a connection to the top of the history; returns its id.
+    pub fn record_connection(&mut self, mut entry: HistoryEntry) -> u64 {
+        entry.id = self.history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+        let id = entry.id;
+        self.history.insert(0, entry);
+        // Saved entries survive the limit, as bookmarked logs should.
+        while self.history.len() > HISTORY_LIMIT {
+            match self.history.iter().rposition(|e| !e.saved) {
+                Some(oldest) => {
+                    self.history.remove(oldest);
+                }
+                None => break,
+            }
+        }
+        id
+    }
+
+    pub fn history_entry_mut(&mut self, id: u64) -> Option<&mut HistoryEntry> {
+        self.history.iter_mut().find(|e| e.id == id)
+    }
+
+    /// Sessions with a log, for the Logs screen: newest first, or Saved first.
+    pub fn logs(&self, saved_first: bool) -> Vec<&HistoryEntry> {
+        let mut logs: Vec<&HistoryEntry> = self.history.iter().filter(|e| e.log.is_some()).collect();
+        logs.sort_by(|a, b| (saved_first && b.saved).cmp(&(saved_first && a.saved)).then(b.connected_at.cmp(&a.connected_at)));
+        logs
     }
 
     /// "Recent connections": newest first, one row per host that still exists.
@@ -278,7 +325,7 @@ impl Vault {
         let mut seen = Vec::new();
         self.history
             .iter()
-            .filter_map(|entry| self.host(entry.host))
+            .filter_map(|entry| entry.host.and_then(|h| self.host(h)))
             .filter(|host| {
                 let new = !seen.contains(&host.id);
                 seen.push(host.id);
@@ -543,17 +590,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn logs_list_sessions_with_a_log_and_saved_ones_survive_the_limit() {
+        let mut v = vault();
+        let log = |n: &str| Some(LogRef { name: n.into(), key: "k".into() });
+        let old = v.record_connection(HistoryEntry { host: Some(10), connected_at: 1, log: log("a"), saved: true, ..HistoryEntry::default() });
+        v.record_connection(HistoryEntry { host: Some(11), connected_at: 2, log: log("b"), ..HistoryEntry::default() });
+        v.record_connection(HistoryEntry { host: Some(12), connected_at: 3, ..HistoryEntry::default() });
+        let names = |v: &Vault, saved_first| v.logs(saved_first).iter().map(|e| e.log.as_ref().unwrap().name.clone()).collect::<Vec<_>>();
+        assert_eq!(names(&v, false), ["b", "a"]);
+        assert_eq!(names(&v, true), ["a", "b"]);
+        for i in 0..200 {
+            v.record_connection(HistoryEntry { host: Some(10), connected_at: 10 + i, ..HistoryEntry::default() });
+        }
+        assert_eq!(v.history.len(), 100);
+        assert!(v.history.iter().any(|e| e.id == old), "the saved entry is kept");
+        v.history_entry_mut(old).unwrap().disconnected_at = Some(9);
+        assert_eq!(v.history.iter().find(|e| e.id == old).unwrap().disconnected_at, Some(9));
+    }
+
+    #[test]
     fn recent_hosts_are_newest_first_once_each() {
         let mut v = vault();
-        v.record_connection(11, 1);
-        v.record_connection(12, 2);
-        v.record_connection(11, 3);
-        v.record_connection(999, 4);
+        let at = |host, connected_at| HistoryEntry { host: Some(host), connected_at, ..HistoryEntry::default() };
+        v.record_connection(at(11, 1));
+        v.record_connection(at(12, 2));
+        v.record_connection(at(11, 3));
+        v.record_connection(at(999, 4));
+        v.record_connection(HistoryEntry { host: None, connected_at: 5, ..HistoryEntry::default() });
         let ids: Vec<HostId> = v.recent_hosts().iter().map(|h| h.id).collect();
         assert_eq!(ids, [11, 12], "removed hosts are skipped, repeats collapse");
         assert_eq!(v.host_location(v.host(12).unwrap()), "Personal / work / Ugoloc");
         for i in 0..150 {
-            v.record_connection(10, i);
+            v.record_connection(at(10, i));
         }
         assert_eq!(v.history.len(), 100);
     }
@@ -720,7 +788,7 @@ pub fn demo() -> Vault {
         history: [10, 12, 15]
             .iter()
             .enumerate()
-            .map(|(i, host)| HistoryEntry { host: *host, connected_at: 1_794_000_000 - i as i64 * 3600 })
+            .map(|(i, host)| HistoryEntry { id: i as u64 + 1, host: Some(*host), connected_at: 1_794_000_000 - i as i64 * 3600, ..HistoryEntry::default() })
             .collect(),
         rules: Vec::new(),
     }

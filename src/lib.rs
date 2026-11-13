@@ -9,6 +9,7 @@ pub mod login;
 pub mod palette;
 pub mod remote_fs;
 pub mod session;
+pub mod session_log;
 pub mod store;
 pub mod tabs;
 pub mod terminal;

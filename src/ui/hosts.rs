@@ -118,7 +118,7 @@ impl Shell {
             Section::PortForwarding => self.render_port_forwarding(cx).into_any_element(),
             Section::Snippets => self.render_snippets(cx).into_any_element(),
             Section::KnownHosts => self.render_known_hosts().into_any_element(),
-            Section::Logs => self.render_logs().into_any_element(),
+            Section::Logs => self.render_logs(cx).into_any_element(),
         };
         let editor = match self.section {
             Section::Hosts => self.render_host_editor(window, cx).or_else(|| self.render_group_editor(window, cx)),

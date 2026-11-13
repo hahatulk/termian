@@ -237,6 +237,17 @@ pub struct Modifiers {
 }
 
 /// Bytes to send for a key; `key` uses GPUI key names (`enter`, `up`, `a`).
+/// The QWERTY key under a ЙЦУКЕН letter, so control shortcuts work in any layout.
+fn latin_key(c: char) -> char {
+    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбю";
+    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
+    let lower = c.to_lowercase().next().unwrap_or(c);
+    match RU.chars().position(|r| r == lower) {
+        Some(at) => EN.chars().nth(at).unwrap_or(lower),
+        None => lower.to_ascii_lowercase(),
+    }
+}
+
 pub fn key_bytes(key: &str, typed: Option<&str>, mods: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
     let arrow = |code: u8| {
         if mods.shift || mods.control || mods.alt {
@@ -264,8 +275,9 @@ pub fn key_bytes(key: &str, typed: Option<&str>, mods: Modifiers, app_cursor: bo
         "pagedown" => b"\x1b[6~".to_vec(),
         "delete" => b"\x1b[3~".to_vec(),
         "space" if mods.control => vec![0],
-        _ if mods.control && key.len() == 1 => {
-            let c = key.as_bytes()[0].to_ascii_lowercase();
+        _ if mods.control && key.chars().count() == 1 => {
+            // With a Russian layout Ctrl+C arrives as Ctrl+С: use the Latin key in that place.
+            let c = latin_key(key.chars().next().unwrap_or(' ')) as u8;
             match c {
                 b'a'..=b'z' => vec![c - b'a' + 1],
                 b'[' => vec![0x1b],
@@ -407,6 +419,11 @@ mod tests {
         assert_eq!(key_bytes("b", Some("b"), alt, false).unwrap(), b"\x1bb");
         assert_eq!(key_bytes("left", None, ctrl, false).unwrap(), b"\x1b[1;5D");
         assert_eq!(key_bytes("ж", Some("ж"), none, false).unwrap(), "ж".as_bytes());
+        // Russian layout: Ctrl+С, Ctrl+В, Ctrl+Л are Ctrl+C, Ctrl+D, Ctrl+K.
+        assert_eq!(key_bytes("с", Some("с"), ctrl, false).unwrap(), [3]);
+        assert_eq!(key_bytes("В", None, ctrl, false).unwrap(), [4]);
+        assert_eq!(key_bytes("л", None, ctrl, false).unwrap(), [11]);
+        assert_eq!(key_bytes("х", None, ctrl, false).unwrap(), [0x1b], "Ctrl+[");
         assert_eq!(key_bytes("f13", None, none, false), None);
     }
 
