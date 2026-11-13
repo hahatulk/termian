@@ -24,23 +24,37 @@ pub const FOLDER: u32 = 0x5ab4f0;
 const COLUMNS: [(SortKey, &str, f32); 4] =
     [(SortKey::Name, "Name", 0.), (SortKey::Modified, "Date Modified", 175.), (SortKey::Size, "Size", 115.), (SortKey::Kind, "Kind", 115.)];
 
-/// Which panel an event belongs to.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// Which panel: each one shows the local disk or a host.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum Side {
-    Local,
-    Remote,
+    Left,
+    Right,
 }
 
 impl Side {
     fn key(self) -> &'static str {
         match self {
-            Side::Local => "local",
-            Side::Remote => "remote",
+            Side::Left => "left",
+            Side::Right => "right",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Side::Left => 0,
+            Side::Right => 1,
+        }
+    }
+
+    pub fn other(self) -> Side {
+        match self {
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
         }
     }
 }
 
-/// Where the remote side is in its lifecycle.
+/// Where a host panel is in its lifecycle.
 pub enum RemoteState {
     Idle,
     /// Choosing a saved host, or typing `user@host` to connect directly.
@@ -58,34 +72,27 @@ pub struct Remote {
     pub connection: RemoteFs,
 }
 
-pub struct SftpState {
+/// One panel: the local disk (the left one by default) or a host.
+pub struct PanelSide {
+    /// Shows a host (or is choosing / connecting to one) rather than the disk.
+    pub host: bool,
     pub local: Panel,
     pub local_error: Option<String>,
-    pub filtering: Option<Side>,
     pub remote: Option<Remote>,
-    pub remote_state: RemoteState,
-    pub actions: Actions,
+    pub state: RemoteState,
     /// Bumped on every connect; events from older connections are ignored.
     generation: u64,
 }
 
-impl SftpState {
-    pub fn new() -> Self {
+impl PanelSide {
+    fn new(host: bool) -> Self {
         let home = dirs::home_dir().map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| "/".into());
-        let mut state = Self {
-            local: Panel::new(&home),
-            local_error: None,
-            filtering: None,
-            remote: None,
-            remote_state: RemoteState::Idle,
-            actions: Actions::default(),
-            generation: 0,
-        };
-        state.reload_local();
-        state
+        let mut side = Self { host, local: Panel::new(&home), local_error: None, remote: None, state: RemoteState::Idle, generation: 0 };
+        side.reload_local();
+        side
     }
 
-    pub fn reload_local(&mut self) {
+    fn reload_local(&mut self) {
         match termian_native::files::list_local(&self.local.path) {
             Ok(entries) => {
                 self.local.set_entries(entries);
@@ -97,24 +104,70 @@ impl SftpState {
             }
         }
     }
+}
+
+pub struct SftpState {
+    sides: [PanelSide; 2],
+    pub filtering: Option<Side>,
+    pub actions: Actions,
+}
+
+impl SftpState {
+    /// The disk on the left, a host on the right, as legacy opens the tab.
+    pub fn new() -> Self {
+        Self { sides: [PanelSide::new(false), PanelSide::new(true)], filtering: None, actions: Actions::default() }
+    }
+
+    pub fn side(&self, side: Side) -> &PanelSide {
+        &self.sides[side.index()]
+    }
+
+    pub fn side_mut(&mut self, side: Side) -> &mut PanelSide {
+        &mut self.sides[side.index()]
+    }
+
+    /// The host connection of a side, when it shows a host.
+    pub fn remote(&self, side: Side) -> Option<&Remote> {
+        self.side(side).remote.as_ref().filter(|_| self.side(side).host)
+    }
+
+    pub fn remote_mut(&mut self, side: Side) -> Option<&mut Remote> {
+        let s = self.side_mut(side);
+        if s.host {
+            s.remote.as_mut()
+        } else {
+            None
+        }
+    }
+
+    /// The side lists files: the disk, or a connected host.
+    pub fn is_ready(&self, side: Side) -> bool {
+        self.panel(side).is_some()
+    }
+
+    pub fn is_host(&self, side: Side) -> bool {
+        self.side(side).host
+    }
 
     pub fn panel(&self, side: Side) -> Option<&Panel> {
-        match side {
-            Side::Local => Some(&self.local),
-            Side::Remote => match &self.remote_state {
-                RemoteState::Connected { panel, .. } => Some(panel),
-                _ => None,
-            },
+        let s = self.side(side);
+        if !s.host {
+            return Some(&s.local);
+        }
+        match &s.state {
+            RemoteState::Connected { panel, .. } => Some(panel),
+            _ => None,
         }
     }
 
     pub fn panel_mut(&mut self, side: Side) -> Option<&mut Panel> {
-        match side {
-            Side::Local => Some(&mut self.local),
-            Side::Remote => match &mut self.remote_state {
-                RemoteState::Connected { panel, .. } => Some(panel),
-                _ => None,
-            },
+        let s = self.side_mut(side);
+        if !s.host {
+            return Some(&mut s.local);
+        }
+        match &mut s.state {
+            RemoteState::Connected { panel, .. } => Some(panel),
+            _ => None,
         }
     }
 
@@ -133,53 +186,48 @@ impl SftpState {
     }
 
     pub fn reload(&mut self, side: Side) {
-        match side {
-            Side::Local => self.reload_local(),
-            Side::Remote => {
-                if let (Some(remote), RemoteState::Connected { panel, .. }) = (&self.remote, &self.remote_state) {
-                    remote.connection.list(&panel.path);
-                }
-            }
+        let s = self.side_mut(side);
+        if !s.host {
+            s.reload_local();
+        } else if let (Some(remote), RemoteState::Connected { panel, .. }) = (&s.remote, &s.state) {
+            remote.connection.list(&panel.path);
         }
     }
 
-    /// Transfers and pending copies die with the connection.
-    fn forget_remote_work(&mut self) {
-        self.actions.transfers.clear();
-        self.actions.resolving.clear();
-        self.actions.menu = None;
-        self.actions.dialog = None;
+    /// Transfers and pending copies that use a side's connection die with it.
+    fn forget_remote_work(&mut self, side: Side) {
+        self.actions.forget_side(side);
     }
 
-    fn handle(&mut self, event: RemoteEvent) {
-        match (event, &mut self.remote_state) {
+    fn handle(&mut self, side: Side, event: RemoteEvent) {
+        let s = self.side_mut(side);
+        match (event, &mut s.state) {
             (RemoteEvent::Login(event), RemoteState::Connecting(login)) => login.apply(event),
             (RemoteEvent::Closed(reason), RemoteState::Connecting(login)) => {
                 // Keep the screen (and the target) so the user can read why and retry.
                 login.fail(reason.unwrap_or_else(|| "The connection was closed.".into()));
             }
             (RemoteEvent::Connected { home }, _) => {
-                self.remote_state = RemoteState::Connected { panel: Panel::new(&home), error: None };
-                self.reload(Side::Remote);
+                s.state = RemoteState::Connected { panel: Panel::new(&home), error: None };
+                self.reload(side);
             }
-            (RemoteEvent::Listed { path, result }, RemoteState::Connected { panel, error }) if path == panel.path => {
-                match result {
-                    Ok(entries) => {
-                        panel.set_entries(entries);
-                        *error = None;
-                    }
-                    Err(message) => {
-                        panel.set_entries(Vec::new());
-                        *error = Some(message);
-                    }
+            (RemoteEvent::Listed { path, result }, RemoteState::Connected { panel, error }) if path == panel.path => match result {
+                Ok(entries) => {
+                    panel.set_entries(entries);
+                    *error = None;
                 }
-            }
-            (RemoteEvent::Transfer { id, event }, _) => self.on_transfer(id, event),
-            (RemoteEvent::Changed(result), _) => self.on_remote_changed(result),
+                Err(message) => {
+                    panel.set_entries(Vec::new());
+                    *error = Some(message);
+                }
+            },
+            (RemoteEvent::Transfer { id, event }, _) => self.on_transfer(side, id, event),
+            (RemoteEvent::Changed(result), _) => self.on_remote_changed(side, result),
             (RemoteEvent::Closed(reason), _) => {
-                self.forget_remote_work();
-                self.remote = None;
-                self.remote_state = match reason {
+                self.forget_remote_work(side);
+                let s = self.side_mut(side);
+                s.remote = None;
+                s.state = match reason {
                     Some(reason) => RemoteState::Failed(reason),
                     None => RemoteState::Idle,
                 };
@@ -245,55 +293,62 @@ impl Shell {
             .children(self.render_transfer_bar(cx))
     }
 
+    fn render_side(&self, side: Side, window: &Window, cx: &mut Context<Self>) -> Div {
+        let s = self.sftp.side(side);
+        if !s.host {
+            return self.render_panel(side, &s.local, s.local_error.as_deref(), window, cx);
+        }
+        match &s.state {
+            RemoteState::Connected { panel, error } => self.render_panel(side, panel, error.as_deref(), window, cx),
+            RemoteState::Idle => self.render_connect_placeholder(side, None, cx),
+            RemoteState::Failed(reason) => self.render_connect_placeholder(side, Some(reason), cx),
+            RemoteState::Picking { query } => self.render_host_picker(side, query, window, cx),
+            RemoteState::Connecting(login) => self.render_sftp_login(side, login, window, cx),
+        }
+    }
+
     fn render_panels(&self, window: &Window, cx: &mut Context<Self>) -> Div {
-        let local = self.render_panel(Side::Local, &self.sftp.local, self.sftp.local_error.as_deref(), window, cx);
-        let remote = match &self.sftp.remote_state {
-            RemoteState::Connected { panel, error } => self.render_panel(Side::Remote, panel, error.as_deref(), window, cx),
-            RemoteState::Idle => self.render_connect_placeholder(None, cx),
-            RemoteState::Failed(reason) => self.render_connect_placeholder(Some(reason), cx),
-            RemoteState::Picking { query } => self.render_host_picker(query, window, cx),
-            RemoteState::Connecting(login) => self.render_sftp_login(login, window, cx),
-        };
         div()
             .w_full()
             .flex()
-            .child(local.w_1_2().border_r_1().border_color(rgb(theme::TITLE_BAR)))
-            .child(remote.w_1_2())
+            .child(self.render_side(Side::Left, window, cx).w_1_2().border_r_1().border_color(rgb(theme::TITLE_BAR)))
+            .child(self.render_side(Side::Right, window, cx).w_1_2())
     }
 
-    /// "Connect with SFTP" from a host card: the SFTP tab, remote side on that host.
+    /// "Connect with SFTP" from a host card: the SFTP tab, the right panel on that host.
     pub fn open_sftp_for(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.all().iter().find(|t| matches!(t.kind, termian_native::tabs::TabKind::Sftp)).map(|t| t.id) {
             self.tabs.activate(tab);
         }
-        self.disconnect_sftp();
-        self.connect_sftp(host, window, cx);
+        self.disconnect_sftp(Side::Right);
+        self.connect_sftp(Side::Right, host, window, cx);
         cx.notify();
     }
 
-    pub(crate) fn connect_sftp(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn connect_sftp(&mut self, side: Side, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::for_host(entry, &self.vault);
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
-        self.connect_sftp_target(label, os, target, window, cx);
+        self.connect_sftp_target(side, label, os, target, window, cx);
     }
 
-    fn connect_sftp_target(&mut self, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn connect_sftp_target(&mut self, side: Side, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
         target.options = termian_native::session::SshOptions::from_vault(&self.vault);
         let mut connection = RemoteFs::connect(target.clone());
-        self.sftp.generation += 1;
-        let generation = self.sftp.generation;
+        let panel = self.sftp.side_mut(side);
+        panel.generation += 1;
+        let generation = panel.generation;
         if let Some(mut events) = connection.take_events() {
             cx.spawn_in(window, async move |this, cx| {
                 while let Some(event) = events.next().await {
                     let asks_text = matches!(event, RemoteEvent::Login(LoginEvent::Prompt { .. }));
                     let alive = this.update_in(cx, |shell, window, cx| {
-                        if shell.sftp.generation != generation {
+                        if shell.sftp.side(side).generation != generation {
                             return; // a newer connection replaced this one
                         }
                         match event {
                             RemoteEvent::Names { request, result } => shell.on_names(request, result, window, cx),
-                            event => shell.sftp.handle(event),
+                            event => shell.sftp.handle(side, event),
                         }
                         if asks_text {
                             window.focus(&shell.sftp_answer_focus);
@@ -307,18 +362,37 @@ impl Shell {
             })
             .detach();
         }
-        self.sftp.remote = Some(Remote { label, os, target, connection });
-        self.sftp.remote_state = RemoteState::Connecting(LoginState::default());
+        let panel = self.sftp.side_mut(side);
+        panel.host = true;
+        panel.remote = Some(Remote { label, os, target, connection });
+        panel.state = RemoteState::Connecting(LoginState::default());
     }
 
-    pub(super) fn disconnect_sftp(&mut self) {
-        self.sftp.forget_remote_work();
-        self.sftp.generation += 1;
-        self.sftp.remote = None; // dropping the connection closes it
-        self.sftp.remote_state = RemoteState::Idle;
+    /// Closes a side's connection: the left panel goes back to the disk,
+    /// the right one to «Connect to host».
+    pub(super) fn disconnect_sftp(&mut self, side: Side) {
+        self.sftp.forget_remote_work(side);
+        let panel = self.sftp.side_mut(side);
+        panel.generation += 1;
+        panel.remote = None; // dropping the connection closes it
+        panel.state = RemoteState::Idle;
+        if side == Side::Left {
+            panel.host = false;
+            panel.reload_local();
+        }
     }
 
-    fn render_connect_placeholder(&self, error: Option<&str>, cx: &mut Context<Self>) -> Div {
+    /// Back from choosing a host: the left panel shows the disk again.
+    fn cancel_pick(&mut self, side: Side) {
+        let panel = self.sftp.side_mut(side);
+        panel.state = RemoteState::Idle;
+        if side == Side::Left && panel.remote.is_none() {
+            panel.host = false;
+        }
+    }
+
+    fn render_connect_placeholder(&self, side: Side, error: Option<&str>, cx: &mut Context<Self>) -> Div {
+        let key = side.key();
         centered()
             .child(
                 div()
@@ -338,59 +412,74 @@ impl Shell {
                     .child("Start by connecting to a saved host to manage your files with SFTP."),
             )
             .when_some(error, |d, error| d.child(div().text_sm().text_color(rgb(theme::TILE_UBUNTU)).child(error.to_owned())))
-            .child(button("select-host", "Select host", false).on_click(cx.listener(|shell, _, _, cx| {
-                shell.sftp.remote_state = RemoteState::Picking { query: String::new() };
-                cx.notify();
-            })))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(button(&format!("select-host-{key}"), "Select host", false).on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.sftp.side_mut(side).state = RemoteState::Picking { query: String::new() };
+                        cx.notify();
+                    })))
+                    .when(side == Side::Left, |d| {
+                        d.child(button("show-local", "Local", false).on_click(cx.listener(|shell, _, _, cx| {
+                            shell.disconnect_sftp(Side::Left);
+                            cx.notify();
+                        })))
+                    }),
+            )
     }
 
     /// Enter in the picker: first matching saved host, else a typed `user@host`.
-    fn pick_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let RemoteState::Picking { query } = &self.sftp.remote_state else { return };
+    fn pick_query(&mut self, side: Side, window: &mut Window, cx: &mut Context<Self>) {
+        let RemoteState::Picking { query } = &self.sftp.side(side).state else { return };
         let query = query.clone();
         if query.trim().is_empty() {
             return;
         }
         if let Some(host) = self.vault.search(&query).first().map(|h| h.id) {
-            self.connect_sftp(host, window, cx);
+            self.connect_sftp(side, host, window, cx);
         } else if let Some(target) = termian_native::session::parse_destination(&query) {
             let label = query.trim().trim_start_matches("ssh ").to_owned();
-            self.connect_sftp_target(label, None, target, window, cx);
+            self.connect_sftp_target(side, label, None, target, window, cx);
         }
     }
 
-    fn on_pick_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_pick_key(&mut self, side: Side, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         if keystroke.key == "enter" {
-            self.pick_query(window, cx);
+            self.pick_query(side, window, cx);
         } else {
             let paste = cx.read_from_clipboard().and_then(|item| item.text());
-            let RemoteState::Picking { query } = &mut self.sftp.remote_state else { return };
-            match keystroke.key.as_str() {
-                _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-                    query.push_str(paste.as_deref().and_then(|p| p.lines().next()).unwrap_or(""));
+            if keystroke.key == "escape" {
+                self.cancel_pick(side);
+            } else {
+                let RemoteState::Picking { query } = &mut self.sftp.side_mut(side).state else { return };
+                match keystroke.key.as_str() {
+                    _ if keystroke.modifiers.platform && keystroke.key == "v" => {
+                        query.push_str(paste.as_deref().and_then(|p| p.lines().next()).unwrap_or(""));
+                    }
+                    _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
+                    "backspace" => {
+                        query.pop();
+                    }
+                    _ => match keystroke.key_char.as_deref() {
+                        Some(text) if !text.chars().any(char::is_control) => query.push_str(text),
+                        _ => return,
+                    },
                 }
-                _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-                "backspace" => {
-                    query.pop();
-                }
-                "escape" => self.sftp.remote_state = RemoteState::Idle,
-                _ => match keystroke.key_char.as_deref() {
-                    Some(text) if !text.chars().any(char::is_control) => query.push_str(text),
-                    _ => return,
-                },
             }
         }
         cx.stop_propagation();
         cx.notify();
     }
 
-    fn render_host_picker(&self, query: &str, window: &Window, cx: &mut Context<Self>) -> Div {
+    fn render_host_picker(&self, side: Side, query: &str, window: &Window, cx: &mut Context<Self>) -> Div {
+        let key = side.key();
         let focused = self.sftp_answer_focus.is_focused(window);
         let field = div()
-            .id("pick-query")
+            .id(SharedString::from(format!("pick-query-{key}")))
             .track_focus(&self.sftp_answer_focus)
-            .on_key_down(cx.listener(Self::on_pick_key))
+            .on_key_down(cx.listener(move |shell, event: &KeyDownEvent, window, cx| shell.on_pick_key(side, event, window, cx)))
             .on_click(cx.listener(|shell, _, window, cx| {
                 window.focus(&shell.sftp_answer_focus);
                 cx.notify();
@@ -411,7 +500,7 @@ impl Shell {
         let hosts = self.vault.search(query).into_iter().map(|host| {
             let id = host.id;
             div()
-                .id(SharedString::from(format!("pick-{id}")))
+                .id(SharedString::from(format!("pick-{key}-{id}")))
                 .h(px(60.))
                 .flex_none()
                 .px_3()
@@ -429,7 +518,35 @@ impl Shell {
                         .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(host.subtitle())),
                 )
                 .on_click(cx.listener(move |shell, _, window, cx| {
-                    shell.connect_sftp(id, window, cx);
+                    shell.connect_sftp(side, id, window, cx);
+                    cx.notify();
+                }))
+        });
+        // The left panel can go back to the local disk from here.
+        let local = (side == Side::Left).then(|| {
+            div()
+                .id("pick-left-local")
+                .h(px(60.))
+                .flex_none()
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_lg()
+                .hover(|s| s.bg(rgb(theme::SURFACE)))
+                .child(
+                    div()
+                        .size(px(40.))
+                        .rounded_lg()
+                        .bg(rgb(theme::TILE_BLUE))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(svg().path(icon("local")).size(px(20.)).text_color(rgb(0xffffff))),
+                )
+                .child(div().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child("Local")).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("This computer")))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    shell.disconnect_sftp(Side::Left);
                     cx.notify();
                 }))
         });
@@ -448,83 +565,93 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child("Select host")
                     .child(div().flex_1())
-                    .child(button("pick-cancel", "Cancel", false).on_click(cx.listener(|shell, _, _, cx| {
-                        shell.sftp.remote_state = RemoteState::Idle;
+                    .child(button(&format!("pick-cancel-{key}"), "Cancel", false).on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.cancel_pick(side);
                         cx.notify();
                     }))),
             )
             .child(field)
-            .child(div().id("pick-list").flex_1().overflow_y_scroll().p_3().flex().flex_col().gap_1().children(hosts))
+            .child(div().id(SharedString::from(format!("pick-list-{key}"))).flex_1().overflow_y_scroll().p_3().flex().flex_col().gap_1().children(local).children(hosts))
     }
 
-    fn render_sftp_login(&self, login: &LoginState, window: &Window, cx: &mut Context<Self>) -> Div {
-        let Some(remote) = &self.sftp.remote else { return div() };
+    fn render_sftp_login(&self, side: Side, login: &LoginState, window: &Window, cx: &mut Context<Self>) -> Div {
+        let Some(remote) = &self.sftp.side(side).remote else { return div() };
         let target = LoginTarget {
             label: &remote.label,
             subtitle: format!("SFTP {}:{}", remote.target.host, remote.target.port),
             os: remote.os.as_deref(),
         };
-        let actions = LoginActions {
-            answer: |shell: &mut Shell, answer, _, cx| {
-                shell.sftp_login_answer(answer);
-                cx.notify();
-            },
-            close: |shell: &mut Shell, _, cx| {
-                shell.disconnect_sftp();
-                cx.notify();
-            },
-            retry: |shell: &mut Shell, window, cx| {
-                if let Some(remote) = shell.sftp.remote.take() {
-                    shell.connect_sftp_target(remote.label, remote.os, remote.target, window, cx);
-                }
-                cx.notify();
-            },
-            toggle_logs: |shell: &mut Shell, cx| {
-                if let RemoteState::Connecting(login) = &mut shell.sftp.remote_state {
-                    login.show_logs = !login.show_logs;
-                }
-                cx.notify();
-            },
-            key: |shell: &mut Shell, event, _, cx| {
-                let paste = cx.read_from_clipboard().and_then(|item| item.text());
-                let RemoteState::Connecting(login) = &mut shell.sftp.remote_state else { return };
-                if let Some(answer) = login_view::edit(login, event, paste) {
-                    if let Some(answer) = answer {
-                        shell.sftp_login_answer(answer);
-                    }
-                    cx.stop_propagation();
+        // The login screen's callbacks are plain functions: one set per side.
+        fn actions<const LEFT: bool>() -> LoginActions<Shell> {
+            LoginActions {
+                answer: |shell: &mut Shell, answer, _, cx| {
+                    shell.sftp_login_answer(if LEFT { Side::Left } else { Side::Right }, answer);
                     cx.notify();
-                }
-            },
-            submit: |shell: &mut Shell, _, cx| {
-                if let RemoteState::Connecting(login) = &mut shell.sftp.remote_state {
-                    if let Some(answer) = login.submit_text() {
-                        shell.sftp_login_answer(answer);
+                },
+                close: |shell: &mut Shell, _, cx| {
+                    shell.disconnect_sftp(if LEFT { Side::Left } else { Side::Right });
+                    cx.notify();
+                },
+                retry: |shell: &mut Shell, window, cx| {
+                    let side = if LEFT { Side::Left } else { Side::Right };
+                    if let Some(remote) = shell.sftp.side_mut(side).remote.take() {
+                        shell.connect_sftp_target(side, remote.label, remote.os, remote.target, window, cx);
                     }
-                }
-                cx.notify();
-            },
-        };
+                    cx.notify();
+                },
+                toggle_logs: |shell: &mut Shell, cx| {
+                    if let RemoteState::Connecting(login) = &mut shell.sftp.side_mut(if LEFT { Side::Left } else { Side::Right }).state {
+                        login.show_logs = !login.show_logs;
+                    }
+                    cx.notify();
+                },
+                key: |shell: &mut Shell, event, _, cx| {
+                    let side = if LEFT { Side::Left } else { Side::Right };
+                    let paste = cx.read_from_clipboard().and_then(|item| item.text());
+                    let RemoteState::Connecting(login) = &mut shell.sftp.side_mut(side).state else { return };
+                    if let Some(answer) = login_view::edit(login, event, paste) {
+                        if let Some(answer) = answer {
+                            shell.sftp_login_answer(side, answer);
+                        }
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                },
+                submit: |shell: &mut Shell, _, cx| {
+                    let side = if LEFT { Side::Left } else { Side::Right };
+                    if let RemoteState::Connecting(login) = &mut shell.sftp.side_mut(side).state {
+                        if let Some(answer) = login.submit_text() {
+                            shell.sftp_login_answer(side, answer);
+                        }
+                    }
+                    cx.notify();
+                },
+            }
+        }
+        let actions = if side == Side::Left { actions::<true>() } else { actions::<false>() };
         login_view::render(target, login, &self.sftp_answer_focus, window, &actions, cx)
     }
 
     /// Sends an answer to the pending login question; cancelling disconnects.
-    fn sftp_login_answer(&mut self, answer: Answer) {
+    fn sftp_login_answer(&mut self, side: Side, answer: Answer) {
         let cancels = matches!(answer, Answer::Text(None) | Answer::HostKey(HostKeyDecision::Reject));
-        if let (Some(remote), RemoteState::Connecting(login)) = (&self.sftp.remote, &mut self.sftp.remote_state) {
+        let panel = self.sftp.side_mut(side);
+        if let (Some(remote), RemoteState::Connecting(login)) = (&panel.remote, &mut panel.state) {
             if let Some(answer) = login.answer(answer) {
                 remote.connection.answer(answer);
             }
         }
         if cancels {
-            self.disconnect_sftp();
+            self.disconnect_sftp(side);
         }
     }
 
     fn render_panel_title(&self, side: Side, cx: &mut Context<Self>) -> Div {
+        let key = side.key();
         let row = div().flex().items_center().gap_3();
-        match side {
-            Side::Local => row
+        match self.sftp.remote(side) {
+            // The disk: on the left, a click chooses a host instead (host-to-host copies).
+            None => row
                 .child(
                     div()
                         .size(px(26.))
@@ -535,14 +662,11 @@ impl Shell {
                         .justify_center()
                         .child(svg().path(icon("local")).size(px(14.)).text_color(rgb(0xffffff))),
                 )
-                .child(div().text_color(rgb(theme::TEXT)).child("Local")),
-            Side::Remote => {
-                row.when_some(self.sftp.remote.as_ref(), |row, remote| {
-                    row.child(os_tile(remote.os.as_deref()).size(px(26.))).child(div().text_color(rgb(theme::TEXT)).child(remote.label.clone()))
-                })
-                    .child(
+                .child(div().text_color(rgb(theme::TEXT)).child("Local"))
+                .when(side == Side::Left, |row| {
+                    row.child(
                         div()
-                            .id("disconnect")
+                            .id("left-choose-host")
                             .px_2()
                             .py_1()
                             .rounded_sm()
@@ -550,13 +674,31 @@ impl Shell {
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(theme::TEXT))
-                            .child("DISCONNECT")
-                            .on_click(cx.listener(|shell, _, window, cx| {
-                                shell.request_disconnect(window);
+                            .child("HOST…")
+                            .on_click(cx.listener(|shell, _, _, cx| {
+                                let panel = shell.sftp.side_mut(Side::Left);
+                                panel.host = true;
+                                panel.state = RemoteState::Picking { query: String::new() };
                                 cx.notify();
                             })),
                     )
-            }
+                }),
+            Some(remote) => row.child(os_tile(remote.os.as_deref()).size(px(26.))).child(div().text_color(rgb(theme::TEXT)).child(remote.label.clone())).child(
+                div()
+                    .id(SharedString::from(format!("disconnect-{key}")))
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .bg(rgb(theme::SURFACE_ACTIVE))
+                    .text_xs()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .text_color(rgb(theme::TEXT))
+                    .child("DISCONNECT")
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.request_disconnect(side, window);
+                        cx.notify();
+                    })),
+            ),
         }
     }
 
@@ -690,9 +832,9 @@ impl Shell {
                 if dragged.side != side { style.border_color(rgb(theme::ACCENT)) } else { style }
             })
             .on_drop(cx.listener(move |shell, dragged: &DraggedRows, window, cx| shell.drop_rows(dragged, side, window, cx)))
-            .when(side == Side::Remote, |d| {
+            .when(self.sftp.is_host(side), |d| {
                 d.drag_over::<ExternalPaths>(|style, _, _, _| style.border_color(rgb(theme::ACCENT)))
-                    .on_drop(cx.listener(|shell, paths: &ExternalPaths, window, cx| shell.drop_paths(paths, window, cx)))
+                    .on_drop(cx.listener(move |shell, paths: &ExternalPaths, window, cx| shell.drop_paths(side, paths, window, cx)))
             })
             .child(header)
             .child(navigation)
@@ -745,7 +887,7 @@ impl Shell {
             None => svg().path(icon("folder")).size(px(18.)).text_color(rgb(FOLDER)).into_any_element(),
         };
         // Remote rows show permissions under the name, as in the legacy panel.
-        let permissions = (side == Side::Remote).then(|| entry.and_then(Entry::permissions_label)).flatten();
+        let permissions = self.sftp.is_host(side).then(|| entry.and_then(Entry::permissions_label)).flatten();
         let target = name.clone();
         let menu_target = name.clone();
         let row = div()

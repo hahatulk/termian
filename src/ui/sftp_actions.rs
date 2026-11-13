@@ -20,7 +20,7 @@ use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, I
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::sftp::{RemoteState, Side, SftpState};
+use super::sftp::{Side, SftpState};
 use crate::Shell;
 
 const MENU_WIDTH: f32 = 230.;
@@ -62,11 +62,11 @@ pub enum Dialog {
     Permissions { side: Side, entry: Entry, mode: u32 },
     /// "File already exists" for the front of `SftpState::resolving`.
     Conflict,
-    TransferError(TransferId),
+    TransferError(Side, TransferId),
     Transfers,
     Error(String),
-    /// Disconnecting would lose saved but not uploaded copies.
-    EditingInProgress,
+    /// Disconnecting this side would lose saved but not uploaded copies.
+    EditingInProgress(Side),
 }
 
 /// A copy waiting for answers about name clashes.
@@ -77,6 +77,10 @@ pub struct Resolving {
     /// The request for the destination's names, when it is remote.
     waiting: Option<u64>,
     direction: Direction,
+    /// The connection that runs the transfers.
+    conn: Side,
+    /// Host-to-host: the files go through a temporary folder to this side.
+    relay_to: Option<Side>,
     source_dir: String,
     destination_dir: String,
     question: Option<ConflictQuestion>,
@@ -85,6 +89,8 @@ pub struct Resolving {
 
 pub struct TransferRow {
     pub id: TransferId,
+    /// The connection that runs it (each numbers its transfers).
+    pub conn: Side,
     label: String,
     is_dir: bool,
     direction: Direction,
@@ -100,6 +106,10 @@ enum After {
     Open { edit: EditId, app: Option<PathBuf> },
     /// An edited copy went back to the server.
     Uploaded(EditId),
+    /// Host-to-host, first half: downloaded into `temp`; now upload it to `to`.
+    Relay { to: Side, temp: PathBuf, destination_dir: String, planned: Planned },
+    /// Host-to-host, second half: the temporary copy can go.
+    Cleanup(PathBuf),
 }
 
 /// What a row drag carries: the row under the pointer and its panel.
@@ -126,18 +136,24 @@ impl Render for DragPreview {
 }
 
 fn other(side: Side) -> Side {
-    match side {
-        Side::Local => Side::Remote,
-        Side::Remote => Side::Local,
-    }
+    side.other()
+}
+
+/// A folder of its own for one host-to-host file.
+fn relay_dir() -> Result<PathBuf, String> {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = std::env::temp_dir().join("termian-relay").join(format!("{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    Ok(dir)
 }
 
 impl SftpState {
-    /// Handles a transfer event from the remote side.
-    pub fn on_transfer(&mut self, id: TransferId, event: TransferEvent) {
-        let Some(row) = self.actions.transfers.iter_mut().find(|r| r.id == id) else {
+    /// Handles a transfer event from a side's connection.
+    pub fn on_transfer(&mut self, conn: Side, id: TransferId, event: TransferEvent) {
+        let Some(row) = self.actions.transfers.iter_mut().find(|r| r.conn == conn && r.id == id) else {
             if matches!(event, TransferEvent::Finished | TransferEvent::Cancelled) {
-                if let Some(remote) = &mut self.remote {
+                if let Some(remote) = self.remote_mut(conn) {
                     remote.connection.finished(id);
                 }
             }
@@ -150,10 +166,12 @@ impl SftpState {
             }
             TransferEvent::Failed { error, .. } => row.failure = Some(error),
             TransferEvent::Finished | TransferEvent::Cancelled => {
-                let destination = if row.direction == Direction::Upload { Side::Remote } else { Side::Local };
+                let direction = row.direction;
                 let finished = event == TransferEvent::Finished;
+                let (label, is_dir) = (row.label.clone(), row.is_dir);
                 let after = std::mem::replace(&mut row.after, After::Nothing);
-                self.actions.transfers.retain(|r| r.id != id);
+                self.actions.transfers.retain(|r| !(r.conn == conn && r.id == id));
+                let mut refresh = None;
                 match after {
                     After::Nothing => {}
                     After::Open { edit, app } if finished => {
@@ -171,22 +189,55 @@ impl SftpState {
                             self.actions.edits.uploaded(edit);
                         }
                     }
+                    After::Relay { to, temp, destination_dir, planned } if finished => {
+                        // The copy is here: send it on to the other host.
+                        let source = Planned { item: Item { name: planned.target.clone(), is_dir: planned.item.is_dir }, ..planned };
+                        let job = Job { direction: Direction::Upload, source_dir: temp.to_string_lossy().into_owned(), destination_dir, planned: source };
+                        match self.remote_mut(to) {
+                            Some(remote) => {
+                                let id = remote.connection.transfer(job);
+                                self.actions.transfers.push(TransferRow {
+                                    id,
+                                    conn: to,
+                                    label,
+                                    is_dir,
+                                    direction: Direction::Upload,
+                                    progress: Progress::default(),
+                                    failure: None,
+                                    after: After::Cleanup(temp),
+                                });
+                            }
+                            None => {
+                                let _ = std::fs::remove_dir_all(temp);
+                            }
+                        }
+                    }
+                    After::Relay { temp, .. } | After::Cleanup(temp) => {
+                        let _ = std::fs::remove_dir_all(temp);
+                        if finished {
+                            refresh = Some(conn);
+                        }
+                    }
                 }
-                if let Some(remote) = &mut self.remote {
+                if let Some(remote) = self.remote_mut(conn) {
                     remote.connection.finished(id);
                 }
-                if matches!(self.actions.dialog, Some(Dialog::TransferError(open)) if open == id)
+                if matches!(self.actions.dialog, Some(Dialog::TransferError(side, open)) if side == conn && open == id)
                     || (matches!(self.actions.dialog, Some(Dialog::Transfers)) && self.actions.transfers.is_empty())
                 {
                     self.actions.dialog = None;
                 }
-                self.reload(destination);
+                // Uploads land on their host; downloads on the disk panel.
+                let destination = refresh.unwrap_or(if direction == Direction::Upload { conn } else { conn.other() });
+                if direction == Direction::Upload || !self.is_host(destination) {
+                    self.reload(destination);
+                }
             }
         }
     }
 
-    pub fn on_remote_changed(&mut self, result: Result<(), String>) {
-        self.reload(Side::Remote);
+    pub fn on_remote_changed(&mut self, side: Side, result: Result<(), String>) {
+        self.reload(side);
         if let Err(error) = result {
             self.actions.dialog = Some(Dialog::Error(error));
         }
@@ -208,6 +259,30 @@ pub struct Actions {
     watching: bool,
     /// The changed-files list is expanded.
     edits_open: bool,
+    /// Which side each opened remote file came from.
+    edit_sides: std::collections::HashMap<EditId, Side>,
+}
+
+impl Actions {
+    /// A side's connection closed: its transfers and pending copies stop.
+    pub fn forget_side(&mut self, side: Side) {
+        self.transfers.retain(|r| {
+            let gone = r.conn == side || matches!(&r.after, After::Relay { to, .. } if *to == side);
+            if gone {
+                if let After::Relay { temp, .. } | After::Cleanup(temp) = &r.after {
+                    let _ = std::fs::remove_dir_all(temp);
+                }
+            }
+            !gone
+        });
+        self.resolving.retain(|c| c.conn != side && c.relay_to != Some(side));
+        self.menu = None;
+        self.dialog = None;
+    }
+
+    fn edits_of(&self, side: Side) -> Vec<EditId> {
+        self.edits.changed().iter().map(|f| f.id).filter(|id| self.edit_sides.get(id) == Some(&side)).collect()
+    }
 }
 
 impl Default for Actions {
@@ -222,13 +297,15 @@ impl Default for Actions {
             associations: Associations::load_default(),
             watching: false,
             edits_open: false,
+            edit_sides: Default::default(),
         }
     }
 }
 
 impl Shell {
-    fn connected_remote(&self) -> bool {
-        matches!(self.sftp.remote_state, RemoteState::Connected { .. })
+    /// Copies need both panels listing and at least one host (local, host or host-to-host).
+    fn can_copy_between(&self) -> bool {
+        self.sftp.is_ready(Side::Left) && self.sftp.is_ready(Side::Right) && (self.sftp.is_host(Side::Left) || self.sftp.is_host(Side::Right))
     }
 
     fn panel_dir(&self, side: Side) -> Option<String> {
@@ -238,7 +315,7 @@ impl Shell {
     fn menu_items(&self, side: Side, kind: MenuKind) -> Vec<(Action, &'static str, bool, bool)> {
         let Some(panel) = self.sftp.panel(side) else { return Vec::new() };
         let selected = panel.selected.len();
-        let can_copy = selected > 0 && self.connected_remote();
+        let can_copy = selected > 0 && self.can_copy_between();
         let hidden = if panel.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" };
         // (action, title, red, disabled) in the legacy order.
         let mut items = vec![
@@ -258,10 +335,10 @@ impl Shell {
             items.retain(|(action, ..)| !matches!(action, Action::Open | Action::OpenWith));
         }
         // Windows has no Unix permission bits, as in the legacy local panel.
-        if cfg!(windows) && side == Side::Local {
+        if cfg!(windows) && !self.sftp.is_host(side) {
             items.retain(|(action, ..)| *action != Action::EditPermissions);
         }
-        if side == Side::Remote {
+        if self.sftp.is_host(side) {
             items.push((Action::Close, "Close", true, false));
         }
         if kind == MenuKind::Context {
@@ -316,9 +393,11 @@ impl Shell {
             Action::NewFolder => self.open_dialog(Dialog::NewFolder { side, input: String::new() }, window),
             Action::ToggleHidden => {
                 // One setting for both panels, as in the legacy store.
-                self.sftp.local.show_hidden = !show_hidden;
-                if let Some(remote) = self.sftp.panel_mut(Side::Remote) {
-                    remote.show_hidden = !show_hidden;
+                for side in [Side::Left, Side::Right] {
+                    self.sftp.side_mut(side).local.show_hidden = !show_hidden;
+                    if let Some(panel) = self.sftp.panel_mut(side) {
+                        panel.show_hidden = !show_hidden;
+                    }
                 }
             }
             Action::EditPermissions => {
@@ -328,17 +407,17 @@ impl Shell {
                 }
             }
             Action::SelectAll => panel.select_all(),
-            Action::Close => self.request_disconnect(window),
+            Action::Close => self.request_disconnect(side, window),
         }
         cx.notify();
     }
 
-    /// Disconnects, first asking when saved copies were not uploaded yet.
-    pub fn request_disconnect(&mut self, window: &mut Window) {
-        if self.sftp.actions.edits.changed().is_empty() {
-            self.disconnect_sftp();
+    /// Disconnects a side, first asking when its saved copies were not uploaded yet.
+    pub fn request_disconnect(&mut self, side: Side, window: &mut Window) {
+        if self.sftp.actions.edits_of(side).is_empty() {
+            self.disconnect_sftp(side);
         } else {
-            self.open_dialog(Dialog::EditingInProgress, window);
+            self.open_dialog(Dialog::EditingInProgress(side), window);
         }
     }
 
@@ -346,24 +425,26 @@ impl Shell {
     pub fn open_entry(&mut self, side: Side, entry: &Entry, app: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.panel_dir(side) else { return };
         let app = app.or_else(|| self.sftp.actions.associations.app_for(&entry.name).map(PathBuf::from));
-        match side {
-            Side::Local => {
+        match self.sftp.is_host(side) {
+            false => {
                 if let Err(error) = open_path(Path::new(&join(&dir, &entry.name)), app.as_deref()) {
                     self.open_dialog(Dialog::Error(error), window);
                 }
             }
-            Side::Remote => {
+            true => {
                 let file = match self.sftp.actions.edits.prepare(&join(&dir, &entry.name)) {
                     Ok(file) => file.clone(),
                     Err(error) => return self.open_dialog(Dialog::Error(error), window),
                 };
-                let Some(remote) = &mut self.sftp.remote else { return };
+                self.sftp.actions.edit_sides.insert(file.id, side);
+                let Some(remote) = self.sftp.remote_mut(side) else { return };
                 let item = Item { name: entry.name.clone(), is_dir: false };
                 let planned = Planned { target: entry.name.clone(), item, replace: false };
                 let job = Job { direction: Direction::Download, source_dir: dir, destination_dir: file.local_dir(), planned };
                 let id = remote.connection.transfer(job);
                 self.sftp.actions.transfers.push(TransferRow {
                     id,
+                    conn: side,
                     label: entry.name.clone(),
                     is_dir: false,
                     direction: Direction::Download,
@@ -425,7 +506,9 @@ impl Shell {
 
     /// UPLOAD: sends a saved copy back over the remote file.
     fn upload_edit(&mut self, edit: EditId) {
-        let (Some(file), Some(remote)) = (self.sftp.actions.edits.get(edit).cloned(), &mut self.sftp.remote) else { return };
+        let side = self.sftp.actions.edit_sides.get(&edit).copied().unwrap_or(Side::Right);
+        let Some(file) = self.sftp.actions.edits.get(edit).cloned() else { return };
+        let Some(remote) = self.sftp.remote_mut(side) else { return };
         let Some(destination_dir) = parent(&file.remote_path) else { return };
         let name = file.name();
         let item = Item { name: name.clone(), is_dir: false };
@@ -438,6 +521,7 @@ impl Shell {
         let id = remote.connection.transfer(job);
         self.sftp.actions.transfers.push(TransferRow {
             id,
+            conn: side,
             label: name,
             is_dir: false,
             direction: Direction::Upload,
@@ -454,18 +538,18 @@ impl Shell {
 
     /// Runs file operations on a side, then refreshes it; failures open the Error dialog.
     fn operate(&mut self, side: Side, operations: Vec<Operation>, cx: &mut Context<Self>) {
-        match side {
-            Side::Remote => {
-                if let Some(remote) = &self.sftp.remote {
+        match self.sftp.is_host(side) {
+            true => {
+                if let Some(remote) = self.sftp.remote(side) {
                     remote.connection.operate(operations);
                 }
             }
-            Side::Local => {
+            false => {
                 let task = cx.background_spawn(async move { remote_fs::operate_locally(operations) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |shell, cx| {
-                        shell.sftp.reload(Side::Local);
+                        shell.sftp.reload(side);
                         if let Err(error) = result {
                             shell.sftp.actions.dialog = Some(Dialog::Error(error));
                         }
@@ -511,12 +595,14 @@ impl Shell {
                 let Some(dir) = self.panel_dir(side) else { return };
                 self.operate(side, vec![Operation::Chmod { path: join(&dir, &entry.name), mode }], cx);
             }
-            Dialog::EditingInProgress => {
-                self.sftp.actions.edits.discard_all();
-                self.disconnect_sftp();
+            Dialog::EditingInProgress(side) => {
+                for edit in self.sftp.actions.edits_of(side) {
+                    self.sftp.actions.edits.discard(edit);
+                }
+                self.disconnect_sftp(side);
             }
             // These dialogs have no default button: Enter leaves them open.
-            dialog @ (Dialog::Conflict | Dialog::TransferError(_)) => self.sftp.actions.dialog = Some(dialog),
+            dialog @ (Dialog::Conflict | Dialog::TransferError(..)) => self.sftp.actions.dialog = Some(dialog),
             Dialog::Transfers | Dialog::Error(_) => {}
         }
         cx.notify();
@@ -547,37 +633,45 @@ impl Shell {
         cx.notify();
     }
 
-    /// Copies entries of one panel into the folder open in the other.
+    /// Copies entries of one panel into the folder open in the other: up to
+    /// a host, down to the disk, or host to host through a temporary copy.
     pub fn start_copy(&mut self, side: Side, items: Vec<Entry>, window: &mut Window, cx: &mut Context<Self>) {
         let (Some(source_dir), Some(destination)) = (self.panel_dir(side), self.sftp.panel(other(side))) else { return };
-        if items.is_empty() || !self.connected_remote() {
+        if items.is_empty() || !self.can_copy_between() {
             return;
         }
         let items = items.into_iter().map(|e| Item { name: e.name, is_dir: e.is_dir }).collect();
-        let direction = if side == Side::Local { Direction::Upload } else { Direction::Download };
         let destination_dir = destination.path.clone();
-        self.queue_copy(items, direction, source_dir, destination_dir, window, cx);
+        let (conn, direction, relay_to) = match (self.sftp.is_host(side), self.sftp.is_host(other(side))) {
+            (false, _) => (other(side), Direction::Upload, None),
+            (true, false) => (side, Direction::Download, None),
+            (true, true) => (side, Direction::Download, Some(other(side))),
+        };
+        self.queue_copy(items, conn, direction, relay_to, source_dir, destination_dir, window, cx);
     }
 
     /// Queues a copy. Like the legacy panel, clashes are checked against the
     /// destination folder as it is now, not as it was last listed.
-    fn queue_copy(&mut self, items: Vec<Item>, direction: Direction, source_dir: String, destination_dir: String, window: &mut Window, cx: &mut Context<Self>) {
-        let mut copy = Resolving { resolver: None, items, waiting: None, direction, source_dir, destination_dir, question: None, apply_all: false };
-        match direction {
-            Direction::Download => match list_local(&copy.destination_dir) {
+    #[allow(clippy::too_many_arguments)]
+    fn queue_copy(&mut self, items: Vec<Item>, conn: Side, direction: Direction, relay_to: Option<Side>, source_dir: String, destination_dir: String, window: &mut Window, cx: &mut Context<Self>) {
+        let mut copy = Resolving { resolver: None, items, waiting: None, direction, conn, relay_to, source_dir, destination_dir, question: None, apply_all: false };
+        // The side the files land on: the host uploaded to, the relay's host, or the disk.
+        let destination = relay_to.unwrap_or(if direction == Direction::Upload { conn } else { conn.other() });
+        match self.sftp.is_host(destination) {
+            true => {
+                self.sftp.actions.next_request += 1;
+                let request = self.sftp.actions.next_request;
+                let Some(remote) = self.sftp.remote(destination) else { return };
+                remote.connection.names(request, &copy.destination_dir);
+                copy.waiting = Some(request);
+            }
+            false => match list_local(&copy.destination_dir) {
                 Ok(entries) => {
                     let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
                     copy.resolver = Some(Resolver::new(std::mem::take(&mut copy.items), &names));
                 }
                 Err(error) => return self.open_dialog(Dialog::Error(error), window),
             },
-            Direction::Upload => {
-                let Some(remote) = &self.sftp.remote else { return };
-                self.sftp.actions.next_request += 1;
-                let request = self.sftp.actions.next_request;
-                remote.connection.names(request, &copy.destination_dir);
-                copy.waiting = Some(request);
-            }
         }
         self.sftp.actions.resolving.push_back(copy);
         self.advance_copies(window, cx);
@@ -614,20 +708,37 @@ impl Shell {
                 }
                 Step::Done(planned) => {
                     let Some(copy) = self.sftp.actions.resolving.pop_front() else { return };
-                    let Some(remote) = &mut self.sftp.remote else { return };
                     for planned in planned {
                         let label = planned.target.clone();
                         let is_dir = planned.item.is_dir;
-                        let job = Job { direction: copy.direction, source_dir: copy.source_dir.clone(), destination_dir: copy.destination_dir.clone(), planned };
+                        // Host to host: download into a folder of its own first.
+                        let (destination_dir, after) = match copy.relay_to {
+                            Some(to) => match relay_dir() {
+                                Ok(temp) => (
+                                    temp.to_string_lossy().into_owned(),
+                                    After::Relay { to, temp, destination_dir: copy.destination_dir.clone(), planned: planned.clone() },
+                                ),
+                                Err(error) => {
+                                    self.open_dialog(Dialog::Error(error), window);
+                                    continue;
+                                }
+                            },
+                            None => (copy.destination_dir.clone(), After::Nothing),
+                        };
+                        // The temporary folder is empty: the first half never replaces anything.
+                        let planned = if copy.relay_to.is_some() { Planned { replace: false, ..planned } } else { planned };
+                        let job = Job { direction: copy.direction, source_dir: copy.source_dir.clone(), destination_dir, planned };
+                        let Some(remote) = self.sftp.remote_mut(copy.conn) else { continue };
                         let id = remote.connection.transfer(job);
                         self.sftp.actions.transfers.push(TransferRow {
                             id,
+                            conn: copy.conn,
                             label,
                             is_dir,
                             direction: copy.direction,
                             progress: Progress::default(),
                             failure: None,
-                            after: After::Nothing,
+                            after,
                         });
                     }
                 }
@@ -649,17 +760,25 @@ impl Shell {
         self.advance_copies(window, cx);
     }
 
-    fn control_transfer(&mut self, id: TransferId, control: Control) {
-        if let Some(remote) = &mut self.sftp.remote {
+    fn control_transfer(&mut self, conn: Side, id: TransferId, control: Control) {
+        if let Some(remote) = self.sftp.remote_mut(conn) {
             remote.connection.control(id, control);
         }
-        if let Some(row) = self.sftp.actions.transfers.iter_mut().find(|r| r.id == id) {
+        if let Some(row) = self.sftp.actions.transfers.iter_mut().find(|r| r.conn == conn && r.id == id) {
             row.failure = None;
         }
         if control == Control::Cancel {
-            self.sftp.actions.transfers.retain(|r| r.id != id);
+            self.sftp.actions.transfers.retain(|r| {
+                let gone = r.conn == conn && r.id == id;
+                if gone {
+                    if let After::Relay { temp, .. } | After::Cleanup(temp) = &r.after {
+                        let _ = std::fs::remove_dir_all(temp);
+                    }
+                }
+                !gone
+            });
         }
-        if matches!(self.sftp.actions.dialog, Some(Dialog::TransferError(open)) if open == id) {
+        if matches!(self.sftp.actions.dialog, Some(Dialog::TransferError(side, open)) if side == conn && open == id) {
             self.sftp.actions.dialog = None;
         }
     }
@@ -678,9 +797,12 @@ impl Shell {
         self.start_copy(dragged.side, items, window, cx);
     }
 
-    /// Files dragged in from Finder or Explorer onto the remote panel.
-    pub fn drop_paths(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(destination) = self.sftp.panel(Side::Remote) else { return };
+    /// Files dragged in from Finder or Explorer onto a host panel.
+    pub fn drop_paths(&mut self, side: Side, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sftp.is_host(side) {
+            return;
+        }
+        let Some(destination) = self.sftp.panel(side) else { return };
         let destination_dir = destination.path.clone();
         // One copy per source folder, since a copy reads from one folder.
         let mut groups: Vec<(String, Vec<Item>)> = Vec::new();
@@ -694,7 +816,7 @@ impl Shell {
             }
         }
         for (source_dir, items) in groups {
-            self.queue_copy(items, Direction::Upload, source_dir, destination_dir.clone(), window, cx);
+            self.queue_copy(items, side, Direction::Upload, None, source_dir, destination_dir.clone(), window, cx);
         }
     }
 
@@ -836,11 +958,11 @@ impl Shell {
             }
             Dialog::Permissions { side, entry, mode } => self.render_permissions(*side, entry, *mode, close, cx),
             Dialog::Conflict => self.render_conflict(close, cx),
-            Dialog::TransferError(id) => {
-                let id = *id;
-                let error = self.sftp.actions.transfers.iter().find(|r| r.id == id).and_then(|r| r.failure.clone()).unwrap_or_default();
+            Dialog::TransferError(conn, id) => {
+                let (conn, id) = (*conn, *id);
+                let error = self.sftp.actions.transfers.iter().find(|r| r.conn == conn && r.id == id).and_then(|r| r.failure.clone()).unwrap_or_default();
                 let send = |control: Control| cx.listener(move |shell: &mut Shell, _, _, cx| {
-                    shell.control_transfer(id, control);
+                    shell.control_transfer(conn, id, control);
                     cx.notify();
                 });
                 dialog::card("Error during transfer", true, close, dialog::text(&format!("{error} What do you want to do?")), vec![
@@ -857,9 +979,9 @@ impl Shell {
                 dialog::card("Transfers", false, close, div().child(body), vec![
                     dialog::button("transfers-discard", "Discard all", Kind::Error, false)
                         .on_click(cx.listener(|shell, _, _, cx| {
-                            let ids: Vec<_> = shell.sftp.actions.transfers.iter().map(|r| r.id).collect();
-                            for id in ids {
-                                shell.control_transfer(id, Control::Cancel);
+                            let ids: Vec<_> = shell.sftp.actions.transfers.iter().map(|r| (r.conn, r.id)).collect();
+                            for (conn, id) in ids {
+                                shell.control_transfer(conn, id, Control::Cancel);
                             }
                             shell.sftp.actions.dialog = None;
                             cx.notify();
@@ -870,10 +992,10 @@ impl Shell {
                 ])
             }
             Dialog::Error(error) => dialog::card("Error", false, close, dialog::text(error), Vec::new()),
-            Dialog::EditingInProgress => {
-                let count = self.sftp.actions.edits.changed().len();
+            Dialog::EditingInProgress(side) => {
+                let count = self.sftp.actions.edits_of(*side).len();
                 let files = if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
-                let host = self.sftp.remote.as_ref().map(|r| r.label.clone()).unwrap_or_default();
+                let host = self.sftp.remote(*side).map(|r| r.label.clone()).unwrap_or_default();
                 let text = format!(
                     "There {} currently {files} being edited on {host}. Do you want to discard {} and connect to a different server?",
                     if count == 1 { "is" } else { "are" },
@@ -963,10 +1085,10 @@ impl Shell {
 
     /// One transfer: icon, path and numbers, then the bar or the failure, Retry and Discard.
     fn render_transfer(&self, row: &TransferRow, in_dialog: bool, cx: &mut Context<Self>) -> Stateful<Div> {
-        let id = row.id;
+        let (id, conn) = (row.id, row.conn);
         let link = |key: &str, label: &str| {
             div()
-                .id(SharedString::from(format!("{key}-{id}-{in_dialog}")))
+                .id(SharedString::from(format!("{key}-{}-{id}-{in_dialog}", side_key(conn))))
                 .px_2()
                 .py_1()
                 .rounded_sm()
@@ -984,7 +1106,7 @@ impl Shell {
                 .gap_1()
                 .child(
                     div()
-                        .id(SharedString::from(format!("failed-{id}-{in_dialog}")))
+                        .id(SharedString::from(format!("failed-{}-{id}-{in_dialog}", side_key(conn))))
                         .flex()
                         .items_center()
                         .gap_1()
@@ -996,12 +1118,12 @@ impl Shell {
                             move |_, cx| cx.new(|_| DragPreview(error.clone())).into()
                         })
                         .on_click(cx.listener(move |shell, _, window, cx| {
-                            shell.open_dialog(Dialog::TransferError(id), window);
+                            shell.open_dialog(Dialog::TransferError(conn, id), window);
                             cx.notify();
                         })),
                 )
                 .child(link("retry", "Retry").on_click(cx.listener(move |shell, _, _, cx| {
-                    shell.control_transfer(id, Control::Retry);
+                    shell.control_transfer(conn, id, Control::Retry);
                     cx.notify();
                 }))),
             // Legacy bar: 30% of the row, between 80 and 300 px.
@@ -1014,7 +1136,7 @@ impl Shell {
             ),
         };
         div()
-            .id(SharedString::from(format!("transfer-{id}-{in_dialog}")))
+            .id(SharedString::from(format!("transfer-{}-{id}-{in_dialog}", side_key(conn))))
             .h(px(40.))
             .px(px(10.))
             .flex()
@@ -1037,7 +1159,7 @@ impl Shell {
             )
             .child(end)
             .child(link("discard", "Discard").on_click(cx.listener(move |shell, _, _, cx| {
-                shell.control_transfer(id, Control::Cancel);
+                shell.control_transfer(conn, id, Control::Cancel);
                 cx.notify();
             })))
     }
@@ -1162,7 +1284,7 @@ impl Shell {
 
 fn side_key(side: Side) -> &'static str {
     match side {
-        Side::Local => "local",
-        Side::Remote => "remote",
+        Side::Left => "local",
+        Side::Right => "remote",
     }
 }

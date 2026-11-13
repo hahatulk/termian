@@ -551,4 +551,27 @@ mod tests {
         assert!(dir.path().join("renamed").is_dir() && !dir.path().join("tree").exists());
         assert!(operate_locally(vec![Operation::Remove { path: join(root, "tree"), is_dir: true }]).is_err());
     }
+
+    /// Host to host as the SFTP tab does it: down from one server into a
+    /// temporary folder, then up to the other one.
+    #[test]
+    fn copies_between_two_hosts_through_a_temporary_folder() {
+        let (a, b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::write(a.path().join("report.txt"), b"from host a").unwrap();
+        std::fs::create_dir_all(a.path().join("site/css")).unwrap();
+        std::fs::write(a.path().join("site/css/main.css"), b"body{}").unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let (mut source, mut source_events) = connected(a.path(), state.path());
+        let (mut target, mut target_events) = connected(b.path(), state.path());
+        for (name, is_dir) in [("report.txt", false), ("site", true)] {
+            let temp = tempfile::tempdir().unwrap();
+            let temp_dir = temp.path().to_string_lossy().into_owned();
+            let id = source.transfer(job(Direction::Download, "/", &temp_dir, name, is_dir));
+            assert_eq!(finish(&mut source, &mut source_events, id, Control::Cancel).last(), Some(&TransferEvent::Finished));
+            let id = target.transfer(job(Direction::Upload, &temp_dir, "/", name, is_dir));
+            assert_eq!(finish(&mut target, &mut target_events, id, Control::Cancel).last(), Some(&TransferEvent::Finished));
+        }
+        assert_eq!(std::fs::read(b.path().join("report.txt")).unwrap(), b"from host a");
+        assert_eq!(std::fs::read(b.path().join("site/css/main.css")).unwrap(), b"body{}");
+    }
 }
