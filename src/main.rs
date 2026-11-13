@@ -50,6 +50,8 @@ pub struct Shell {
     snippet_menu: Option<ui::snippets::SnippetMenu>,
     shell_history: Option<ui::snippets::ShellHistoryPanel>,
     known_menu: Option<ui::known_hosts::KnownMenu>,
+    side_panel: Option<ui::side_panel::SidePanel>,
+    panel_focus: FocusHandle,
     /// «Save targets» under «Select targets»; on by default and remembered, as in legacy.
     snippet_save_targets: bool,
     launcher: ui::launcher::Launcher,
@@ -195,6 +197,8 @@ impl Shell {
             snippet_menu: None,
             shell_history: None,
             known_menu: None,
+            side_panel: None,
+            panel_focus: cx.focus_handle(),
             snippet_save_targets: true,
             launcher: Default::default(),
             logs_view: Default::default(),
@@ -404,7 +408,7 @@ impl Render for Shell {
             TabKind::Vaults => self.render_vaults(window, cx),
             TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
             TabKind::Session { .. } => match self.terminals.get(&self.tabs.active().id) {
-                Some(view) => view.clone().into_any_element(),
+                Some(view) => div().size_full().flex().child(div().flex_1().min_w_0().h_full().child(view.clone())).children(self.render_side_panel(window, cx)).into_any_element(),
                 None => div().into_any_element(),
             },
             TabKind::Launcher => self.render_launcher(window, cx),
@@ -439,7 +443,8 @@ impl Render for Shell {
                             })),
                     )
                     .child(div().flex_1())
-                    .children(toolbar),
+                    .children(toolbar)
+                    .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx))),
             )
             .child(div().flex_1().min_h_0().child(content))
             .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))

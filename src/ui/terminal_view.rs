@@ -513,6 +513,14 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
+    /// Pastes `text` into the session without running it (legacy «Paste»).
+    pub fn paste(&mut self, text: &str) {
+        if !self.closed {
+            self.terminal.scroll(i32::MIN / 2);
+            self.session.write(&paste_bytes(text, self.terminal.bracketed_paste()));
+        }
+    }
+
     /// Types `text` into the session as if pasted, followed by Enter.
     pub fn run(&mut self, text: &str) {
         if !self.closed {

@@ -162,6 +162,7 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &NextTab, window, cx| shell.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| shell.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|shell, _: &JumpTo, window, cx| shell.open_palette(String::new(), window, cx)))
+            .on_action(cx.listener(|shell, _: &ToggleSidepanel, window, cx| shell.toggle_side_panel(window, cx)))
             .on_action(cx.listener(|shell, _: &NewTab, window, cx| {
                 shell.tabs.open(TabKind::Launcher);
                 window.focus(&shell.launcher_focus);

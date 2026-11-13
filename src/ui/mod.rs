@@ -17,6 +17,7 @@ pub mod settings;
 pub mod settings_terminal;
 pub mod settings_shortcuts;
 pub mod shortcut_actions;
+pub mod side_panel;
 pub mod snippets;
 pub mod sftp;
 pub mod sftp_actions;
