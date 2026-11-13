@@ -17,6 +17,7 @@ pub mod self_cloud;
 pub mod sync;
 pub mod tabs;
 pub mod terminal;
+pub mod terminal_settings;
 pub mod theme;
 pub mod transfer;
 pub mod updater;

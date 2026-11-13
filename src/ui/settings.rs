@@ -48,15 +48,15 @@ impl Tab {
 
 const FOREGROUND: u32 = 0x1e2133;
 const BORDER: u32 = 0x151826;
-const CARD: u32 = 0x292c3f;
+pub(super) const CARD: u32 = 0x292c3f;
 const ERROR_TONE: u32 = 0xec706f;
-const MUTED: u32 = 0x9ea5b3;
+pub(super) const MUTED: u32 = 0x9ea5b3;
 
 pub struct SettingsWindow {
-    shell: Entity<Shell>,
+    pub(super) shell: Entity<Shell>,
     main: WindowHandle<Shell>,
     pub tab: Tab,
-    focus: FocusHandle,
+    pub(super) focus: FocusHandle,
     /// «Логи сессий»: the period waiting for confirmation (index in [`PERIODS`]).
     logs_period: Option<usize>,
     logs_busy: bool,
@@ -64,10 +64,35 @@ pub struct SettingsWindow {
     logs_result: Option<(bool, String)>,
     /// Logs → «Disabled» waits for «Disable Logs».
     disable_logs: bool,
-    /// SFTP: the extension whose app path is being typed, and the text.
-    editing: Option<(String, String)>,
+    /// The text field being typed into, and its text.
+    pub(super) editing: Option<(Field, String)>,
     sftp_error: Option<String>,
+    /// Terminal: the open drop-down list.
+    pub(super) menu: Option<Menu>,
+    /// Terminal: «Detect OS Script» is expanded.
+    pub(super) script_open: bool,
     _observe: Subscription,
+}
+
+/// A text field of the Settings window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum Field {
+    /// SFTP: the app path of an extension.
+    App(String),
+    FontSize,
+    KeepAlive,
+    Scrollback,
+    /// «Local Terminal Path»: a typed path to add.
+    Shell,
+    /// A font name typed into the font picker.
+    Font,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Menu {
+    Emulation,
+    Font,
+    Shell,
 }
 
 impl Shell {
@@ -109,6 +134,8 @@ impl Shell {
                     disable_logs: false,
                     editing: None,
                     sftp_error: None,
+                    menu: None,
+                    script_open: false,
                     _observe: observe,
                 }
             })
@@ -173,20 +200,20 @@ impl Shell {
     }
 }
 
-fn section_title(text: &str) -> Div {
+pub(super) fn section_title(text: &str) -> Div {
     div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(text.to_owned())
 }
 
-fn body_text(text: impl Into<SharedString>) -> Div {
+pub(super) fn body_text(text: impl Into<SharedString>) -> Div {
     div().mt(px(8.)).text_size(px(14.)).line_height(px(21.)).text_color(rgb(MUTED)).child(text.into())
 }
 
 /// `SettingsSection`: a rounded card, 700 px at most, 30 px apart.
-fn section(children: Vec<gpui::AnyElement>) -> Div {
+pub(super) fn section(children: Vec<gpui::AnyElement>) -> Div {
     div().w_full().max_w(px(700.)).mx_auto().mt(px(30.)).p(px(20.)).rounded(px(10.)).bg(rgb(CARD)).children(children)
 }
 
-fn action_button(id: impl Into<SharedString>, label: &str, primary: bool, disabled: bool) -> Stateful<Div> {
+pub(super) fn action_button(id: impl Into<SharedString>, label: &str, primary: bool, disabled: bool) -> Stateful<Div> {
     div()
         .id(id.into())
         .min_h(px(32.))
@@ -217,7 +244,7 @@ fn notice(ok: bool, text: String) -> Div {
         .child(text)
 }
 
-fn actions_row() -> Div {
+pub(super) fn actions_row() -> Div {
     div().mt(px(16.)).flex().flex_wrap().items_center().gap(px(10.))
 }
 
@@ -243,16 +270,22 @@ impl SettingsWindow {
         match edit(self.editing.as_mut().map(|(_, text)| text), keystroke, paste) {
             Key::Enter => self.commit_edit(cx),
             Key::Escape => self.editing = None,
-            Key::Edited => {}
+            Key::Edited => self.live_edit(cx),
             Key::Ignored => return,
         }
         cx.notify();
     }
 
-    fn commit_edit(&mut self, cx: &mut Context<Self>) {
-        let Some((ext, text)) = self.editing.take() else { return };
-        let result = self.shell.update(cx, |shell, _| shell.sftp.actions.associations.set(&ext, PathBuf::from(text.trim())));
-        self.sftp_error = result.err();
+    /// Ends typing into the field: saves what it holds.
+    pub(super) fn commit_edit(&mut self, cx: &mut Context<Self>) {
+        let Some((field, text)) = self.editing.take() else { return };
+        match field {
+            Field::App(ext) => {
+                let result = self.shell.update(cx, |shell, _| shell.sftp.actions.associations.set(&ext, PathBuf::from(text.trim())));
+                self.sftp_error = result.err();
+            }
+            other => self.commit_terminal_field(other, &text, cx),
+        }
     }
 
     fn clear_logs(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -416,7 +449,7 @@ impl SettingsWindow {
             .into_any_element()];
         }
         let rows = apps.into_iter().map(|(ext, app)| {
-            let editing = self.editing.as_ref().filter(|(e, _)| *e == ext).map(|(_, text)| text.clone());
+            let editing = self.editing.as_ref().filter(|(e, _)| *e == Field::App(ext.clone())).map(|(_, text)| text.clone());
             let path = app.to_string_lossy().into_owned();
             let field_ext = ext.clone();
             let pick_ext = ext.clone();
@@ -446,11 +479,11 @@ impl SettingsWindow {
                         .child(div().truncate().child(editing.clone().unwrap_or(path.clone())))
                         .when(editing.is_some(), |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))))
                         .on_click(cx.listener(move |settings, _, window, cx| {
-                            if settings.editing.as_ref().is_some_and(|(e, _)| *e == field_ext) {
+                            if settings.editing.as_ref().is_some_and(|(e, _)| *e == Field::App(field_ext.clone())) {
                                 return;
                             }
                             settings.commit_edit(cx);
-                            settings.editing = Some((field_ext.clone(), path.clone()));
+                            settings.editing = Some((Field::App(field_ext.clone()), path.clone()));
                             window.focus(&settings.focus);
                             cx.notify();
                         })),
@@ -481,7 +514,7 @@ impl SettingsWindow {
                         .hover(|s| s.bg(rgba(0xec706f22)))
                         .child("✕")
                         .on_click(cx.listener(move |settings, _, _, cx| {
-                            if settings.editing.as_ref().is_some_and(|(e, _)| *e == forget_ext) {
+                            if settings.editing.as_ref().is_some_and(|(e, _)| *e == Field::App(forget_ext.clone())) {
                                 settings.editing = None;
                             }
                             let result = settings.shell.update(cx, |shell, _| shell.sftp.actions.associations.forget(&forget_ext));
@@ -656,7 +689,8 @@ impl Render for SettingsWindow {
             Tab::Sftp => self.render_sftp(cx),
             Tab::Logs => self.render_logs(cx),
             Tab::Version => self.render_version(cx),
-            tab @ (Tab::Terminal | Tab::Shortcuts) => self.render_not_ported(tab),
+            Tab::Terminal => self.render_terminal(cx),
+            tab @ Tab::Shortcuts => self.render_not_ported(tab),
         };
         let tabs = Tab::ALL.into_iter().map(|tab| {
             let selected = tab == self.tab;
@@ -676,6 +710,7 @@ impl Render for SettingsWindow {
                 .child(tab.title())
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     settings.commit_edit(cx);
+                    settings.menu = None;
                     settings.tab = tab;
                     cx.notify();
                 }))

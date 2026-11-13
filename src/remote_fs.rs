@@ -302,6 +302,7 @@ mod tests {
             identity_files: vec![],
             password: None,
             key: None,
+            options: crate::session::SshOptions::default(),
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
@@ -356,6 +357,7 @@ mod tests {
             identity_files: vec![],
             password: None,
             key: None,
+            options: crate::session::SshOptions::default(),
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
@@ -385,6 +387,7 @@ mod tests {
             identity_files: vec![],
             password: None,
             key: None,
+            options: crate::session::SshOptions::default(),
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();

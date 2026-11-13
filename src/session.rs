@@ -84,9 +84,24 @@ pub fn replay(data: Vec<u8>) -> Session {
 
 // ------------------------------------------------------------------ local --
 
-/// Starts the user's login shell.
-pub fn local_shell(columns: u16, rows: u16) -> Result<Session, String> {
-    local_command(portable_pty::CommandBuilder::new_default_prog(), columns, rows)
+/// Starts the user's login shell, or `shell` («Local Terminal Path»), with
+/// `term` as `TERM`.
+pub fn local_shell(shell: Option<&str>, term: &str, columns: u16, rows: u16) -> Result<Session, String> {
+    let mut command = match shell.filter(|s| !s.trim().is_empty()) {
+        Some(shell) => {
+            let mut command = portable_pty::CommandBuilder::new(shell.trim());
+            if !cfg!(windows) {
+                command.arg("-l"); // a login shell, as the default program is
+            }
+            if let Some(home) = dirs::home_dir() {
+                command.cwd(home);
+            }
+            command
+        }
+        None => portable_pty::CommandBuilder::new_default_prog(),
+    };
+    command.env("TERM", term);
+    local_command(command, columns, rows)
 }
 
 pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: u16) -> Result<Session, String> {
@@ -94,7 +109,9 @@ pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: 
     let size = |cols: u16, rows: u16| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size(columns, rows)).map_err(|e| e.to_string())?;
     let mut command = command;
-    command.env("TERM", "xterm-256color");
+    if command.get_env("TERM").is_none() {
+        command.env("TERM", "xterm-256color");
+    }
     let mut child = pair.slave.spawn_command(command).map_err(|e| e.to_string())?;
     drop(pair.slave);
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
@@ -155,6 +172,47 @@ pub struct SshTarget {
     pub password: Option<String>,
     /// Private key from the Keychain (and its passphrase), offered first.
     pub key: Option<(String, Option<String>)>,
+    pub options: SshOptions,
+}
+
+/// Settings → Terminal values a connection uses.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SshOptions {
+    /// «Terminal emulation type», sent with the PTY request.
+    pub term: String,
+    /// «Keepalive Interval» in seconds; 0 sends none, as in legacy.
+    pub keepalive: u32,
+    /// «Post-Quantum Key Exchange»: offer `mlkem768x25519-sha256` first.
+    pub pqc_kex: bool,
+}
+
+impl Default for SshOptions {
+    fn default() -> Self {
+        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true }
+    }
+}
+
+impl SshOptions {
+    pub fn from_vault(vault: &crate::vault::Vault) -> Self {
+        let terminal = &vault.terminal;
+        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex }
+    }
+
+    /// Key exchanges to offer: russh's order, without the hybrid
+    /// post-quantum one when it is turned off.
+    pub fn kex(&self) -> Vec<russh::kex::Name> {
+        russh::Preferred::default().kex.iter().copied().filter(|name| self.pqc_kex || *name != russh::kex::MLKEM768X25519_SHA256).collect()
+    }
+
+    fn config(&self) -> client::Config {
+        let keepalive = (self.keepalive > 0).then(|| Duration::from_secs(self.keepalive as u64));
+        client::Config {
+            keepalive_interval: keepalive,
+            keepalive_max: 3,
+            preferred: russh::Preferred { kex: self.kex().into(), ..russh::Preferred::default() },
+            ..Default::default()
+        }
+    }
 }
 
 impl SshTarget {
@@ -173,6 +231,7 @@ impl SshTarget {
             identity_files: ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|f| home.join(".ssh").join(f)).collect(),
             password: None,
             key: None,
+            options: SshOptions::default(),
         }
     }
 }
@@ -395,7 +454,7 @@ async fn run_ssh(
     let handle = connect(&target, prompter.clone()).await?;
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
     let (cols, rows) = *latest_size.lock().unwrap();
-    channel.request_pty(true, "xterm-256color", cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
+    channel.request_pty(true, &target.options.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
     channel.request_shell(true).await.map_err(|e| e.to_string())?;
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
     pump(channel, shell_input, events).await
@@ -421,7 +480,7 @@ pub(crate) async fn connect_forwarding(target: &SshTarget, io: SharedPrompter, f
     let _ = stream.set_nodelay(true);
     io.lock().await.log("TCP connection established".into());
 
-    let config = client::Config { keepalive_interval: Some(Duration::from_secs(30)), keepalive_max: 3, ..Default::default() };
+    let config = target.options.config();
     let verifier =
         Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to };
     let mut handle = client::connect_stream(Arc::new(config), stream, verifier).await.map_err(|error| match error {
@@ -959,7 +1018,25 @@ pub(crate) mod tests {
             identity_files: vec![],
             password: None,
             key: None,
+            options: SshOptions::default(),
         }
+    }
+
+    #[test]
+    fn terminal_settings_reach_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.password = Some(server::PASSWORD.into());
+        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false };
+        assert!(!target.options.kex().contains(&russh::kex::MLKEM768X25519_SHA256));
+        assert!(SshOptions::default().kex().contains(&russh::kex::MLKEM768X25519_SHA256));
+        assert_eq!(target.options.config().keepalive_interval, Some(Duration::from_secs(5)));
+        assert_eq!(SshOptions::default().config().keepalive_interval, None, "0 sends no keepalives");
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "welcome");
+        assert!(output.contains("pty xterm-16color 80x24"), "without the post-quantum exchange too: {output:?}");
     }
 
     #[test]

@@ -12,17 +12,52 @@ use alacritty_terminal::term::{viewport_to_point, Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use alacritty_terminal::Term;
 
-/// ANSI palette of the legacy "Termius Dark" theme; background and
-/// foreground are sampled from the legacy terminal screenshots.
-pub const PALETTE: [u32; 16] = [
-    0x343851, 0xf24e50, 0x008463, 0xeca855, 0x08639f, 0xc13282, 0x2091f6, 0xe2e3e8, //
-    0x8d91a5, 0xff7375, 0x3ed7be, 0xfdc47d, 0x6ba0c3, 0xff7dc5, 0x44a7ff, 0xffffff,
-];
-pub const BACKGROUND: u32 = 0x0d1b2e;
-pub const FOREGROUND: u32 = 0xe2e3e8;
-pub const CURSOR: u32 = 0x21b568;
-/// Selection highlight (accent at half strength over the background).
-pub const SELECTION: u32 = 0x175a4a;
+use crate::terminal_settings::{self, TerminalSettings};
+
+/// Colours and colour rules of a terminal, from Settings → Terminal: the
+/// theme as legacy hands it to xterm (`Ale`), bright bold and highlighting.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Look {
+    pub palette: [u32; 16],
+    pub background: u32,
+    pub foreground: u32,
+    pub cursor: u32,
+    /// The theme's selection colour laid over the background at its alpha.
+    pub selection: u32,
+    pub brighten_bold: bool,
+    /// Keyword highlighting colours, when it is on.
+    pub highlights: Option<[u32; 6]>,
+}
+
+impl Look {
+    pub fn new(settings: &TerminalSettings) -> Self {
+        let theme = settings.theme();
+        Self {
+            palette: theme.palette,
+            background: theme.background,
+            foreground: theme.foreground,
+            cursor: theme.cursor,
+            selection: blend(theme.selection, theme.background, theme.selection_alpha),
+            brighten_bold: settings.brighten_bold,
+            highlights: settings.keyword_highlighting.then(|| terminal_settings::highlight_colors(&theme.name)),
+        }
+    }
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Self::new(&TerminalSettings::default())
+    }
+}
+
+/// `color` at `alpha` over `under`.
+fn blend(color: u32, under: u32, alpha: u8) -> u32 {
+    let mix = |shift: u32| {
+        let (c, u) = ((color >> shift) & 0xff, (under >> shift) & 0xff);
+        ((c * alpha as u32 + u * (255 - alpha as u32)) / 255) << shift
+    };
+    mix(16) | mix(8) | mix(0)
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
@@ -72,6 +107,7 @@ struct Listener(Arc<Mutex<Outbox>>);
 struct Outbox {
     replies: Vec<u8>,
     title: Option<String>,
+    bell: bool,
 }
 
 impl EventListener for Listener {
@@ -80,6 +116,7 @@ impl EventListener for Listener {
         match event {
             Event::PtyWrite(text) => outbox.replies.extend(text.into_bytes()),
             Event::Title(title) => outbox.title = Some(title),
+            Event::Bell => outbox.bell = true,
             _ => {}
         }
     }
@@ -89,14 +126,34 @@ pub struct Terminal {
     term: Term<Listener>,
     parser: Processor,
     listener: Listener,
+    look: Look,
 }
 
 impl Terminal {
     pub fn new(columns: usize, lines: usize) -> Self {
+        Self::with_settings(columns, lines, &TerminalSettings::default())
+    }
+
+    pub fn with_settings(columns: usize, lines: usize, settings: &TerminalSettings) -> Self {
         let listener = Listener::default();
-        let config = Config { scrolling_history: 10_000, ..Config::default() };
+        let config = Config { scrolling_history: settings.scrollback_lines(), ..Config::default() };
         let size = Size { columns: columns.max(2), lines: lines.max(1) };
-        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener }
+        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings) }
+    }
+
+    /// New Settings → Terminal values for an open terminal.
+    pub fn apply(&mut self, settings: &TerminalSettings) {
+        self.look = Look::new(settings);
+        self.term.set_options(Config { scrolling_history: settings.scrollback_lines(), ..Config::default() });
+    }
+
+    pub fn look(&self) -> &Look {
+        &self.look
+    }
+
+    /// Whether the program rang the bell since the last call.
+    pub fn take_bell(&mut self) -> bool {
+        std::mem::take(&mut self.listener.0.lock().unwrap().bell)
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -167,7 +224,9 @@ impl Terminal {
         let selection = content.selection;
         let offset = content.display_offset as i32;
         let (columns, rows) = self.size();
-        let mut lines: Vec<Vec<Run>> = vec![Vec::new(); rows];
+        let look = &self.look;
+        // Cells first, so highlighting can recolour by character position.
+        let mut cells: Vec<Vec<(char, u32, u32, bool)>> = vec![Vec::new(); rows];
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + offset;
             if row < 0 || row as usize >= rows || indexed.point.column.0 >= columns {
@@ -177,19 +236,34 @@ impl Terminal {
             if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
                 continue;
             }
-            let (mut fg, mut bg) = (color(cell.fg, FOREGROUND), color(cell.bg, BACKGROUND));
+            let bold = cell.flags.contains(Flags::BOLD);
+            let fg_color = if bold && look.brighten_bold { brighter(cell.fg) } else { cell.fg };
+            let (mut fg, mut bg) = (color(fg_color, look, look.foreground), color(cell.bg, look, look.background));
             if cell.flags.contains(Flags::INVERSE) {
                 std::mem::swap(&mut fg, &mut bg);
             }
             if selection.is_some_and(|range| range.contains(indexed.point)) {
-                bg = SELECTION;
+                bg = look.selection;
             }
-            let bold = cell.flags.contains(Flags::BOLD);
             let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
-            let line = &mut lines[row as usize];
-            match line.last_mut() {
-                Some(run) if run.fg == fg && run.bg == bg && run.bold == bold => run.text.push(ch),
-                _ => line.push(Run { text: ch.to_string(), fg, bg, bold }),
+            cells[row as usize].push((ch, fg, bg, bold));
+        }
+        let mut lines: Vec<Vec<Run>> = vec![Vec::new(); rows];
+        for (row, mut cells) in cells.into_iter().enumerate() {
+            if let Some(colors) = &look.highlights {
+                let text: String = cells.iter().map(|c| c.0).collect();
+                for (start, end, color) in terminal_settings::highlights(&text, colors) {
+                    for cell in cells.iter_mut().take(end).skip(start) {
+                        cell.1 = color;
+                    }
+                }
+            }
+            let line = &mut lines[row];
+            for (ch, fg, bg, bold) in cells {
+                match line.last_mut() {
+                    Some(run) if run.fg == fg && run.bg == bg && run.bold == bold => run.text.push(ch),
+                    _ => line.push(Run { text: ch.to_string(), fg, bg, bold }),
+                }
             }
         }
         let point = content.cursor.point;
@@ -199,23 +273,34 @@ impl Terminal {
     }
 }
 
-fn color(color: Color, default: u32) -> u32 {
+/// Bold text in one of the eight basic colours takes its bright variant
+/// («Use bright colours for bold text»).
+fn brighter(color: Color) -> Color {
+    match color {
+        Color::Indexed(index @ 0..=7) => Color::Indexed(index + 8),
+        Color::Named(named) if (named as usize) < 8 => Color::Indexed(named as u8 + 8),
+        Color::Named(NamedColor::Foreground) => Color::Indexed(15),
+        other => other,
+    }
+}
+
+fn color(color: Color, look: &Look, default: u32) -> u32 {
     match color {
         Color::Spec(rgb) => (rgb.r as u32) << 16 | (rgb.g as u32) << 8 | rgb.b as u32,
-        Color::Indexed(index) => indexed_color(index),
+        Color::Indexed(index) => indexed_color(index, &look.palette),
         Color::Named(named) => match named as usize {
-            index @ 0..=15 => PALETTE[index],
-            _ if named == NamedColor::Background => BACKGROUND,
-            _ if named == NamedColor::Foreground => FOREGROUND,
+            index @ 0..=15 => look.palette[index],
+            _ if named == NamedColor::Background => look.background,
+            _ if named == NamedColor::Foreground => look.foreground,
             _ => default,
         },
     }
 }
 
 /// xterm 256-colour palette.
-fn indexed_color(index: u8) -> u32 {
+fn indexed_color(index: u8, palette: &[u32; 16]) -> u32 {
     match index {
-        0..=15 => PALETTE[index as usize],
+        0..=15 => palette[index as usize],
         16..=231 => {
             let i = index - 16;
             let level = |v: u8| if v == 0 { 0 } else { 55 + 40 * v as u32 };
@@ -324,9 +409,32 @@ mod tests {
         let mut t = Terminal::new(10, 1);
         t.feed(b"a\x1b[31mb\x1b[1;32mc\x1b[0m");
         let runs = &t.snapshot().lines[0];
-        assert_eq!((runs[0].text.as_str(), runs[0].fg), ("a", FOREGROUND));
-        assert_eq!((runs[1].text.as_str(), runs[1].fg), ("b", PALETTE[1]));
-        assert_eq!((runs[2].text.as_str(), runs[2].fg, runs[2].bold), ("c", PALETTE[2], true));
+        let look = Look::default();
+        assert_eq!((runs[0].text.as_str(), runs[0].fg), ("a", look.foreground));
+        assert_eq!((runs[1].text.as_str(), runs[1].fg), ("b", look.palette[1]));
+        assert_eq!((runs[2].text.as_str(), runs[2].fg, runs[2].bold), ("c", look.palette[2], true));
+    }
+
+    #[test]
+    fn settings_change_theme_bold_highlighting_and_bell() {
+        let mut settings = TerminalSettings { color_scheme: "termius light".into(), brighten_bold: true, ..TerminalSettings::default() };
+        let mut t = Terminal::with_settings(30, 1, &settings);
+        t.feed(b"\x1b[1;31mx\x1b[0m [error] 10.0.0.1\x07");
+        let light = terminal_settings::theme("termius light");
+        let runs = t.snapshot().lines[0].clone();
+        assert_eq!((runs[0].text.as_str(), runs[0].fg), ("x", light.palette[9]), "bold red is bright red");
+        let colors = terminal_settings::highlight_colors("termius light");
+        assert!(runs.iter().any(|r| r.text == "[error]" && r.fg == colors[0]), "{runs:?}");
+        assert!(runs.iter().any(|r| r.text == "10.0.0.1" && r.fg == colors[5]), "{runs:?}");
+        assert!(t.take_bell() && !t.take_bell());
+        settings.keyword_highlighting = false;
+        settings.brighten_bold = false;
+        t.apply(&settings);
+        let runs = t.snapshot().lines[0].clone();
+        assert_eq!(runs[0].fg, light.palette[1]);
+        assert!(runs.iter().all(|r| r.fg != colors[0]));
+        assert_eq!(t.look().background, light.background);
+        assert_eq!(blend(0xffffff, 0x000000, 0x80), 0x808080);
     }
 
     #[test]
@@ -381,9 +489,10 @@ mod tests {
         t.extend_selection(1, 5);
         assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
         let runs = &t.snapshot().lines[0];
-        let highlighted = runs.iter().find(|r| r.bg == SELECTION).unwrap();
+        let selection = Look::default().selection;
+        let highlighted = runs.iter().find(|r| r.bg == selection).unwrap();
         assert!(highlighted.text.starts_with("world"), "{highlighted:?}");
-        assert!(runs[0].text.starts_with("hello") && runs[0].bg != SELECTION);
+        assert!(runs[0].text.starts_with("hello") && runs[0].bg != selection);
         t.clear_selection();
         assert_eq!(t.selection_text(), None);
     }

@@ -278,7 +278,8 @@ impl Shell {
         self.connect_sftp_target(label, os, target, window, cx);
     }
 
-    fn connect_sftp_target(&mut self, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn connect_sftp_target(&mut self, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        target.options = termian_native::session::SshOptions::from_vault(&self.vault);
         let mut connection = RemoteFs::connect(target.clone());
         self.sftp.generation += 1;
         let generation = self.sftp.generation;

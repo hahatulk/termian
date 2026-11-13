@@ -67,6 +67,8 @@ pub struct Shell {
     cloud: ui::cloud::CloudState,
     update: ui::update::UpdateState,
     main_window: Option<gpui::WindowHandle<Shell>>,
+    /// Bundled terminal fonts already given to the text system.
+    loaded_fonts: std::collections::HashSet<&'static str>,
     settings_window: Option<gpui::WindowHandle<ui::settings::SettingsWindow>>,
     cloud_focus: FocusHandle,
 }
@@ -139,6 +141,7 @@ impl Shell {
             cloud: Default::default(),
             update: Default::default(),
             main_window: None,
+            loaded_fonts: Default::default(),
             settings_window: None,
             cloud_focus: cx.focus_handle(),
         }
@@ -243,7 +246,8 @@ impl Shell {
 
     pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
         let (history, log) = self.record_session(None, &title, "local".into());
-        let view = cx.new(|cx| TerminalView::new(session, window, cx).with_log(log));
+        let settings = self.vault.terminal.clone();
+        let view = cx.new(|cx| TerminalView::new(session, &settings, window, cx).with_log(log));
         self.add_terminal(title, view, Some(history), cx);
     }
 
@@ -252,11 +256,13 @@ impl Shell {
         self.open_ssh_for(None, label, os, target, window, cx);
     }
 
-    fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        target.options = session::SshOptions::from_vault(&self.vault);
         let subtitle = std::iter::once("ssh").chain(target.username.as_deref()).collect::<Vec<_>>().join(", ");
         let (history, log) = self.record_session(host, &label, subtitle);
         let connection = Connection { label: label.clone(), os, target };
-        let view = cx.new(|cx| TerminalView::ssh(connection, window, cx).with_log(log));
+        let settings = self.vault.terminal.clone();
+        let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log));
         self.add_terminal(label, view, Some(history), cx);
     }
 
@@ -278,7 +284,8 @@ impl Shell {
             None => (Vec::new(), Some(session_log::UNREADABLE_LOG.to_owned())),
         };
         let title = entry.label.clone();
-        let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), window, cx));
+        let settings = self.vault.terminal.clone();
+        let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
         self.add_terminal(title, view, None, cx);
     }
 
@@ -296,7 +303,8 @@ impl Shell {
     }
 
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match session::local_shell(80, 24) {
+        let terminal = &self.vault.terminal;
+        match session::local_shell(terminal.local_shell.as_deref(), terminal.emulation(), 80, 24) {
             Ok(session) => self.open_terminal("Local".into(), session, window, cx),
             Err(error) => self.vault_error = Some(format!("Could not start a local shell: {error}")),
         }
@@ -383,6 +391,7 @@ fn main() {
                 shell.update(cx, |shell, cx| {
                     shell.start_cloud(cx);
                     shell.start_updates(cx);
+                    shell.load_terminal_font(cx);
                 });
                 let focus = shell.read(cx).root_focus.clone();
                 window.focus(&focus);

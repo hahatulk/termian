@@ -6780,6 +6780,7 @@ dependencies = [
  "libc",
  "minisign-verify",
  "portable-pty",
+ "regex",
  "rusqlite",
  "russh",
  "russh-sftp",
@@ -6794,6 +6795,7 @@ dependencies = [
  "ureq",
  "url",
  "uuid",
+ "zed-font-kit",
 ]
 
 [[package]]

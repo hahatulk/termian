@@ -7,7 +7,8 @@ use gpui::{
 };
 use termian_native::login::{Answer, LoginEvent, LoginState, Stage};
 use termian_native::session::{self, Session, SessionEvent, SshTarget};
-use termian_native::terminal::{self, key_bytes, paste_bytes, Modifiers, Terminal};
+use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
+use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::login_view::{self, LoginActions, LoginTarget};
 
@@ -28,10 +29,9 @@ pub enum TerminalEvent {
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
 
-const FONT_FAMILY: &str = "Menlo";
-const FONT_SIZE: f32 = 13.;
-const LINE_HEIGHT: f32 = 18.;
 const PADDING: f32 = 10.;
+/// Line height per pixel of font size (18 px at the old fixed 13 px).
+const LINE_SPACING: f32 = 1.38;
 
 pub struct TerminalView {
     terminal: Terminal,
@@ -50,25 +50,35 @@ pub struct TerminalView {
     log: Option<termian_native::session_log::SessionLog>,
     /// Set when the session closes; reported as [`TerminalEvent::Ended`].
     ended: bool,
+    /// Settings → Terminal, as of the last change.
+    settings: TerminalSettings,
+    last_bell: Option<std::time::Instant>,
+    /// Font family the faces below were worked out for, and the faces.
+    faces: Option<(String, Faces)>,
 }
 
+type Faces = ((SharedString, f32), (SharedString, f32));
+
+/// Used when a bundled font's files cannot be found.
+const FALLBACK_FONT: &str = "Menlo";
+
 impl TerminalView {
-    pub fn new(session: Session, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::build(session, None, window, cx)
+    pub fn new(session: Session, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::build(session, None, settings, window, cx)
     }
 
-    pub fn ssh(connection: Connection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn ssh(connection: Connection, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let session = session::ssh(connection.target.clone(), 80, 24);
-        Self::build(session, Some(connection), window, cx)
+        Self::build(session, Some(connection), settings, window, cx)
     }
 
-    fn build(mut session: Session, connection: Option<Connection>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn build(mut session: Session, connection: Option<Connection>, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         let login_focus = cx.focus_handle();
         window.focus(if connection.is_some() { &login_focus } else { &focus });
         Self::listen(&mut session, 0, window, cx);
         Self {
-            terminal: Terminal::new(80, 24),
+            terminal: Terminal::with_settings(80, 24, settings),
             session,
             focus,
             closed: false,
@@ -80,7 +90,58 @@ impl TerminalView {
             generation: 0,
             log: None,
             ended: false,
+            settings: settings.clone(),
+            last_bell: None,
+            faces: None,
         }
+    }
+
+    /// New Settings → Terminal values: colours, font and scrollback change in place.
+    pub fn apply_settings(&mut self, settings: &TerminalSettings, cx: &mut Context<Self>) {
+        if settings.font_family != self.settings.font_family || settings.font_size != self.settings.font_size {
+            self.cell_width = None;
+        }
+        self.terminal.apply(settings);
+        self.settings = settings.clone();
+        cx.notify();
+    }
+
+    fn font_size(&self) -> f32 {
+        self.settings.font_size as f32
+    }
+
+    fn line_height(&self) -> f32 {
+        (self.font_size() * LINE_SPACING).round()
+    }
+
+    /// Family and weight of regular and bold text.
+    fn faces(&mut self) -> Faces {
+        let family = &self.settings.font_family;
+        if let Some((cached, faces)) = &self.faces {
+            if cached == family {
+                return faces.clone();
+            }
+        }
+        let face = font_face(family);
+        let faces = if face.files.is_empty() {
+            let family = SharedString::from(family.clone());
+            ((family.clone(), 400.), (family, 700.))
+        } else if !termian_native::terminal_settings::font_available(&face) {
+            ((FALLBACK_FONT.into(), 400.), (FALLBACK_FONT.into(), 700.))
+        } else {
+            ((face.regular.0.into(), face.regular.1 as f32), (face.bold.0.into(), face.bold.1 as f32))
+        };
+        self.faces = Some((family.clone(), faces.clone()));
+        faces
+    }
+
+    /// «Bell sound»: the legacy bell, at most a few times a second.
+    fn ring(&mut self) {
+        if !self.settings.bell_sound || self.last_bell.is_some_and(|at| at.elapsed() < std::time::Duration::from_millis(150)) {
+            return;
+        }
+        self.last_bell = Some(std::time::Instant::now());
+        play_bell();
     }
 
     /// Records everything the session prints to an encrypted session log.
@@ -90,8 +151,8 @@ impl TerminalView {
     }
 
     /// A recorded session, read-only.
-    pub fn replay(data: Vec<u8>, note: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut view = Self::build(session::replay(data), None, window, cx);
+    pub fn replay(data: Vec<u8>, note: Option<&str>, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::build(session::replay(data), None, settings, window, cx);
         view.closed = true;
         if let Some(note) = note {
             view.terminal.feed(format!("\r\n\x1b[31m{note}\x1b[0m\r\n").as_bytes());
@@ -148,6 +209,9 @@ impl TerminalView {
                     log.append(&bytes);
                 }
                 self.terminal.feed(&bytes);
+                if self.terminal.take_bell() {
+                    self.ring();
+                }
                 let replies = self.terminal.take_replies();
                 if !replies.is_empty() {
                     self.session.write(&replies);
@@ -180,7 +244,10 @@ impl TerminalView {
             }
             return; // other Cmd shortcuts belong to the app
         }
-        let mods = Modifiers { control: mods.control, alt: mods.alt, shift: mods.shift };
+        // Without «Use Option as Meta key» Option types the character macOS composes.
+        let arrow = matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right");
+        let alt = mods.alt && (self.settings.option_is_meta || arrow || !cfg!(target_os = "macos"));
+        let mods = Modifiers { control: mods.control, alt, shift: mods.shift };
         if let Some(bytes) = key_bytes(&keystroke.key, keystroke.key_char.as_deref(), mods, self.terminal.app_cursor()) {
             self.terminal.scroll(i32::MIN / 2); // typing jumps back to the prompt
             self.terminal.clear_selection();
@@ -194,7 +261,7 @@ impl TerminalView {
     fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
         let x = (f32::from(position.x) - PADDING).max(0.);
         let y = (f32::from(position.y) - TOP_INSET - PADDING).max(0.);
-        ((y / LINE_HEIGHT) as usize, (x / self.cell_width.unwrap_or(8.)).round() as usize)
+        ((y / self.line_height()) as usize, (x / self.cell_width.unwrap_or(8.)).round() as usize)
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -218,10 +285,25 @@ impl TerminalView {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.selecting = false;
-        if self.terminal.selection_text().is_none() {
-            self.terminal.clear_selection();
+        match self.terminal.selection_text() {
+            None => self.terminal.clear_selection(),
+            // «Select text to copy & Right click to paste».
+            Some(text) if self.settings.copy_on_select => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            Some(_) => {}
         }
         cx.notify();
+    }
+
+    fn on_right_click(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        window.focus(&self.focus);
+        if self.closed || !self.settings.copy_on_select {
+            return;
+        }
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.terminal.scroll(i32::MIN / 2);
+            self.session.write(&paste_bytes(&text, self.terminal.bracketed_paste()));
+        }
+        cx.stop_propagation();
     }
 
     /// Types `text` into the session as if pasted, followed by Enter.
@@ -276,7 +358,7 @@ impl TerminalView {
         self.generation += 1;
         self.session = session::ssh(connection.target, 80, 24);
         Self::listen(&mut self.session, self.generation, window, cx);
-        self.terminal = Terminal::new(80, 24);
+        self.terminal = Terminal::with_settings(80, 24, &self.settings);
         self.closed = false;
         let show_logs = self.login.as_ref().is_some_and(|l| l.show_logs);
         self.login = Some(LoginState { show_logs, ..LoginState::default() });
@@ -294,7 +376,7 @@ impl TerminalView {
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
         let lines = match event.delta {
             ScrollDelta::Lines(delta) => delta.y,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / LINE_HEIGHT,
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / self.line_height(),
         };
         self.terminal.scroll(lines.round() as i32);
         cx.notify();
@@ -302,13 +384,15 @@ impl TerminalView {
 
     /// Fits the grid to the space under the tab bar.
     fn fit(&mut self, area_width: Pixels, area_height: Pixels, window: &Window) {
+        let ((family, weight), _) = self.faces();
+        let size = self.font_size();
         let cell_width = *self.cell_width.get_or_insert_with(|| {
             let text = window.text_system();
-            let id = text.resolve_font(&font(FONT_FAMILY));
-            text.advance(id, px(FONT_SIZE), 'm').map(|size| f32::from(size.width)).unwrap_or(8.)
+            let id = text.resolve_font(&gpui::Font { weight: gpui::FontWeight(weight), ..font(family) });
+            text.advance(id, px(size), 'm').map(|size| f32::from(size.width)).unwrap_or(8.)
         });
         let columns = ((f32::from(area_width) - 2. * PADDING) / cell_width).floor().max(2.) as usize;
-        let rows = ((f32::from(area_height) - 2. * PADDING) / LINE_HEIGHT).floor().max(1.) as usize;
+        let rows = ((f32::from(area_height) - 2. * PADDING) / self.line_height()).floor().max(1.) as usize;
         if self.terminal.size() != (columns, rows) {
             self.terminal.resize(columns, rows);
             self.session.resize(columns as u16, rows as u16);
@@ -348,15 +432,18 @@ impl Render for TerminalView {
         let snapshot = self.terminal.snapshot();
         let focused = self.focus.is_focused(window);
         let cell_width = self.cell_width.unwrap_or(8.);
+        let line_height = self.line_height();
+        let ((family, weight), (bold_family, bold_weight)) = self.faces();
+        let look = self.terminal.look().clone();
 
         let lines = snapshot.lines.iter().map(|runs| {
-            let mut line = div().h(px(LINE_HEIGHT)).flex().whitespace_nowrap();
+            let mut line = div().h(px(line_height)).flex().whitespace_nowrap();
             for run in runs {
                 line = line.child(
                     div()
                         .text_color(rgb(run.fg))
-                        .when(run.bg != terminal::BACKGROUND, |d| d.bg(rgb(run.bg)))
-                        .when(run.bold, |d| d.font_weight(gpui::FontWeight::BOLD))
+                        .when(run.bg != look.background, |d| d.bg(rgb(run.bg)))
+                        .when(run.bold, |d| d.font_family(bold_family.clone()).font_weight(gpui::FontWeight(bold_weight)))
                         .child(SharedString::from(run.text.clone())),
                 );
             }
@@ -367,11 +454,11 @@ impl Render for TerminalView {
             div()
                 .absolute()
                 .left(px(PADDING + column as f32 * cell_width))
-                .top(px(PADDING + row as f32 * LINE_HEIGHT))
+                .top(px(PADDING + row as f32 * line_height))
                 .w(px(cell_width))
-                .h(px(LINE_HEIGHT))
-                .when(focused, |d| d.bg(rgb(terminal::CURSOR)).opacity(0.7))
-                .when(!focused, |d| d.border_1().border_color(rgb(terminal::CURSOR)))
+                .h(px(line_height))
+                .when(focused, |d| d.bg(rgb(look.cursor)).opacity(0.7))
+                .when(!focused, |d| d.border_1().border_color(rgb(look.cursor)))
         });
 
         div()
@@ -383,16 +470,38 @@ impl Render for TerminalView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
             .relative()
             .size_full()
             .p(px(PADDING))
             .overflow_hidden()
-            .bg(rgb(terminal::BACKGROUND))
-            .font_family(FONT_FAMILY)
-            .text_size(px(FONT_SIZE))
-            .line_height(px(LINE_HEIGHT))
+            .bg(rgb(look.background))
+            .font_family(family)
+            .font_weight(gpui::FontWeight(weight))
+            .text_size(px(self.font_size()))
+            .line_height(px(line_height))
             .children(lines)
             .children(cursor)
             .into_any_element()
     }
+}
+
+/// Plays the legacy bell sound without blocking the window.
+fn play_bell() {
+    static FILE: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let path = FILE.get_or_init(|| {
+        let path = std::env::temp_dir().join("termian-bell.wav");
+        std::fs::write(&path, include_bytes!("../../assets/sounds/bell.wav")).ok().map(|_| path)
+    });
+    let Some(path) = path.clone() else { return };
+    std::thread::spawn(move || {
+        #[cfg(target_os = "macos")]
+        let _ = std::process::Command::new("/usr/bin/afplay").arg(&path).status();
+        #[cfg(windows)]
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &format!("(New-Object Media.SoundPlayer '{}').PlaySync()", path.display())])
+            .status();
+        #[cfg(not(any(target_os = "macos", windows)))]
+        let _ = path;
+    });
 }

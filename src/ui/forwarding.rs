@@ -123,7 +123,8 @@ impl Shell {
             cx.notify();
             return;
         }
-        let target = SshTarget::for_host(host, &self.vault);
+        let mut target = SshTarget::for_host(host, &self.vault);
+        target.options = termian_native::session::SshOptions::from_vault(&self.vault);
         let spec = Spec {
             kind: rule.kind,
             bind_address: if rule.bind_address.trim().is_empty() { "127.0.0.1".into() } else { rule.bind_address.clone() },
