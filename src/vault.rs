@@ -139,6 +139,17 @@ pub struct KnownHost {
     pub host: String,
 }
 
+/// One connection in the history the New Tab screen lists.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HistoryEntry {
+    pub host: HostId,
+    /// Seconds since the Unix epoch.
+    pub connected_at: i64,
+}
+
+/// How many connections are remembered.
+const HISTORY_LIMIT: usize = 100;
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
     pub groups: Vec<Group>,
@@ -147,6 +158,9 @@ pub struct Vault {
     pub identities: Vec<Identity>,
     pub snippets: Vec<Snippet>,
     pub known_hosts: Vec<KnownHost>,
+    /// Newest first.
+    #[serde(default)]
+    pub history: Vec<HistoryEntry>,
 }
 
 impl Vault {
@@ -183,6 +197,30 @@ impl Vault {
     pub fn search(&self, query: &str) -> Vec<&Host> {
         let query = query.trim();
         self.hosts.iter().filter(|h| query.is_empty() || h.matches(query)).collect()
+    }
+
+    pub fn record_connection(&mut self, host: HostId, connected_at: i64) {
+        self.history.insert(0, HistoryEntry { host, connected_at });
+        self.history.truncate(HISTORY_LIMIT);
+    }
+
+    /// "Recent connections": newest first, one row per host that still exists.
+    pub fn recent_hosts(&self) -> Vec<&Host> {
+        let mut seen = Vec::new();
+        self.history
+            .iter()
+            .filter_map(|entry| self.host(entry.host))
+            .filter(|host| {
+                let new = !seen.contains(&host.id);
+                seen.push(host.id);
+                new
+            })
+            .collect()
+    }
+
+    /// `Personal / work / Cenix`, the right-hand text of a recent connection.
+    pub fn host_location(&self, host: &Host) -> String {
+        std::iter::once("Personal".to_owned()).chain(self.breadcrumbs(host.group).iter().map(|g| g.label.clone())).collect::<Vec<_>>().join(" / ")
     }
 
     /// A free id for a new record of any kind.
@@ -346,6 +384,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn recent_hosts_are_newest_first_once_each() {
+        let mut v = vault();
+        v.record_connection(11, 1);
+        v.record_connection(12, 2);
+        v.record_connection(11, 3);
+        v.record_connection(999, 4);
+        let ids: Vec<HostId> = v.recent_hosts().iter().map(|h| h.id).collect();
+        assert_eq!(ids, [11, 12], "removed hosts are skipped, repeats collapse");
+        assert_eq!(v.host_location(v.host(12).unwrap()), "Personal / work / Ugoloc");
+        for i in 0..150 {
+            v.record_connection(10, i);
+        }
+        assert_eq!(v.history.len(), 100);
+    }
+
+    #[test]
     fn groups_move_without_cycles_and_remove_with_their_hosts() {
         let mut v = vault();
         assert_eq!(v.subtree(1), [1, 3]);
@@ -502,6 +556,11 @@ pub fn demo() -> Vault {
             .iter()
             .enumerate()
             .map(|(i, host)| KnownHost { id: i as u64, host: host.to_string() })
+            .collect(),
+        history: [10, 12, 15]
+            .iter()
+            .enumerate()
+            .map(|(i, host)| HistoryEntry { host: *host, connected_at: 1_794_000_000 - i as i64 * 3600 })
             .collect(),
     }
 }

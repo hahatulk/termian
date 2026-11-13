@@ -123,7 +123,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
-    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts })
+    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts, history: Vec::new() })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.

@@ -33,6 +33,8 @@ pub struct Shell {
     key_editor: Option<ui::key_editor::KeyEditor>,
     group_editor: Option<ui::group_editor::GroupEditor>,
     group_menu: Option<ui::group_editor::GroupMenu>,
+    launcher: ui::launcher::Launcher,
+    launcher_focus: FocusHandle,
     editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
@@ -83,6 +85,8 @@ impl Shell {
             key_editor: None,
             group_editor: None,
             group_menu: None,
+            launcher: Default::default(),
+            launcher_focus: cx.focus_handle(),
             editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
@@ -169,10 +173,14 @@ impl Shell {
     }
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(host) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::for_host(host, host.key.and_then(|k| self.vault.key(k)));
-        let (label, os) = (host.display_label().to_owned(), host.os.clone());
+        let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
+        let target = SshTarget::for_host(entry, entry.key.and_then(|k| self.vault.key(k)));
+        let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.open_ssh(label, os, target, window, cx);
+        // The New Tab screen lists recent connections.
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        self.vault.record_connection(host, now);
+        self.save_vault();
     }
 
     /// Runs a snippet in the most recently opened terminal, starting a local one if none is open.
@@ -208,7 +216,7 @@ impl Render for Shell {
                 Some(view) => view.clone().into_any_element(),
                 None => div().into_any_element(),
             },
-            _ => div().into_any_element(),
+            TabKind::Launcher => self.render_launcher(window, cx),
         };
 
         div()
@@ -233,8 +241,9 @@ impl Render for Shell {
                             .id("new-tab")
                             .px_2()
                             .child(svg().path(icon("plus")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                            .on_click(cx.listener(|shell, _, _, cx| {
+                            .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.tabs.open(TabKind::Launcher);
+                                window.focus(&shell.launcher_focus);
                                 cx.notify();
                             })),
                     )
