@@ -273,6 +273,9 @@ pub struct Vault {
     /// interval, which is in `foreign.settings`.
     #[serde(default)]
     pub terminal: crate::terminal_settings::TerminalSettings,
+    /// Connections and their logs were read from the legacy profile.
+    #[serde(default)]
+    pub legacy_history_imported: bool,
     /// Settings → Shortcuts; device-local like legacy.
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,
@@ -333,6 +336,34 @@ impl Vault {
             }
         }
         id
+    }
+
+    /// Adds connections read from the legacy profile, once: the same start
+    /// time and name are not added twice, the newest 100 stay (Saved ones
+    /// always), newest first.
+    pub fn import_history(&mut self, entries: Vec<HistoryEntry>) -> usize {
+        let mut next = self.history.iter().map(|e| e.id).max().unwrap_or(0).max(self.next_id());
+        let mut added = 0;
+        for mut entry in entries {
+            if self.history.iter().any(|e| e.connected_at == entry.connected_at && e.label == entry.label) {
+                continue;
+            }
+            next += 1;
+            entry.id = next;
+            self.history.push(entry);
+            added += 1;
+        }
+        self.history.sort_by_key(|e| std::cmp::Reverse(e.connected_at));
+        while self.history.len() > HISTORY_LIMIT {
+            match self.history.iter().rposition(|e| !e.saved) {
+                Some(oldest) => {
+                    self.history.remove(oldest);
+                }
+                None => break,
+            }
+        }
+        self.legacy_history_imported = true;
+        added
     }
 
     pub fn history_entry_mut(&mut self, id: u64) -> Option<&mut HistoryEntry> {

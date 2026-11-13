@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::cipher::FieldCipher;
 use super::ssv::{self, Value};
-use crate::vault::{key_kind, ForwardingRule, Group, Host, Identity, KnownHost, RuleKind, Snippet, SshKey, Vault};
+use crate::vault::{key_kind, ForwardingRule, Group, HistoryEntry, Host, Identity, KnownHost, LogRef, RuleKind, Snippet, SshKey, Vault};
 
 /// Keychain entry that holds the legacy local key.
 pub const KEYCHAIN_SERVICE: &str = "termian";
@@ -26,6 +26,13 @@ pub fn default_indexeddb_dir() -> Option<PathBuf> {
     fs::read_dir(base).ok()?.flatten().find_map(|outer| {
         fs::read_dir(outer.path()).ok()?.flatten().map(|inner| inner.path().join("IndexedDB")).find(|p| p.is_dir())
     })
+}
+
+/// Where the legacy client keeps session logs: `TERMIAN_LEGACY_DATA`, or its
+/// app data folder.
+pub fn default_logs_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("TERMIAN_LEGACY_DATA").map(PathBuf::from).or_else(|| Some(dirs::data_dir()?.join("app.termian.desktop")))?;
+    Some(base.join("session-logs-v2"))
 }
 
 pub fn read_local_key() -> Result<String, String> {
@@ -152,6 +159,52 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
+/// Connections from the legacy `activities` store, newest first. The
+/// encrypted `command` holds what legacy `dbToEntity` reads: `title`,
+/// `host`, `user_name`, `connection_type`, `session_log_data`. Passwords in
+/// old records are not read. Logs keep their legacy file names.
+pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<HistoryEntry>, String> {
+    let stores = read_stores(indexeddb_dir)?;
+    let Some(records) = stores.get("activities") else { return Ok(Vec::new()) };
+    let mut entries: Vec<HistoryEntry> = records
+        .iter()
+        .filter(|(_, v)| !v.get("status").and_then(Value::as_str).is_some_and(|s| s.to_uppercase().contains("DELETED")))
+        .filter_map(|(_, v)| {
+            let command: serde_json::Value = serde_json::from_str(&cipher.decrypt(v.get("command")?.as_str()?).ok()?).ok()?;
+            let field = |name: &str| command.get(name).and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
+            let kind = field("connection_type");
+            let label = match kind.as_str() {
+                "local" => "Local Terminal".to_owned(),
+                "serial" => "Serial".to_owned(),
+                _ => [field("title"), field("host")].into_iter().find(|s| !s.is_empty()).unwrap_or_else(|| "Unknown".into()),
+            };
+            let subtitle = if kind == "local" {
+                "local".to_owned()
+            } else {
+                std::iter::once(if kind.is_empty() { "ssh".to_owned() } else { kind.clone() }).chain(Some(field("user_name")).filter(|u| !u.is_empty())).collect::<Vec<_>>().join(", ")
+            };
+            let connected_ms = v.get("connected_at").and_then(Value::as_f64)?;
+            let log = command.get("session_log_data").and_then(|data| {
+                let name = data.get("name")?.as_str()?.rsplit(['/', '\\']).next()?.to_owned();
+                let secret = data.get("secretKey")?.as_str()?;
+                (crate::session_log::valid_name(&name) && secret.len() == 32).then(|| LogRef { name, key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, secret.as_bytes()) })
+            });
+            Some(HistoryEntry {
+                id: 0,
+                host: v.get("host").and_then(|h| h.get("local_id").or(Some(h))).and_then(Value::as_f64).map(|n| n as u64),
+                connected_at: (connected_ms / 1000.) as i64,
+                disconnected_at: None,
+                label,
+                subtitle,
+                log,
+                saved: false,
+            })
+        })
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.connected_at));
+    Ok(entries)
+}
+
 fn link(value: &Value, field: &str) -> Option<u64> {
     value.get(field)?.get("local_id")?.as_f64().map(|n| n as u64)
 }
@@ -220,6 +273,7 @@ mod tests {
         Secret(&'a str),
         Link(i32),
         Int(i32),
+        Double(f64),
     }
 
     fn record(fields: &[(&str, F)]) -> Vec<u8> {
@@ -230,6 +284,7 @@ mod tests {
             match field {
                 F::Text(s) => e.string(s),
                 F::Int(n) => e.int(*n),
+                F::Double(n) => e.double(*n),
                 F::Secret(s) => e.string(&cipher().encrypt(s, [i as u8; 24])),
                 F::Link(n) => {
                     e.begin_object();
@@ -264,6 +319,37 @@ mod tests {
         for (id, value) in records {
             db.execute("INSERT INTO Records (objectStoreID, key, value) VALUES (1, ?1, ?2)", (key(id), value)).unwrap();
         }
+    }
+
+    #[test]
+    fn loads_connection_history_with_its_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let ssh = r#"{"connection_type":"ssh","host":"192.0.2.10","port":22,"title":"Ugoloc Prod","user_name":"root","version_code":1,
+            "session_log_data":{"name":"/Users/me/Library/Application Support/app.termian.desktop/session-logs-v2/6f9a1c2e-1b2c.log","secretKey":"0123456789abcdef0123456789abcdef"}}"#;
+        let local = r#"{"connection_type":"local","host":"","title":""}"#;
+        let quick = r#"{"connection_type":"ssh","host":"10.0.0.5","title":"","user_name":""}"#;
+        write_store(root, "activities", vec![
+            (1., record(&[("command", F::Secret(ssh)), ("connected_at", F::Double(1_794_000_000_000.)), ("host", F::Link(220)), ("status", F::Text("TO_BE_CREATED"))])),
+            (2., record(&[("command", F::Secret(local)), ("connected_at", F::Double(1_794_100_000_000.)), ("status", F::Text("TO_BE_UPDATED"))])),
+            (3., record(&[("command", F::Secret(quick)), ("connected_at", F::Double(1_793_000_000_000.)), ("status", F::Text("TO_BE_DELETED"))])),
+            (4., record(&[("command", F::Text("not encrypted json")), ("connected_at", F::Double(1.))])),
+        ]);
+        let history = load_history(root, &cipher()).unwrap();
+        assert_eq!(history.len(), 2, "deleted and unreadable records are skipped");
+        assert_eq!((history[0].label.as_str(), history[0].subtitle.as_str(), history[0].host), ("Local Terminal", "local", None));
+        let ssh = &history[1];
+        assert_eq!((ssh.label.as_str(), ssh.subtitle.as_str(), ssh.host, ssh.connected_at), ("Ugoloc Prod", "ssh, root", Some(220), 1_794_000_000));
+        let log = ssh.log.as_ref().unwrap();
+        assert_eq!(log.name, "6f9a1c2e-1b2c.log");
+        assert_eq!(STANDARD.decode(&log.key).unwrap(), b"0123456789abcdef0123456789abcdef");
+        assert_eq!(crate::session_log::file_name(&log.name), "6f9a1c2e-1b2c.log");
+
+        let mut vault = Vault { history: vec![HistoryEntry { id: 7, connected_at: 1_794_000_000, label: "Ugoloc Prod".into(), ..HistoryEntry::default() }], ..Vault::default() };
+        assert_eq!(vault.import_history(history), 1, "the same connection is not added twice");
+        assert!(vault.legacy_history_imported);
+        assert_eq!(vault.history.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(), ["Local Terminal", "Ugoloc Prod"]);
+        assert!(vault.history[0].id > 7);
     }
 
     #[test]

@@ -32,6 +32,12 @@ pub fn valid_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
+/// The file of a log: native names get `.log`; logs imported from legacy
+/// keep their own file name, which already ends in `.log`.
+pub fn file_name(name: &str) -> String {
+    if name.ends_with(".log") { name.to_owned() } else { format!("{name}.log") }
+}
+
 pub fn new_key() -> [u8; 32] {
     let mut key = [0u8; 32];
     getrandom::getrandom(&mut key).expect("system random source");
@@ -73,7 +79,7 @@ pub fn read(dir: &Path, name: &str, key: &[u8; 32]) -> Result<(Vec<u8>, Option<&
     if !valid_name(name) {
         return Err(MISSING_LOG.into());
     }
-    match std::fs::read(dir.join(format!("{name}.log"))) {
+    match std::fs::read(dir.join(file_name(name))) {
         Ok(bytes) => Ok(decode(&bytes, key)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(MISSING_LOG.into()),
         Err(error) => Err(error.to_string()),
@@ -216,7 +222,7 @@ pub fn clear(history: &mut Vec<crate::vault::HistoryEntry>, dir: &Path, since: u
     let started = |entry: &crate::vault::HistoryEntry| since == 0 || (entry.connected_at.max(0) as u64).saturating_mul(1000) >= since;
     let before = history.len();
     history.retain(|entry| !started(entry));
-    let keep: std::collections::HashSet<String> = history.iter().filter_map(|e| e.log.as_ref()).map(|log| format!("{}.log", log.name)).collect();
+    let keep: std::collections::HashSet<String> = history.iter().filter_map(|e| e.log.as_ref()).map(|log| file_name(&log.name)).collect();
     let mut files = 0;
     for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -234,7 +240,7 @@ pub fn delete_all(history: &mut [crate::vault::HistoryEntry], dir: &Path) -> usi
     let mut files = 0;
     for entry in history.iter_mut() {
         if let Some(log) = entry.log.take() {
-            files += usize::from(valid_name(&log.name) && std::fs::remove_file(dir.join(format!("{}.log", log.name))).is_ok());
+            files += usize::from(valid_name(&log.name) && std::fs::remove_file(dir.join(file_name(&log.name))).is_ok());
         }
     }
     files

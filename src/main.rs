@@ -84,6 +84,45 @@ fn load_legacy_vault() -> Result<Vault, String> {
     profile::load_vault(&dir, &cipher)
 }
 
+/// Connections and their session logs from the legacy profile, once. The
+/// legacy log files are copied, never moved. Without a legacy profile there
+/// is nothing to import; a locked keychain is tried again at the next start.
+fn import_legacy_history(vault: &mut Vault, logs_dir: &std::path::Path) {
+    let Some(dir) = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB").map(std::path::PathBuf::from).or_else(profile::default_indexeddb_dir) else {
+        vault.legacy_history_imported = true;
+        return;
+    };
+    let history = match profile::read_local_key().and_then(|key| FieldCipher::from_local_key(&key)).and_then(|cipher| profile::load_history(&dir, &cipher)) {
+        Ok(history) => history,
+        Err(error) => {
+            eprintln!("[Termian] Legacy history was not imported: {error}");
+            return;
+        }
+    };
+    if let Some(legacy_logs) = profile::default_logs_dir() {
+        let _ = std::fs::create_dir_all(logs_dir);
+        for log in history.iter().filter_map(|e| e.log.as_ref()) {
+            let file = session_log::file_name(&log.name);
+            let target = logs_dir.join(&file);
+            if !target.exists() {
+                let _ = std::fs::copy(legacy_logs.join(&file), target);
+            }
+        }
+    }
+    // Ids match only while the hosts are the ones imported from legacy (a sync
+    // import renumbers them): a link is kept when the host still has that name.
+    let history = history
+        .into_iter()
+        .map(|mut entry| {
+            if entry.host.and_then(|id| vault.hosts.iter().find(|h| h.id == id)).is_none_or(|h| h.display_label() != entry.label) {
+                entry.host = None;
+            }
+            entry
+        })
+        .collect();
+    vault.import_history(history);
+}
+
 /// The native vault (ADR 0002), imported from the legacy profile on first run.
 /// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
 fn open_vault() -> (Vault, Option<Store>, Option<String>) {
@@ -104,12 +143,15 @@ fn open_vault() -> (Vault, Option<Store>, Option<String>) {
 
 impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
-        let (vault, store, vault_error) = open_vault();
-        let logs_dir = if std::env::var_os("TERMIAN_DEMO").is_some() {
-            std::env::temp_dir().join("termian-native-demo").join("session-logs-v2")
-        } else {
-            session_log::default_dir()
-        };
+        let (mut vault, store, vault_error) = open_vault();
+        let demo = std::env::var_os("TERMIAN_DEMO").is_some();
+        let logs_dir = if demo { std::env::temp_dir().join("termian-native-demo").join("session-logs-v2") } else { session_log::default_dir() };
+        if !demo && store.is_some() && !vault.legacy_history_imported {
+            import_legacy_history(&mut vault, &logs_dir);
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
         // Logs older than 60 days are deleted at start (FR-L5).
         session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
         Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error, section: Section::Hosts,

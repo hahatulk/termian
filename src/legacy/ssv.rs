@@ -237,6 +237,10 @@ pub(crate) mod tests {
             self.out.push(INT);
             self.out.extend(n.to_le_bytes());
         }
+        pub fn double(&mut self, n: f64) {
+            self.out.push(DOUBLE);
+            self.out.extend(n.to_le_bytes());
+        }
         pub fn tag(&mut self, t: u8) {
             self.out.push(t);
         }
