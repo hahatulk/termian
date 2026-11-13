@@ -42,7 +42,24 @@ pub struct Workspace {
     pub focused: u64,
     /// «Broadcast input»: keys typed in a pane go to every pane of the tab.
     pub broadcast: bool,
+    /// A divider being dragged.
+    drag: Option<Drag>,
+    /// A pane closed: the focused one takes the keyboard on the next frame.
+    refocus: bool,
 }
+
+struct Drag {
+    split: u64,
+    index: usize,
+    vertical: bool,
+    start: f32,
+    /// The split's length in pixels along the drag.
+    length: f32,
+    sizes: Vec<f32>,
+}
+
+/// Panes are never dragged smaller than this share of their split.
+const MIN_SHARE: f32 = 0.1;
 
 impl Workspace {
     pub fn focused_view(&self) -> Option<&Entity<TerminalView>> {
@@ -76,7 +93,7 @@ impl Shell {
         self.subscribe_pane(tab, pane, &view, cx);
         let mut panes = BTreeMap::new();
         panes.insert(pane, Pane { title, view, history, origin });
-        self.workspaces.insert(tab, Workspace { tree: SplitTree::single(pane), panes, focused: pane, broadcast: false });
+        self.workspaces.insert(tab, Workspace { tree: SplitTree::single(pane), panes, focused: pane, broadcast: false, drag: None, refocus: false });
         cx.notify();
     }
 
@@ -142,6 +159,7 @@ impl Shell {
         if workspace.focused == pane {
             workspace.focused = workspace.tree.leaves()[0];
         }
+        workspace.refocus = true;
         self.session_ended(closed.history);
         cx.notify();
     }
@@ -224,7 +242,14 @@ impl Shell {
     }
 
     /// The panes of the active tab, each in its share of the area.
-    pub(crate) fn render_workspace(&self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_workspace(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(workspace) = self.workspaces.get_mut(&tab) {
+            if std::mem::take(&mut workspace.refocus) {
+                if let Some(view) = workspace.focused_view() {
+                    view.read(cx).focus(window);
+                }
+            }
+        }
         let Some(workspace) = self.workspaces.get(&tab) else { return div().into_any_element() };
         let viewport = window.viewport_size();
         let panel = if self.side_panel.is_some() { super::side_panel::WIDTH } else { 0. };
@@ -292,7 +317,49 @@ impl Shell {
                     .child(div().flex_1().min_h_0().child(pane.view.clone())),
             );
         }
-        area.into_any_element()
+        // Dividers between the children of every split, draggable.
+        for (split_id, layout, rect, sizes) in workspace.tree.splits() {
+            let vertical = layout == Layout::Vertical;
+            let (x, y) = (rect.left * width, rect.top * height);
+            let (w, h) = ((rect.right - rect.left) * width, (rect.bottom - rect.top) * height);
+            let length = if vertical { h } else { w };
+            let mut offset = 0.;
+            for (index, size) in sizes.iter().enumerate().take(sizes.len().saturating_sub(1)) {
+                offset += size * length;
+                let sizes = sizes.clone();
+                let handle = div()
+                    .id(gpui::SharedString::from(format!("divider-{split_id}-{index}")))
+                    .absolute()
+                    .map(|d| if vertical { d.left(px(x)).top(px(y + offset - 3.)).w(px(w)).h(px(6.)).cursor_row_resize() } else { d.left(px(x + offset - 3.)).top(px(y)).w(px(6.)).h(px(h)).cursor_col_resize() })
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        let start = if vertical { f32::from(event.position.y) } else { f32::from(event.position.x) };
+                        if let Some(workspace) = shell.workspaces.get_mut(&tab) {
+                            workspace.drag = Some(Drag { split: split_id, index, vertical, start, length, sizes: sizes.clone() });
+                        }
+                    }));
+                area = area.child(handle);
+            }
+        }
+        area.on_mouse_move(cx.listener(move |shell, event: &gpui::MouseMoveEvent, _, cx| {
+            let Some(workspace) = shell.workspaces.get_mut(&tab) else { return };
+            let Some(drag) = &workspace.drag else { return };
+            if !event.dragging() {
+                workspace.drag = None;
+                return;
+            }
+            let at = if drag.vertical { f32::from(event.position.y) } else { f32::from(event.position.x) };
+            let sizes = termian_native::split_tree::dragged(&drag.sizes, drag.index, (at - drag.start) / drag.length.max(1.), MIN_SHARE);
+            let split = drag.split;
+            workspace.tree.resize(split, &sizes);
+            cx.notify();
+        }))
+        .on_mouse_up(MouseButton::Left, cx.listener(move |shell, _, _, _| {
+            if let Some(workspace) = shell.workspaces.get_mut(&tab) {
+                workspace.drag = None;
+            }
+        }))
+        .into_any_element()
     }
 
     /// Legacy terminal tab menu: Duplicate, «Split horizontally», Close.

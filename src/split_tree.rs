@@ -224,6 +224,21 @@ impl SplitTree {
         out
     }
 
+    /// Every split: its id, direction, place and its children's shares.
+    pub fn splits(&self) -> Vec<(u64, Layout, Rect, Vec<f32>)> {
+        fn find(node: &Node, id: u64) -> Option<&Node> {
+            if node.id == id {
+                return Some(node);
+            }
+            node.children.iter().find_map(|c| find(c, id))
+        }
+        self.rects()
+            .into_iter()
+            .filter(|(_, leaf, _)| !leaf)
+            .filter_map(|(id, _, rect)| find(&self.root, id).map(|n| (id, n.layout, rect, n.children.iter().map(|c| c.size).collect())))
+            .collect()
+    }
+
     /// The pane beside `id` in `direction` that shares the longest edge with
     /// it (legacy `findAdjacentLeaf`).
     pub fn adjacent(&self, id: u64, direction: Direction) -> Option<u64> {
@@ -291,6 +306,20 @@ impl SplitTree {
     }
 }
 
+/// Shares after dragging the divider after child `index` by `delta` (a
+/// fraction of the split); no pane gets smaller than `min`.
+pub fn dragged(sizes: &[f32], index: usize, delta: f32, min: f32) -> Vec<f32> {
+    let mut out = sizes.to_vec();
+    if index + 1 >= out.len() {
+        return out;
+    }
+    let pair = out[index] + out[index + 1];
+    let first = (out[index] + delta).clamp(min.min(pair / 2.), (pair - min).max(pair / 2.));
+    out[index] = first;
+    out[index + 1] = pair - first;
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +380,18 @@ mod tests {
         assert_eq!(tree.adjacent(3, Direction::Up), Some(2));
         assert_eq!(tree.adjacent(3, Direction::Left), Some(1));
         assert_eq!(tree.adjacent(1, Direction::Left), None);
+    }
+
+    #[test]
+    fn dragging_a_divider_moves_space_between_its_neighbours() {
+        assert_eq!(dragged(&[0.5, 0.5], 0, 0.2, 0.1), [0.7, 0.3]);
+        assert_eq!(dragged(&[0.5, 0.5], 0, 0.6, 0.1), [0.9, 0.100000024], "the other pane keeps its minimum");
+        assert_eq!(dragged(&[0.25, 0.25, 0.5], 1, -0.2, 0.1), [0.25, 0.1, 0.65]);
+        assert_eq!(dragged(&[1.], 0, 0.3, 0.1), [1.]);
+        let mut tree = SplitTree::single(1);
+        tree.split(1, 2, Layout::Vertical, Position::End);
+        let splits = tree.splits();
+        assert_eq!((splits.len(), splits[0].1, splits[0].3.clone()), (1, Layout::Vertical, vec![0.5, 0.5]));
     }
 
     #[test]
