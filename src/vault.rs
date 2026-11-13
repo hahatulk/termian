@@ -156,6 +156,15 @@ impl Snippet {
     }
 }
 
+/// A command from Shell History (legacy `HistoryCommand`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ShellCommand {
+    pub script: String,
+    /// Unix seconds; 0 when unknown.
+    pub completed_at: i64,
+    pub rating: i64,
+}
+
 /// A snippet package: a folder of snippets on the Snippets screen.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SnippetPackage {
@@ -299,6 +308,11 @@ pub struct Vault {
     /// Connections and their logs were read from the legacy profile.
     #[serde(default)]
     pub legacy_history_imported: bool,
+    /// Shell History, newest first; device-local like legacy.
+    #[serde(default)]
+    pub shell_history: Vec<ShellCommand>,
+    #[serde(default)]
+    pub legacy_shell_history_imported: bool,
     /// Settings → Shortcuts; device-local like legacy.
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,
@@ -387,6 +401,18 @@ impl Vault {
         }
         self.legacy_history_imported = true;
         added
+    }
+
+    /// Adds legacy Shell History once, skipping commands already here, in
+    /// the legacy order: newest first, then by rating.
+    pub fn import_shell_history(&mut self, commands: Vec<ShellCommand>) {
+        for command in commands {
+            if !self.shell_history.iter().any(|c| c.script == command.script && c.completed_at == command.completed_at) {
+                self.shell_history.push(command);
+            }
+        }
+        self.shell_history.sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(b.rating.cmp(&a.rating)));
+        self.legacy_shell_history_imported = true;
     }
 
     pub fn history_entry_mut(&mut self, id: u64) -> Option<&mut HistoryEntry> {
@@ -865,6 +891,16 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shell_history_imports_once_newest_first() {
+        let mut v = Vault::default();
+        let cmd = |script: &str, completed_at, rating| ShellCommand { script: script.into(), completed_at, rating };
+        v.import_shell_history(vec![cmd("ls", 10, 1), cmd("top", 20, 1), cmd("df", 20, 3)]);
+        v.import_shell_history(vec![cmd("ls", 10, 1)]);
+        assert_eq!(v.shell_history.iter().map(|c| c.script.as_str()).collect::<Vec<_>>(), ["df", "top", "ls"]);
+        assert!(v.legacy_shell_history_imported);
+    }
+
+    #[test]
     fn snippet_packages_and_targets() {
         let mut v = demo();
         assert_eq!(v.snippets_in(None, false).iter().map(|s| s.id).collect::<Vec<_>>(), [1, 2], "outside packages");
@@ -947,6 +983,11 @@ pub fn demo() -> Vault {
             Snippet { id: 3, label: "get pods".into(), script: "kubectl -n default get pods".into(), package: Some(30), targets: vec![20, 21] },
         ],
         packages: vec![SnippetPackage { id: 30, label: "Kubernetes".into() }],
+        shell_history: ["docker compose ps", "kubectl -n default get pods", "tail -f /var/log/syslog"]
+            .iter()
+            .enumerate()
+            .map(|(i, script)| ShellCommand { script: script.to_string(), completed_at: 1_794_000_000 - i as i64 * 60, rating: 1 })
+            .collect(),
         known_hosts: ["192.168.1.180", "[95.80.105.230]:50703", "10.0.209.12", "[192.168.88.59]:2001"]
             .iter()
             .enumerate()

@@ -48,6 +48,7 @@ pub struct Shell {
     snippet_editor: Option<ui::snippets::SnippetEditor>,
     package_editor: Option<ui::snippets::PackageEditor>,
     snippet_menu: Option<ui::snippets::SnippetMenu>,
+    shell_history: Option<ui::snippets::ShellHistoryPanel>,
     /// «Save targets» under «Select targets»; on by default and remembered, as in legacy.
     snippet_save_targets: bool,
     launcher: ui::launcher::Launcher,
@@ -130,6 +131,18 @@ fn import_legacy_history(vault: &mut Vault, logs_dir: &std::path::Path) {
     vault.import_history(history);
 }
 
+/// Shell History from the legacy profile, once; a locked keychain is tried again at the next start.
+fn import_legacy_shell_history(vault: &mut Vault) {
+    let Some(dir) = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB").map(std::path::PathBuf::from).or_else(profile::default_indexeddb_dir) else {
+        vault.legacy_shell_history_imported = true;
+        return;
+    };
+    match profile::read_local_key().and_then(|key| FieldCipher::from_local_key(&key)).and_then(|cipher| profile::load_shell_history(&dir, &cipher)) {
+        Ok(commands) => vault.import_shell_history(commands),
+        Err(error) => eprintln!("[Termian] Legacy shell history was not imported: {error}"),
+    }
+}
+
 /// The native vault (ADR 0002), imported from the legacy profile on first run.
 /// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
 fn open_vault() -> (Vault, Option<Store>, Option<String>) {
@@ -153,6 +166,12 @@ impl Shell {
         let (mut vault, store, vault_error) = open_vault();
         let demo = std::env::var_os("TERMIAN_DEMO").is_some();
         let logs_dir = if demo { std::env::temp_dir().join("termian-native-demo").join("session-logs-v2") } else { session_log::default_dir() };
+        if !demo && store.is_some() && !vault.legacy_shell_history_imported {
+            import_legacy_shell_history(&mut vault);
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
         if !demo && store.is_some() && !vault.legacy_history_imported {
             import_legacy_history(&mut vault, &logs_dir);
             if let Some(store) = &store {
@@ -173,6 +192,7 @@ impl Shell {
             snippet_editor: None,
             package_editor: None,
             snippet_menu: None,
+            shell_history: None,
             snippet_save_targets: true,
             launcher: Default::default(),
             logs_view: Default::default(),

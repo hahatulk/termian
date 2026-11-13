@@ -52,6 +52,16 @@ pub struct SnippetEditor {
     confirm_remove: bool,
 }
 
+/// The Shell History slider: rows expand on click; SAVE asks for a label
+/// and makes a snippet.
+#[derive(Default)]
+pub struct ShellHistoryPanel {
+    expanded: Option<usize>,
+    editing: Option<(usize, String)>,
+    saved: Vec<usize>,
+    menu_open: bool,
+}
+
 pub struct PackageEditor {
     package: SnippetPackage,
     created_here: bool,
@@ -236,7 +246,13 @@ impl Shell {
                 cx.notify();
             }));
         let split = div().id("new-snippet-split").flex().items_center().gap(px(1.)).child(add).child(arrow);
-        page("snippets-scroll", vec![split, tool_button("shell-history", "logs", "SHELL HISTORY")], body)
+        let history = tool_button("shell-history", "logs", "SHELL HISTORY").on_click(cx.listener(|shell, _, window, cx| {
+            shell.close_snippet_sliders();
+            shell.shell_history = Some(ShellHistoryPanel::default());
+            window.focus(&shell.editor_focus);
+            cx.notify();
+        }));
+        page("snippets-scroll", vec![split, history], body)
     }
 
     fn edit_pencil(id: String, hover: SharedString) -> Stateful<Div> {
@@ -300,9 +316,11 @@ impl Shell {
     }
 
     fn close_snippet_sliders(&mut self) {
+        self.shell_history = None;
         self.snippet_editor = None;
         self.package_editor = None;
         self.snippet_menu = None;
+        self.shell_history = None;
     }
 
     // ── Run ─────────────────────────────────────────────────────────────
@@ -341,6 +359,7 @@ impl Shell {
         let snippet = Snippet { id: self.vault.next_id(), package: self.snippet_package, ..Snippet::default() };
         self.package_editor = None;
         self.snippet_menu = None;
+        self.shell_history = None;
         self.snippet_editor = Some(editor(snippet, true, Route::Edit));
         window.focus(&self.editor_focus);
         cx.notify();
@@ -350,6 +369,7 @@ impl Shell {
         let Some(snippet) = self.vault.snippet(id).cloned() else { return };
         self.package_editor = None;
         self.snippet_menu = None;
+        self.shell_history = None;
         self.snippet_editor = Some(editor(snippet, false, Route::Edit));
         window.focus(&self.editor_focus);
         cx.notify();
@@ -870,6 +890,7 @@ impl Shell {
         let package = SnippetPackage { id: self.vault.next_id(), label: String::new() };
         self.snippet_editor = None;
         self.snippet_menu = None;
+        self.shell_history = None;
         self.package_editor = Some(PackageEditor { package, created_here: true, menu_open: false, confirm_remove: false });
         window.focus(&self.editor_focus);
         cx.notify();
@@ -879,6 +900,7 @@ impl Shell {
         let Some(package) = self.vault.package(id).cloned() else { return };
         self.snippet_editor = None;
         self.snippet_menu = None;
+        self.shell_history = None;
         self.package_editor = Some(PackageEditor { package, created_here: false, menu_open: false, confirm_remove: false });
         window.focus(&self.editor_focus);
         cx.notify();
@@ -1060,10 +1082,142 @@ impl Shell {
 
     /// Whatever covers the Snippets screen: a slider, a menu or a dialog.
     pub fn render_snippets_overlay(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let slider = self.render_snippet_editor(window, cx).or_else(|| self.render_package_editor(window, cx));
+        let slider = self.render_snippet_editor(window, cx).or_else(|| self.render_package_editor(window, cx)).or_else(|| self.render_shell_history(cx));
         match (slider, self.render_snippet_menu(window, cx)) {
             (Some(slider), Some(menu)) => Some(div().absolute().inset_0().child(slider).child(menu).into_any_element()),
             (slider, menu) => slider.or(menu),
         }
+    }
+
+    // ── Shell History ───────────────────────────────────────────────────
+
+    fn on_shell_history_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let paste = cx.read_from_clipboard().and_then(|item| item.text());
+        let Some(panel) = &mut self.shell_history else { return };
+        let Some((row, label)) = &mut panel.editing else {
+            if event.keystroke.key == "escape" {
+                self.shell_history = None;
+                cx.notify();
+            }
+            return;
+        };
+        match dialog::edit(Some(label), &event.keystroke, paste) {
+            Key::Enter => {
+                let row = *row;
+                self.save_history_command(row);
+            }
+            Key::Escape => panel.editing = None,
+            Key::Edited => {}
+            Key::Ignored => return,
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// «Done»: the command becomes a snippet with the typed label.
+    fn save_history_command(&mut self, row: usize) {
+        let Some(panel) = &mut self.shell_history else { return };
+        let label = panel.editing.take().map(|(_, l)| l).unwrap_or_default();
+        let Some(command) = self.vault.shell_history.get(row) else { return };
+        let snippet = Snippet { id: self.vault.next_id(), label, script: command.script.clone(), ..Snippet::default() };
+        self.vault.save_snippet(snippet);
+        panel.saved.push(row);
+        self.save_vault();
+    }
+
+    fn render_shell_history(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panel = self.shell_history.as_ref()?;
+        let head = header("Shell History")
+            .child(dots("history-dots").on_click(cx.listener(|shell, _, _, cx| {
+                if let Some(panel) = &mut shell.shell_history {
+                    panel.menu_open = !panel.menu_open;
+                }
+                cx.notify();
+            })))
+            .child(dialog::close_button("history-close").on_click(cx.listener(|shell, _, _, cx| {
+                shell.shell_history = None;
+                cx.notify();
+            })));
+        let commands = &self.vault.shell_history;
+        let body = if commands.is_empty() {
+            div().child(empty_state("logs", "You don't have shell history yet", "Connect to a host via SSH to see your shell history here."))
+        } else {
+            div().flex().flex_col().children(commands.iter().enumerate().map(|(i, command)| {
+                let hover = SharedString::from(format!("history-row-{i}"));
+                let expanded = panel.expanded == Some(i);
+                let editing = panel.editing.as_ref().filter(|(row, _)| *row == i).map(|(_, label)| label.clone());
+                let saved = panel.saved.contains(&i);
+                let action = |id: String, text: &str| {
+                    div().id(SharedString::from(id)).h(px(22.)).w(px(52.)).flex().items_center().justify_center().rounded_md().bg(rgb(theme::ACCENT)).text_xs().font_weight(FontWeight::BLACK).text_color(rgb(0xffffff)).child(text.to_owned())
+                };
+                let end = if editing.is_some() {
+                    Some(action(format!("history-done-{i}"), "Done").on_click(cx.listener(move |shell, _, _, cx| {
+                        cx.stop_propagation();
+                        shell.save_history_command(i);
+                        cx.notify();
+                    })).into_any_element())
+                } else if saved {
+                    Some(div().flex().items_center().gap_1().text_xs().text_color(rgb(theme::ACCENT)).child(svg().path(icon("check")).size(px(8.)).text_color(rgb(theme::ACCENT))).child("saved").into_any_element())
+                } else {
+                    Some(div().invisible().group_hover(hover.clone(), |s| s.visible()).child(action(format!("history-save-{i}"), "SAVE").on_click(cx.listener(move |shell, _, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(panel) = &mut shell.shell_history {
+                            panel.editing = Some((i, String::new()));
+                        }
+                        window.focus(&shell.editor_focus);
+                        cx.notify();
+                    }))).into_any_element())
+                };
+                let title = match &editing {
+                    Some(label) => input_text(label, "Set a label", true),
+                    None => div().text_color(rgb(theme::TEXT)).font_family("Menlo").text_sm().when(!expanded, |d| d.truncate()).child(command.script.clone()),
+                };
+                div()
+                    .id(hover.clone())
+                    .group(hover)
+                    .px(px(15.))
+                    .py(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .hover(|s| s.bg(rgb(theme::SURFACE)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(title)
+                            .when(editing.is_some() || expanded, |d| d.child(div().font_family("Menlo").text_xs().text_color(rgb(theme::TEXT_MUTED)).child(command.script.clone()))),
+                    )
+                    .children(end)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(panel) = &mut shell.shell_history {
+                            if panel.editing.is_none() {
+                                panel.expanded = if panel.expanded == Some(i) { None } else { Some(i) };
+                            }
+                        }
+                        cx.notify();
+                    }))
+            }))
+        };
+        let menu = panel.menu_open.then(|| {
+            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("history-menu").child(menu_row("history-delete-all".into(), "Delete All", true, false).on_click(cx.listener(|shell, _, _, cx| {
+                shell.vault.shell_history.clear();
+                shell.save_vault();
+                shell.shell_history = Some(ShellHistoryPanel::default());
+                cx.notify();
+            }))))
+        });
+        Some(
+            slider("shell-history")
+                .track_focus(&self.editor_focus)
+                .on_key_down(cx.listener(Self::on_shell_history_key))
+                .child(head)
+                .child(div().id("history-scroll").flex_1().overflow_y_scroll().child(body))
+                .children(menu)
+                .into_any_element(),
+        )
     }
 }

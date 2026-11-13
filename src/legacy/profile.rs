@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::cipher::FieldCipher;
 use super::ssv::{self, Value};
-use crate::vault::{key_kind, ForwardingRule, Group, HistoryEntry, Host, Identity, KnownHost, LogRef, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
+use crate::vault::{key_kind, ForwardingRule, Group, HistoryEntry, Host, Identity, KnownHost, LogRef, RuleKind, ShellCommand, Snippet, SnippetPackage, SshKey, Vault};
 
 /// Keychain entry that holds the legacy local key.
 pub const KEYCHAIN_SERVICE: &str = "termian";
@@ -172,6 +172,25 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
 /// encrypted `command` holds what legacy `dbToEntity` reads: `title`,
 /// `host`, `user_name`, `connection_type`, `session_log_data`. Passwords in
 /// old records are not read. Logs keep their legacy file names.
+/// Shell History (`history_commands`); deleted records are skipped.
+pub fn load_shell_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<ShellCommand>, String> {
+    let stores = read_stores(indexeddb_dir)?;
+    let Some(records) = stores.get("history_commands") else { return Ok(Vec::new()) };
+    Ok(records
+        .iter()
+        .filter(|(_, v)| !v.get("status").and_then(Value::as_str).is_some_and(|s| s.to_uppercase().contains("DELETED")))
+        .filter_map(|(_, v)| {
+            let script = decrypt_or_plain(cipher, v.get("script")?.as_str()?);
+            let ms = v.get("completed_at").and_then(|c| c.as_f64().or_else(|| c.as_str().and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok()).map(|d| d.timestamp_millis() as f64)));
+            (!script.trim().is_empty()).then(|| ShellCommand {
+                script,
+                completed_at: ms.map_or(0, |ms| (ms / 1000.) as i64),
+                rating: v.get("rating").and_then(Value::as_f64).map_or(1, |r| r as i64),
+            })
+        })
+        .collect())
+}
+
 pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<HistoryEntry>, String> {
     let stores = read_stores(indexeddb_dir)?;
     let Some(records) = stores.get("activities") else { return Ok(Vec::new()) };
@@ -442,6 +461,22 @@ mod tests {
         assert_eq!(vault.known_hosts[0].host, "[10.0.0.1]:2001");
         let debug = format!("{vault:?}");
         assert!(!debug.contains("PRIVATE KEY") && !debug.contains("\"pw\""), "secrets leaked: {debug}");
+    }
+
+    #[test]
+    fn loads_shell_history_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_store(root, "history_commands", vec![
+            (1., record(&[("script", F::Secret("ls -la")), ("completed_at", F::Double(1_794_000_000_000.)), ("rating", F::Int(2))])),
+            (2., record(&[("script", F::Text("uptime"))])),
+            (3., record(&[("script", F::Secret("gone")), ("status", F::Text("TO_BE_DELETED"))])),
+        ]);
+        let commands = load_shell_history(root, &cipher()).unwrap();
+        assert_eq!(commands, vec![
+            ShellCommand { script: "ls -la".into(), completed_at: 1_794_000_000, rating: 2 },
+            ShellCommand { script: "uptime".into(), completed_at: 0, rating: 1 },
+        ]);
     }
 
     #[test]
