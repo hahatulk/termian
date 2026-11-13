@@ -6,13 +6,17 @@
 use std::collections::VecDeque;
 
 use gpui::{
-    div, prelude::*, px, rgb, svg, AnyElement, App, Context, Div, ExternalPaths, FontWeight, KeyDownEvent, MouseButton, Pixels,
-    Point, Render, SharedString, Stateful, Window,
+    div, prelude::*, px, rgb, svg, AnyElement, App, Context, Div, ExternalPaths, FontWeight, KeyDownEvent, MouseButton, PathPromptOptions,
+    Pixels, Point, Render, SharedString, Stateful, Window,
 };
-use termian_native::files::{delete_title, join, name_error, Entry};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use termian_native::edits::{open_path, Associations, EditId, Edited, Edits};
+use termian_native::files::{delete_title, format_size, format_time, join, name_error, parent, Entry, PERMISSION_BITS};
 use termian_native::remote_fs::{self, Operation, TransferId};
 use termian_native::theme;
-use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, Item, Job, Progress, Resolver, Step, TransferEvent};
+use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, Item, Job, Planned, Progress, Resolver, Step, TransferEvent};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
@@ -38,12 +42,15 @@ pub struct Menu {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Action {
+    Open,
+    OpenWith,
     CopyToTarget,
     Rename,
     Delete,
     Refresh,
     NewFolder,
     ToggleHidden,
+    EditPermissions,
     SelectAll,
     Close,
 }
@@ -52,11 +59,14 @@ pub enum Dialog {
     Rename { side: Side, from: String, input: String },
     NewFolder { side: Side, input: String },
     Delete { side: Side, items: Vec<Entry> },
+    Permissions { side: Side, entry: Entry, mode: u32 },
     /// "File already exists" for the front of `SftpState::resolving`.
     Conflict,
     TransferError(TransferId),
     Transfers,
     Error(String),
+    /// Disconnecting would lose saved but not uploaded copies.
+    EditingInProgress,
 }
 
 /// A copy waiting for answers about name clashes.
@@ -76,6 +86,16 @@ pub struct TransferRow {
     direction: Direction,
     progress: Progress,
     failure: Option<String>,
+    after: After,
+}
+
+/// What happens when a transfer ends, besides refreshing the destination.
+enum After {
+    Nothing,
+    /// A remote file downloaded for Open: start the app.
+    Open { edit: EditId, app: Option<PathBuf> },
+    /// An edited copy went back to the server.
+    Uploaded(EditId),
 }
 
 /// What a row drag carries: the row under the pointer and its panel.
@@ -127,7 +147,27 @@ impl SftpState {
             TransferEvent::Failed { error, .. } => row.failure = Some(error),
             TransferEvent::Finished | TransferEvent::Cancelled => {
                 let destination = if row.direction == Direction::Upload { Side::Remote } else { Side::Local };
+                let finished = event == TransferEvent::Finished;
+                let after = std::mem::replace(&mut row.after, After::Nothing);
                 self.actions.transfers.retain(|r| r.id != id);
+                match after {
+                    After::Nothing => {}
+                    After::Open { edit, app } if finished => {
+                        self.actions.edits.downloaded(edit);
+                        let app = app.or_else(|| self.actions.edits.get(edit).and_then(|f| self.actions.associations.app_for(&f.name()).map(PathBuf::from)));
+                        if let Some(file) = self.actions.edits.get(edit) {
+                            if let Err(error) = open_path(&file.local_path, app.as_deref()) {
+                                self.actions.dialog = Some(Dialog::Error(error));
+                            }
+                        }
+                    }
+                    After::Open { edit, .. } => self.actions.edits.discard(edit),
+                    After::Uploaded(edit) => {
+                        if finished {
+                            self.actions.edits.uploaded(edit);
+                        }
+                    }
+                }
                 if let Some(remote) = &mut self.remote {
                     remote.connection.finished(id);
                 }
@@ -150,12 +190,33 @@ impl SftpState {
 }
 
 /// State of the actions; part of `SftpState`.
-#[derive(Default)]
 pub struct Actions {
     pub menu: Option<Menu>,
     pub dialog: Option<Dialog>,
     pub resolving: VecDeque<Resolving>,
     pub transfers: Vec<TransferRow>,
+    /// Remote files opened in local apps.
+    pub edits: Edits,
+    associations: Associations,
+    /// The loop that looks for saved copies is running.
+    watching: bool,
+    /// The changed-files list is expanded.
+    edits_open: bool,
+}
+
+impl Default for Actions {
+    fn default() -> Self {
+        Self {
+            menu: None,
+            dialog: None,
+            resolving: VecDeque::new(),
+            transfers: Vec::new(),
+            edits: Edits::in_temp_dir(),
+            associations: Associations::load_default(),
+            watching: false,
+            edits_open: false,
+        }
+    }
 }
 
 impl Shell {
@@ -174,20 +235,41 @@ impl Shell {
         let hidden = if panel.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" };
         // (action, title, red, disabled) in the legacy order.
         let mut items = vec![
+            (Action::Open, "Open", false, selected == 0),
+            (Action::OpenWith, "Open with...", false, selected == 0),
             (Action::CopyToTarget, "Copy to target directory", false, !can_copy),
             (Action::Rename, "Rename", false, selected != 1),
             (Action::Delete, "Delete", true, selected == 0),
             (Action::Refresh, "Refresh", false, false),
             (Action::NewFolder, "New Folder", false, false),
             (Action::ToggleHidden, hidden, false, false),
+            (Action::EditPermissions, "Edit Permissions", false, selected != 1),
             (Action::SelectAll, "Select All", false, false),
         ];
+        // Open works on one file: with folders or several rows it is not offered.
+        if selected > 1 || panel.selected_entries().iter().any(|e| e.is_dir) {
+            items.retain(|(action, ..)| !matches!(action, Action::Open | Action::OpenWith));
+        }
+        // Windows has no Unix permission bits, as in the legacy local panel.
+        if cfg!(windows) && side == Side::Local {
+            items.retain(|(action, ..)| *action != Action::EditPermissions);
+        }
         if side == Side::Remote {
             items.push((Action::Close, "Close", true, false));
         }
         if kind == MenuKind::Context {
             items.retain(|(action, ..)| {
-                matches!(action, Action::CopyToTarget | Action::Rename | Action::Delete | Action::Refresh | Action::NewFolder)
+                matches!(
+                    action,
+                    Action::Open
+                        | Action::OpenWith
+                        | Action::CopyToTarget
+                        | Action::Rename
+                        | Action::Delete
+                        | Action::Refresh
+                        | Action::NewFolder
+                        | Action::EditPermissions
+                )
             });
         }
         items
@@ -203,6 +285,16 @@ impl Shell {
         let Some(panel) = self.sftp.panel_mut(side) else { return };
         let (selected, first, show_hidden) = (panel.selected_entries(), panel.selected.first().cloned(), panel.show_hidden);
         match action {
+            Action::Open => {
+                if let Some(entry) = selected.into_iter().next() {
+                    self.open_entry(side, &entry, None, window, cx);
+                }
+            }
+            Action::OpenWith => {
+                if let Some(entry) = selected.into_iter().next() {
+                    self.open_entry_with(side, entry, window, cx);
+                }
+            }
             Action::CopyToTarget => self.start_copy(side, selected, window, cx),
             Action::Rename => {
                 if let Some(from) = first {
@@ -222,10 +314,130 @@ impl Shell {
                     remote.show_hidden = !show_hidden;
                 }
             }
+            Action::EditPermissions => {
+                if let Some(entry) = selected.into_iter().next() {
+                    let mode = entry.mode.unwrap_or(0);
+                    self.open_dialog(Dialog::Permissions { side, entry, mode }, window);
+                }
+            }
             Action::SelectAll => panel.select_all(),
-            Action::Close => self.disconnect_sftp(),
+            Action::Close => self.request_disconnect(window),
         }
         cx.notify();
+    }
+
+    /// Disconnects, first asking when saved copies were not uploaded yet.
+    pub fn request_disconnect(&mut self, window: &mut Window) {
+        if self.sftp.actions.edits.changed().is_empty() {
+            self.disconnect_sftp();
+        } else {
+            self.open_dialog(Dialog::EditingInProgress, window);
+        }
+    }
+
+    /// Open: a local file in its app; a remote one after a download to a temporary copy.
+    pub fn open_entry(&mut self, side: Side, entry: &Entry, app: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dir) = self.panel_dir(side) else { return };
+        let app = app.or_else(|| self.sftp.actions.associations.app_for(&entry.name).map(PathBuf::from));
+        match side {
+            Side::Local => {
+                if let Err(error) = open_path(Path::new(&join(&dir, &entry.name)), app.as_deref()) {
+                    self.open_dialog(Dialog::Error(error), window);
+                }
+            }
+            Side::Remote => {
+                let file = match self.sftp.actions.edits.prepare(&join(&dir, &entry.name)) {
+                    Ok(file) => file.clone(),
+                    Err(error) => return self.open_dialog(Dialog::Error(error), window),
+                };
+                let Some(remote) = &mut self.sftp.remote else { return };
+                let item = Item { name: entry.name.clone(), is_dir: false };
+                let planned = Planned { target: entry.name.clone(), item, replace: false };
+                let job = Job { direction: Direction::Download, source_dir: dir, destination_dir: file.local_dir(), planned };
+                let id = remote.connection.transfer(job);
+                self.sftp.actions.transfers.push(TransferRow {
+                    id,
+                    label: entry.name.clone(),
+                    is_dir: false,
+                    direction: Direction::Download,
+                    progress: Progress::default(),
+                    failure: None,
+                    after: After::Open { edit: file.id, app },
+                });
+                self.watch_edits(cx);
+            }
+        }
+    }
+
+    /// Open with…: asks for an app, remembers it for the extension, then opens.
+    fn open_entry_with(&mut self, side: Side, entry: Entry, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose application".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = answer.await else { return };
+            let Some(app) = paths.into_iter().next() else { return };
+            let _ = this.update_in(cx, |shell, window, cx| {
+                if let Err(error) = shell.sftp.actions.associations.remember(&entry.name, app.clone()) {
+                    shell.open_dialog(Dialog::Error(error), window);
+                }
+                shell.open_entry(side, &entry, Some(app), window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Looks for saved copies once a second while any are open.
+    fn watch_edits(&mut self, cx: &mut Context<Self>) {
+        if self.sftp.actions.watching {
+            return;
+        }
+        self.sftp.actions.watching = true;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            let running = this.update(cx, |shell, cx| {
+                let edits = &mut shell.sftp.actions.edits;
+                if edits.poll() {
+                    cx.notify();
+                }
+                if edits.is_empty() && shell.sftp.actions.transfers.is_empty() {
+                    shell.sftp.actions.watching = false;
+                }
+                shell.sftp.actions.watching
+            });
+            if !matches!(running, Ok(true)) {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// UPLOAD: sends a saved copy back over the remote file.
+    fn upload_edit(&mut self, edit: EditId) {
+        let (Some(file), Some(remote)) = (self.sftp.actions.edits.get(edit).cloned(), &mut self.sftp.remote) else { return };
+        let Some(destination_dir) = parent(&file.remote_path) else { return };
+        let name = file.name();
+        let item = Item { name: name.clone(), is_dir: false };
+        let job = Job {
+            direction: Direction::Upload,
+            source_dir: file.local_dir(),
+            destination_dir,
+            planned: Planned { target: name.clone(), item, replace: false },
+        };
+        let id = remote.connection.transfer(job);
+        self.sftp.actions.transfers.push(TransferRow {
+            id,
+            label: name,
+            is_dir: false,
+            direction: Direction::Upload,
+            progress: Progress::default(),
+            failure: None,
+            after: After::Uploaded(edit),
+        });
     }
 
     fn open_dialog(&mut self, dialog: Dialog, window: &mut Window) {
@@ -287,6 +499,14 @@ impl Shell {
                     panel.clear_selection();
                 }
                 self.operate(side, operations, cx);
+            }
+            Dialog::Permissions { side, entry, mode } => {
+                let Some(dir) = self.panel_dir(side) else { return };
+                self.operate(side, vec![Operation::Chmod { path: join(&dir, &entry.name), mode }], cx);
+            }
+            Dialog::EditingInProgress => {
+                self.sftp.actions.edits.discard_all();
+                self.disconnect_sftp();
             }
             // These dialogs have no default button: Enter leaves them open.
             dialog @ (Dialog::Conflict | Dialog::TransferError(_)) => self.sftp.actions.dialog = Some(dialog),
@@ -357,7 +577,15 @@ impl Shell {
                         let is_dir = planned.item.is_dir;
                         let job = Job { direction: copy.direction, source_dir: copy.source_dir.clone(), destination_dir: copy.destination_dir.clone(), planned };
                         let id = remote.connection.transfer(job);
-                        self.sftp.actions.transfers.push(TransferRow { id, label, is_dir, direction: copy.direction, progress: Progress::default(), failure: None });
+                        self.sftp.actions.transfers.push(TransferRow {
+                            id,
+                            label,
+                            is_dir,
+                            direction: copy.direction,
+                            progress: Progress::default(),
+                            failure: None,
+                            after: After::Nothing,
+                        });
                     }
                 }
             }
@@ -569,6 +797,7 @@ impl Shell {
                     confirm("dialog-confirm", "Delete", Kind::Error, false).into_any_element(),
                 ])
             }
+            Dialog::Permissions { side, entry, mode } => self.render_permissions(*side, entry, *mode, close, cx),
             Dialog::Conflict => self.render_conflict(close, cx),
             Dialog::TransferError(id) => {
                 let id = *id;
@@ -604,7 +833,63 @@ impl Shell {
                 ])
             }
             Dialog::Error(error) => dialog::card("Error", false, close, dialog::text(error), Vec::new()),
+            Dialog::EditingInProgress => {
+                let count = self.sftp.actions.edits.changed().len();
+                let files = if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
+                let host = self.sftp.remote.as_ref().map(|r| r.label.clone()).unwrap_or_default();
+                let text = format!(
+                    "There {} currently {files} being edited on {host}. Do you want to discard {} and connect to a different server?",
+                    if count == 1 { "is" } else { "are" },
+                    if count == 1 { "the file" } else { "all files" },
+                );
+                dialog::card("File editing is in progress", false, close, dialog::text(&text), vec![
+                    confirm("dialog-confirm", &format!("Discard {files}"), Kind::Error, false).into_any_element(),
+                ])
+            }
         }
+    }
+
+    /// Legacy "Edit permissions": path, the read/write/execute grid and ownership.
+    fn render_permissions(&self, side: Side, entry: &Entry, mode: u32, close: Stateful<Div>, cx: &mut Context<Self>) -> Div {
+        let path = self.panel_dir(side).map(|dir| join(&dir, &entry.name)).unwrap_or_default();
+        let row = || div().w_full().flex().items_center().py(px(11.)).border_b_1().border_color(rgb(theme::SURFACE_ACTIVE));
+        let name = |text: &str, bold: bool| {
+            div()
+                .w(gpui::relative(0.34))
+                .when(bold, |d| d.font_weight(FontWeight::BOLD))
+                .when(!bold, |d| d.text_color(rgb(theme::TEXT_MUTED)))
+                .child(text.to_owned())
+        };
+        let column = || div().w(gpui::relative(0.22)).flex().justify_end();
+        let mut grid = div().mb(px(20.)).flex().flex_col().child(
+            row()
+                .pt_0()
+                .child(name("File Access", true))
+                .children(["Read", "Write", "Execute"].map(|title| column().font_weight(FontWeight::BOLD).child(title))),
+        );
+        for (who, bits) in ["Owner", "Groups", "Others"].into_iter().zip(PERMISSION_BITS) {
+            grid = grid.child(row().when(who == "Others", |d| d.border_b_0()).child(name(who, false)).children(bits.map(|bit| {
+                column().child(dialog::checkbox(&format!("perm-{bit:o}"), "", mode & bit != 0).on_click(cx.listener(move |shell, _, _, cx| {
+                    if let Some(Dialog::Permissions { mode, .. }) = &mut shell.sftp.actions.dialog {
+                        *mode ^= bit;
+                    }
+                    cx.notify();
+                })))
+            })));
+        }
+        let (user, group) = entry.owner.clone().unwrap_or_default();
+        let ownership = div()
+            .flex()
+            .flex_col()
+            .child(row().pt_0().font_weight(FontWeight::BOLD).child("Ownership"))
+            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child("User").child(user))
+            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child("Group").child(group));
+        let body = div().flex().flex_col().child(div().mb(px(20.)).child(path)).child(grid).child(ownership);
+        dialog::card("Edit permissions", false, close, body, vec![
+            dialog::button("dialog-confirm", "Save", Kind::Accent, false)
+                .on_click(cx.listener(|shell, _, window, cx| shell.confirm_dialog(window, cx)))
+                .into_any_element(),
+        ])
     }
 
     fn render_conflict(&self, close: Stateful<Div>, cx: &mut Context<Self>) -> Div {
@@ -708,9 +993,9 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(div().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(row.label.clone()))
+                    .child(div().flex_none().max_w(gpui::relative(0.5)).truncate().text_color(rgb(theme::TEXT)).child(row.label.clone()))
                     .when(row.failure.is_none(), |d| {
-                        d.child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(row.progress.summary(row.is_dir)))
+                        d.child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT_MUTED)).child(row.progress.summary(row.is_dir)))
                     }),
             )
             .child(end)
@@ -718,6 +1003,89 @@ impl Shell {
                 shell.control_transfer(id, Control::Cancel);
                 cx.notify();
             })))
+    }
+
+    /// Saved copies of opened remote files, with UPLOAD and Discard.
+    pub fn render_edits_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let changed = self.sftp.actions.edits.changed();
+        if changed.is_empty() {
+            return None;
+        }
+        let link = |id: String, label: &str, accent: bool| {
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .text_xs()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(rgb(if accent { theme::ACCENT } else { theme::TEXT }))
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .child(label.to_owned())
+        };
+        let row = |file: &Edited| {
+            let id = file.id;
+            div()
+                .h(px(40.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .bg(rgb(theme::DIALOG_ROW))
+                .text_xs()
+                .child(svg().path(icon("file")).size(px(18.)).flex_none().text_color(rgb(theme::TEXT)))
+                .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(file.name()))
+                .child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(format_size(file.size())))
+                .child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(file.modified().map(format_time).unwrap_or_default()))
+                .child(link(format!("edit-upload-{id}"), "UPLOAD", true).on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.upload_edit(id);
+                    cx.notify();
+                })))
+                .child(link(format!("edit-discard-{id}"), "Discard", false).on_click(cx.listener(move |shell, _, _, cx| {
+                    shell.sftp.actions.edits.discard(id);
+                    cx.notify();
+                })))
+        };
+        let bar = div().flex_none().p(px(10.)).flex().flex_col().gap(px(6.)).bg(rgb(theme::SURFACE)).border_t_1().border_color(rgb(theme::TITLE_BAR));
+        if let [file] = changed.as_slice() {
+            return Some(bar.child(row(file)));
+        }
+        let ids: Vec<EditId> = changed.iter().map(|f| f.id).collect();
+        let open = self.sftp.actions.edits_open;
+        let header = div()
+            .flex()
+            .items_center()
+            .text_xs()
+            .text_color(rgb(theme::TEXT))
+            .child(div().flex_1().child(format!("{} opened files were changed", changed.len())))
+            .child(link("edits-upload-all".into(), "UPLOAD ALL", true).on_click(cx.listener(move |shell, _, _, cx| {
+                for id in &ids {
+                    shell.upload_edit(*id);
+                }
+                cx.notify();
+            })))
+            .child(link("edits-discard-all".into(), "DISCARD ALL", false).on_click(cx.listener(|shell, _, _, cx| {
+                for id in shell.sftp.actions.edits.changed().iter().map(|f| f.id).collect::<Vec<_>>() {
+                    shell.sftp.actions.edits.discard(id);
+                }
+                cx.notify();
+            })))
+            .child(
+                div()
+                    .id("edits-toggle")
+                    .px_2()
+                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| {
+                        s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
+                    }))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.sftp.actions.edits_open = !shell.sftp.actions.edits_open;
+                        cx.notify();
+                    })),
+            );
+        Some(bar.child(header).when(open, |d| {
+            d.child(div().id("edits-list").max_h(px(240.)).overflow_y_scroll().flex().flex_col().gap(px(6.)).children(changed.into_iter().map(row)))
+        }))
     }
 
     /// The bar under both panels: newest transfer and the way to see all.

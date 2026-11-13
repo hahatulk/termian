@@ -11,8 +11,10 @@ pub struct Entry {
     pub size: u64,
     /// Seconds since the Unix epoch.
     pub modified: Option<i64>,
-    /// Unix mode bits, when the side reports them.
+    /// Permission bits (with setuid, setgid and sticky), when the side reports them.
     pub mode: Option<u32>,
+    /// Owning user and group names, for Edit Permissions.
+    pub owner: Option<(String, String)>,
 }
 
 impl Entry {
@@ -314,9 +316,16 @@ pub fn list_local(path: &str) -> Result<Vec<Entry>, String> {
             let link = item.file_type().ok()?.is_symlink();
             let meta = std::fs::metadata(item.path()).or_else(|_| item.metadata()).ok()?;
             #[cfg(unix)]
-            let mode = Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777);
+            let mode = Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777);
             #[cfg(not(unix))]
             let mode = None;
+            #[cfg(unix)]
+            let owner = {
+                use std::os::unix::fs::MetadataExt;
+                Some((user_name(meta.uid()), group_name(meta.gid())))
+            };
+            #[cfg(not(unix))]
+            let owner = None;
             Some(Entry {
                 name: item.file_name().to_string_lossy().into_owned(),
                 is_dir: meta.is_dir(),
@@ -328,17 +337,59 @@ pub fn list_local(path: &str) -> Result<Vec<Entry>, String> {
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map(|d| d.as_secs() as i64),
                 mode,
+                owner,
             })
         })
         .collect())
 }
+
+/// User name for a uid, or the number when it has none.
+#[cfg(unix)]
+pub fn user_name(uid: u32) -> String {
+    let mut buffer = vec![0 as libc::c_char; 1024];
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut found = std::ptr::null_mut();
+    // SAFETY: the buffers outlive the call; the result only points into them.
+    let status = unsafe { libc::getpwuid_r(uid, &mut entry, buffer.as_mut_ptr(), buffer.len(), &mut found) };
+    if status == 0 && !found.is_null() {
+        // SAFETY: getpwuid_r succeeded, so pw_name is a NUL-terminated string in `buffer`.
+        return unsafe { std::ffi::CStr::from_ptr(entry.pw_name) }.to_string_lossy().into_owned();
+    }
+    uid.to_string()
+}
+
+/// Group name for a gid, or the number when it has none.
+#[cfg(unix)]
+pub fn group_name(gid: u32) -> String {
+    let mut buffer = vec![0 as libc::c_char; 1024];
+    let mut entry: libc::group = unsafe { std::mem::zeroed() };
+    let mut found = std::ptr::null_mut();
+    // SAFETY: as in `user_name`.
+    let status = unsafe { libc::getgrgid_r(gid, &mut entry, buffer.as_mut_ptr(), buffer.len(), &mut found) };
+    if status == 0 && !found.is_null() {
+        // SAFETY: getgrgid_r succeeded, so gr_name is a NUL-terminated string in `buffer`.
+        return unsafe { std::ffi::CStr::from_ptr(entry.gr_name) }.to_string_lossy().into_owned();
+    }
+    gid.to_string()
+}
+
+/// User and group from an `ls -l` style SFTP long name:
+/// `-rw-r--r--    1 root     staff    5 Nov 13 04:57 notes.txt`.
+pub fn parse_owner(longname: &str) -> Option<(String, String)> {
+    let mut fields = longname.split_whitespace();
+    let (_, _, user, group) = (fields.next()?, fields.next()?, fields.next()?, fields.next()?);
+    Some((user.to_owned(), group.to_owned()))
+}
+
+/// Read, write and execute for owner, group and others: the Edit Permissions grid.
+pub const PERMISSION_BITS: [[u32; 3]; 3] = [[0o400, 0o200, 0o100], [0o040, 0o020, 0o010], [0o004, 0o002, 0o001]];
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn entry(name: &str, is_dir: bool, size: u64, modified: i64) -> Entry {
-        Entry { name: name.into(), is_dir, is_link: false, size, modified: Some(modified), mode: None }
+        Entry { name: name.into(), is_dir, is_link: false, size, modified: Some(modified), mode: None, owner: None }
     }
 
     fn names(panel: &Panel) -> Vec<&str> {
@@ -433,6 +484,24 @@ mod tests {
         assert_eq!(delete_title(&[file.clone(), file.clone()]), "Do you want to delete these files?");
         assert_eq!(delete_title(&[dir.clone(), dir.clone()]), "Do you want to delete these folders?");
         assert_eq!(delete_title(&[dir, file]), "Do you want to delete these items?");
+    }
+
+    #[test]
+    fn owner_comes_from_the_long_name() {
+        let line = "-rw-r--r--    1 root     staff           5 Nov 13 04:57 notes.txt";
+        assert_eq!(parse_owner(line), Some(("root".into(), "staff".into())));
+        assert_eq!(parse_owner(""), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_entries_name_their_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), b"x").unwrap();
+        let entries = list_local(dir.path().to_str().unwrap()).unwrap();
+        let (user, _) = entries[0].owner.clone().unwrap();
+        assert_eq!(user, user_name(unsafe { libc::getuid() }));
+        assert!(!user.chars().all(|c| c.is_ascii_digit()), "a real user has a name: {user}");
     }
 
     #[test]

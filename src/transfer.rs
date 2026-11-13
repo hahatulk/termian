@@ -277,16 +277,16 @@ impl Fs {
     async fn size(&self, path: &str) -> Result<(u64, Option<u32>), String> {
         match self {
             Fs::Local => {
-                let meta = tokio::fs::metadata(path).await.map_err(|e| at(&path, e))?;
+                let meta = tokio::fs::metadata(path).await.map_err(|e| at(path, e))?;
                 #[cfg(unix)]
-                let mode = Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o777);
+                let mode = Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777);
                 #[cfg(not(unix))]
                 let mode = None;
                 Ok((meta.len(), mode))
             }
             Fs::Remote(sftp) => {
-                let meta = sftp.metadata(path).await.map_err(|e| at(&path, e))?;
-                Ok((meta.size.unwrap_or(0), meta.permissions.map(|p| p & 0o777)))
+                let meta = sftp.metadata(path).await.map_err(|e| at(path, e))?;
+                Ok((meta.size.unwrap_or(0), meta.permissions.map(|p| p & 0o7777)))
             }
         }
     }
@@ -300,16 +300,16 @@ impl Fs {
 
     async fn open(&self, path: &str) -> Result<Reader, String> {
         match self {
-            Fs::Local => Ok(Box::new(tokio::fs::File::open(path).await.map_err(|e| at(&path, e))?)),
-            Fs::Remote(sftp) => Ok(Box::new(sftp.open(path).await.map_err(|e| at(&path, e))?)),
+            Fs::Local => Ok(Box::new(tokio::fs::File::open(path).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp) => Ok(Box::new(sftp.open(path).await.map_err(|e| at(path, e))?)),
         }
     }
 
     /// Creates or truncates a file.
     async fn create(&self, path: &str) -> Result<Writer, String> {
         match self {
-            Fs::Local => Ok(Box::new(tokio::fs::File::create(path).await.map_err(|e| at(&path, e))?)),
-            Fs::Remote(sftp) => Ok(Box::new(sftp.create(path).await.map_err(|e| at(&path, e))?)),
+            Fs::Local => Ok(Box::new(tokio::fs::File::create(path).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp) => Ok(Box::new(sftp.create(path).await.map_err(|e| at(path, e))?)),
         }
     }
 
@@ -335,7 +335,7 @@ impl Fs {
         };
         match created {
             Err(_) if self.is_dir(path).await => Ok(()),
-            other => other.map_err(|e| at(&path, e)),
+            other => other.map_err(|e| at(path, e)),
         }
     }
 
@@ -350,9 +350,9 @@ impl Fs {
     pub(crate) async fn remove(&self, path: &str, is_dir: bool) -> Result<(), String> {
         match self {
             Fs::Local => {
-                let meta = tokio::fs::symlink_metadata(path).await.map_err(|e| at(&path, e))?;
+                let meta = tokio::fs::symlink_metadata(path).await.map_err(|e| at(path, e))?;
                 let removed = if meta.is_dir() { tokio::fs::remove_dir_all(path).await } else { tokio::fs::remove_file(path).await };
-                removed.map_err(|e| at(&path, e))
+                removed.map_err(|e| at(path, e))
             }
             Fs::Remote(sftp) => {
                 let link = sftp.symlink_metadata(path).await.is_ok_and(|m| m.is_symlink());
@@ -376,16 +376,28 @@ impl Fs {
                     }
                     Ok(())
                 } else {
-                    sftp.remove_file(path).await.map_err(|e| at(&path, e))
+                    sftp.remove_file(path).await.map_err(|e| at(path, e))
                 }
+            }
+        }
+    }
+
+    pub(crate) async fn chmod(&self, path: &str, mode: u32) -> Result<(), String> {
+        match self {
+            #[cfg(unix)]
+            Fs::Local => tokio::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).await.map_err(|e| at(path, e)),
+            #[cfg(not(unix))]
+            Fs::Local => Err(at(path, "permissions are not supported here")),
+            Fs::Remote(sftp) => {
+                sftp.set_metadata(path, Metadata { permissions: Some(mode), ..Default::default() }).await.map_err(|e| at(path, e))
             }
         }
     }
 
     pub(crate) async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
         match self {
-            Fs::Local => tokio::fs::rename(from, to).await.map_err(|e| at(&from, e)),
-            Fs::Remote(sftp) => sftp.rename(from, to).await.map_err(|e| at(&from, e)),
+            Fs::Local => tokio::fs::rename(from, to).await.map_err(|e| at(from, e)),
+            Fs::Remote(sftp) => sftp.rename(from, to).await.map_err(|e| at(from, e)),
         }
     }
 }

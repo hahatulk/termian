@@ -28,3 +28,6 @@ futures = "0.3.34"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 russh-sftp = "3.0.1"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+

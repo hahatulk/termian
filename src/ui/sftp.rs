@@ -52,7 +52,7 @@ pub enum RemoteState {
 }
 
 pub struct Remote {
-    label: String,
+    pub label: String,
     os: Option<String>,
     target: SshTarget,
     pub connection: RemoteFs,
@@ -236,7 +236,13 @@ fn centered() -> Div {
 impl Shell {
     pub fn render_sftp(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let panels = self.render_panels(window, cx);
-        div().size_full().flex().flex_col().child(panels.flex_1().min_h_0()).children(self.render_transfer_bar(cx))
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .child(panels.flex_1().min_h_0())
+            .children(self.render_edits_bar(cx))
+            .children(self.render_transfer_bar(cx))
     }
 
     fn render_panels(&self, window: &Window, cx: &mut Context<Self>) -> Div {
@@ -531,8 +537,8 @@ impl Shell {
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(theme::TEXT))
                             .child("DISCONNECT")
-                            .on_click(cx.listener(|shell, _, _, cx| {
-                                shell.disconnect_sftp();
+                            .on_click(cx.listener(|shell, _, window, cx| {
+                                shell.request_disconnect(window);
                                 cx.notify();
                             })),
                     )
@@ -760,11 +766,16 @@ impl Shell {
             .child(cell(175., entry.map(Entry::modified_label).unwrap_or_default()))
             .child(cell(115., entry.map(Entry::size_label).unwrap_or_default()))
             .child(cell(115., entry.map(Entry::kind).unwrap_or_default()))
-            .on_click(cx.listener(move |shell, event: &ClickEvent, _, cx| {
+            .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
                 cx.stop_propagation();
                 let modifiers = event.modifiers();
+                let file = shell.sftp.panel(side).and_then(|p| p.entry(&target)).filter(|e| !e.is_dir).cloned();
                 if event.click_count() >= 2 {
-                    shell.sftp.open(side, &target);
+                    // Double click opens folders here and files in their app, as in the legacy panel.
+                    match file {
+                        Some(entry) => shell.open_entry(side, &entry, None, window, cx),
+                        None => shell.sftp.open(side, &target),
+                    }
                 } else if target != ".." {
                     if let Some(panel) = shell.sftp.panel_mut(side) {
                         // Cmd adds a row on macOS, Ctrl elsewhere; Shift selects a range.

@@ -6700,6 +6700,7 @@ dependencies = [
  "futures",
  "gpui",
  "keyring",
+ "libc",
  "portable-pty",
  "rusqlite",
  "russh",

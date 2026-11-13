@@ -576,7 +576,7 @@ pub(crate) mod tests {
         struct Echo {
             root: Option<std::path::PathBuf>,
             channel: Option<Channel<Msg>>,
-            sftp: Option<ChannelId>,
+            sftp: std::collections::HashSet<ChannelId>,
         }
 
         /// SFTP over a local directory: listings, file reads and writes,
@@ -750,7 +750,7 @@ pub(crate) mod tests {
                 match (name, self.root.clone(), self.channel.take()) {
                     ("sftp", Some(root), Some(stream)) => {
                         session.channel_success(channel)?;
-                        self.sftp = Some(channel);
+                        self.sftp.insert(channel);
                         let files = Files { root, listed: Default::default(), open: Default::default(), next: 0 };
                         tokio::spawn(russh_sftp::server::run(stream.into_stream(), files));
                     }
@@ -781,7 +781,7 @@ pub(crate) mod tests {
             }
 
             async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {
-                if self.sftp == Some(channel) {
+                if self.sftp.contains(&channel) {
                     return Ok(()); // the SFTP task reads this channel itself
                 }
                 session.data(channel, [b"echo:".as_slice(), data].concat())
@@ -811,7 +811,7 @@ pub(crate) mod tests {
                         ..Default::default()
                     });
                     let (socket, _) = listener.accept().await.unwrap();
-                    let running = server::run_stream(config, socket, Echo { root, channel: None, sftp: None }).await.unwrap();
+                    let running = server::run_stream(config, socket, Echo { root, channel: None, sftp: Default::default() }).await.unwrap();
                     let _ = running.await;
                 });
             });

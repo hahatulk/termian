@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::StreamExt;
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 use tokio::sync::Mutex;
 
-use crate::files::{join, Entry};
+use crate::files::{join, parse_owner, Entry};
 use crate::login::{Answer, LoginEvent, Stage};
 use crate::session::{connect, EventPrompter, Prompter, SshTarget};
 use crate::transfer::{self, Control, Direction, Fs, Job, TransferEvent};
@@ -35,6 +35,8 @@ pub enum Operation {
     Rename { from: String, to: String },
     Remove { path: String, is_dir: bool },
     MakeDir(String),
+    /// Edit Permissions: the new permission bits.
+    Chmod { path: String, mode: u32 },
 }
 
 enum Work {
@@ -147,6 +149,9 @@ async fn run(
     channel.request_subsystem(true, "sftp").await.map_err(|e| e.to_string())?;
     let sftp = SftpSession::new(channel.into_stream()).await.map_err(|e| format!("SFTP is not available: {e}"))?;
     let sftp = Arc::new(sftp);
+    // A second, raw session reads directory long names, the only place SFTP
+    // v3 names the owner and group. Listings work without it.
+    let raw = raw_session(&handle).await;
     let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
     let _ = events.unbounded_send(RemoteEvent::Connected { home });
@@ -154,7 +159,10 @@ async fn run(
     while let Some(item) = work.next().await {
         match item {
             Work::List(path) => {
-                let result = list(&sftp, &path).await;
+                let mut result = list(&sftp, &path).await;
+                if let (Ok(entries), Some(raw)) = (&mut result, &raw) {
+                    add_owners(raw, &path, entries).await;
+                }
                 if events.unbounded_send(RemoteEvent::Listed { path, result }).is_err() {
                     break;
                 }
@@ -194,9 +202,31 @@ pub(crate) async fn operate(fs: &Fs, operations: Vec<Operation>) -> Result<(), S
             Operation::Rename { from, to } => fs.rename(&from, &to).await?,
             Operation::Remove { path, is_dir } => fs.remove(&path, is_dir).await?,
             Operation::MakeDir(path) => fs.make_dir(&path).await?,
+            Operation::Chmod { path, mode } => fs.chmod(&path, mode).await?,
         }
     }
     Ok(())
+}
+
+async fn raw_session(handle: &russh::client::Handle<crate::session::Verifier>) -> Option<RawSftpSession> {
+    let channel = handle.channel_open_session().await.ok()?;
+    channel.request_subsystem(true, "sftp").await.ok()?;
+    let raw = RawSftpSession::new(channel.into_stream());
+    raw.init().await.ok()?;
+    Some(raw)
+}
+
+/// Fills `owner` from the long names of a raw directory read.
+async fn add_owners(raw: &RawSftpSession, path: &str, entries: &mut [Entry]) {
+    let Ok(dir) = raw.opendir(path).await else { return };
+    while let Ok(name) = raw.readdir(dir.handle.as_str()).await {
+        for file in name.files {
+            if let Some(entry) = entries.iter_mut().find(|e| e.name == file.filename) {
+                entry.owner = parse_owner(&file.longname);
+            }
+        }
+    }
+    let _ = raw.close(dir.handle).await;
 }
 
 pub(crate) async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>, String> {
@@ -217,7 +247,8 @@ pub(crate) async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>, S
             is_link,
             size: meta.size.unwrap_or(0),
             modified: meta.mtime.map(i64::from),
-            mode: meta.permissions.map(|p| p & 0o777),
+            mode: meta.permissions.map(|p| p & 0o7777),
+            owner: None,
         });
     }
     Ok(entries)
@@ -294,6 +325,7 @@ mod tests {
         assert_eq!(entries.iter().map(|e| (e.name.as_str(), e.is_dir)).collect::<Vec<_>>(), [("etc", true), ("notes.txt", false)]);
         assert_eq!(entries[1].size, 5);
         assert!(entries[1].modified.is_some() && entries[1].mode.is_some());
+        assert!(entries[1].owner.is_some(), "owner from the long name");
     }
 
     #[test]
@@ -461,8 +493,11 @@ mod tests {
             Operation::Rename { from: "/notes.txt".into(), to: "/todo.txt".into() },
             Operation::MakeDir("/new".into()),
             Operation::Remove { path: "/logs".into(), is_dir: true },
+            Operation::Chmod { path: "/todo.txt".into(), mode: 0o640 },
         ]);
         assert_eq!(next(&mut events), RemoteEvent::Changed(Ok(())));
+        #[cfg(unix)]
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(served.path().join("todo.txt")).unwrap().permissions()) & 0o777, 0o640);
         assert!(served.path().join("todo.txt").exists() && served.path().join("new").is_dir());
         assert!(!served.path().join("logs").exists());
 
