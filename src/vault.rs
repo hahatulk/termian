@@ -28,6 +28,9 @@ pub struct Host {
     /// Saved in the native vault only; never read from the legacy profile.
     #[serde(default)]
     pub password: Option<String>,
+    /// Key from the Keychain to log in with.
+    #[serde(default)]
+    pub key: Option<u64>,
 }
 
 impl Host {
@@ -60,12 +63,19 @@ impl Host {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SshKey {
     pub id: u64,
     pub label: String,
     /// Algorithm as shown on the card: `ED25519`, `ECDSA`, `RSA`.
     pub kind: String,
+    /// Saved in the native vault only; keys imported from legacy have none.
+    #[serde(default)]
+    pub private_key: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
+    #[serde(default)]
+    pub passphrase: Option<String>,
 }
 
 impl SshKey {
@@ -193,6 +203,28 @@ impl Vault {
         }
     }
 
+    pub fn key(&self, id: u64) -> Option<&SshKey> {
+        self.keys.iter().find(|k| k.id == id)
+    }
+
+    /// Adds the key, or replaces the one with the same id.
+    pub fn save_key(&mut self, key: SshKey) {
+        match self.keys.iter_mut().find(|k| k.id == key.id) {
+            Some(existing) => *existing = key,
+            None => self.keys.push(key),
+        }
+    }
+
+    /// Removes a key and unlinks it from hosts.
+    pub fn remove_key(&mut self, id: u64) {
+        self.keys.retain(|k| k.id != id);
+        for host in &mut self.hosts {
+            if host.key == Some(id) {
+                host.key = None;
+            }
+        }
+    }
+
     pub fn remove_host(&mut self, id: HostId) -> Option<Host> {
         let index = self.hosts.iter().position(|h| h.id == id)?;
         Some(self.hosts.remove(index))
@@ -244,6 +276,7 @@ pub(crate) mod tests {
             tags: vec![],
             port: None,
             password: None,
+            key: None,
         }
     }
 
@@ -368,6 +401,7 @@ pub fn demo() -> Vault {
         tags: tags.iter().map(|t| t.to_string()).collect(),
         port: None,
         password: None,
+        key: None,
     };
     Vault {
         groups: vec![
@@ -393,8 +427,8 @@ pub fn demo() -> Vault {
             host(22, "Beget VPN", "ubuntu", None, Some("hahatulk"), &[]),
         ],
         keys: vec![
-            SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into() },
-            SshKey { id: 2, label: "My".into(), kind: "ECDSA".into() },
+            SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into(), ..SshKey::default() },
+            SshKey { id: 2, label: "My".into(), kind: "ECDSA".into(), ..SshKey::default() },
         ],
         identities: vec![
             Identity { id: 1, label: "root".into(), has_password: false, has_key: true },

@@ -1,5 +1,5 @@
 //! Vaults sections other than Hosts: Keychain, Port Forwarding, Snippets,
-//! Known Hosts, Logs. Read-only for now.
+//! Known Hosts, Logs.
 
 use gpui::{div, prelude::*, px, rgb, svg, ClickEvent, Context, Div, SharedString, Stateful};
 use termian_native::theme;
@@ -60,12 +60,14 @@ fn empty_state(icon_name: &str, title: &str, text: &str) -> Div {
 }
 
 impl Shell {
-    pub fn render_keychain(&self) -> Div {
+    pub fn render_keychain(&self, cx: &mut Context<Self>) -> Div {
         let vault = &self.vault;
         let mut body = div();
         if !vault.keys.is_empty() {
             body = body.child(section_title("Keys")).child(grid().children(vault.keys.iter().map(|key| {
-                card(format!("key-{}", key.id).into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle())
+                let id = key.id;
+                card(format!("key-{id}").into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle())
+                    .on_click(cx.listener(move |shell, _, window, cx| shell.edit_key(id, window, cx)))
             })));
         }
         if !vault.identities.is_empty() {
@@ -81,7 +83,8 @@ impl Shell {
         if vault.keys.is_empty() && vault.identities.is_empty() {
             body = body.child(empty_state("keychain", "Add a key", "Keys and identities you save appear here."));
         }
-        page("keychain-scroll", vec![], body)
+        let add_key = tool_button("new-key", "keychain", "KEY").on_click(cx.listener(|shell, _, window, cx| shell.new_key(window, cx)));
+        page("keychain-scroll", vec![add_key], body)
     }
 
     pub fn render_port_forwarding(&self) -> Div {

@@ -83,6 +83,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             tags: host_tags.remove(id).unwrap_or_default(),
             port: link(v, "ssh_config").and_then(|config| config_ports.get(&config)).copied(),
             password: None,
+            key: None,
         })
         .collect();
 
@@ -94,6 +95,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             id: *id,
             label: text(v.get("label")).unwrap_or_default(),
             kind: key_kind(&text(v.get("public_key")).unwrap_or_default()),
+            ..SshKey::default()
         })
         .collect();
     let identities = store("ssh_identities")
@@ -291,7 +293,7 @@ mod tests {
 
         let vault = load_vault(root, &cipher()).unwrap();
 
-        assert_eq!(vault.keys, vec![SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into() }]);
+        assert_eq!(vault.keys, vec![SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into(), ..SshKey::default() }]);
         assert_eq!(vault.identities[0].subtitle(), "Auth password and key");
         assert_eq!((vault.identities[1].label.as_str(), vault.identities[1].subtitle()), ("root", "Auth key"));
         assert_eq!(vault.snippets[0].subtitle(), Some("kubectl get pods"));

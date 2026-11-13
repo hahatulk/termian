@@ -39,6 +39,7 @@ pub struct HostEditor {
     tag: String,
     port: String,
     groups_open: bool,
+    keys_open: bool,
     menu_open: bool,
     /// "Remove a host" is showing.
     confirm_remove: bool,
@@ -143,6 +144,7 @@ impl Shell {
             tags: Vec::new(),
             port: None,
             password: None,
+            key: None,
         };
         self.open_editor(host, true, window, cx);
     }
@@ -164,6 +166,7 @@ impl Shell {
             tag: String::new(),
             port,
             groups_open: false,
+            keys_open: false,
             menu_open: false,
             confirm_remove: false,
         });
@@ -511,7 +514,8 @@ impl Shell {
                     .child("port"),
             )
             .child(self.input(Field::Username, "Username", host.username.as_deref().unwrap_or(""), false, window, cx))
-            .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx));
+            .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx))
+            .child(self.render_key_picker(cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(
@@ -584,6 +588,50 @@ impl Shell {
             Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
             None => slider,
         })
+    }
+
+    /// "Key" under the password: one of the Keychain keys, or none.
+    fn render_key_picker(&self, cx: &mut Context<Self>) -> Div {
+        let Some(editor) = &self.host_editor else { return div() };
+        let chosen = editor.host.key.and_then(|k| self.vault.key(k));
+        let label = chosen.map(|k| format!("{} ({})", k.label, k.kind));
+        let picker = div()
+            .id("editor-key")
+            .child(
+                field_box(editor.keys_open)
+                    .child(svg().path(icon("keychain")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+                    .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Key".into())))
+                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+            )
+            .on_click(cx.listener(|shell, _, _, cx| {
+                if let Some(editor) = &mut shell.host_editor {
+                    editor.keys_open = !editor.keys_open;
+                }
+                cx.notify();
+            }));
+        let list = editor.keys_open.then(|| {
+            let choice = |id: Option<u64>, label: String, usable: bool, cx: &mut Context<Self>| {
+                menu_row(format!("editor-key-{id:?}"), &label, false, !usable).when(usable, |d| {
+                    d.on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.host.key = id;
+                            editor.keys_open = false;
+                        }
+                        shell.autosave();
+                        cx.notify();
+                    }))
+                })
+            };
+            let mut list = div().id("editor-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).child(choice(None, "No key".into(), true, cx));
+            for key in &self.vault.keys {
+                // Keys read from the legacy profile carry no private key and cannot be used yet.
+                let usable = key.private_key.is_some();
+                let note = if usable { String::new() } else { " — not available in this client".into() };
+                list = list.child(choice(Some(key.id), format!("{} ({}){note}", key.label, key.kind), usable, cx));
+            }
+            list
+        });
+        div().flex().flex_col().gap(px(10.)).child(picker).children(list)
     }
 
     pub fn open_host_menu(&mut self, host: HostId, event: &MouseDownEvent, cx: &mut Context<Self>) {

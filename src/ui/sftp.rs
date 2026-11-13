@@ -273,7 +273,7 @@ impl Shell {
 
     pub(crate) fn connect_sftp(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::for_host(entry);
+        let target = SshTarget::for_host(entry, entry.key.and_then(|k| self.vault.key(k)));
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.connect_sftp_target(label, os, target, window, cx);
     }

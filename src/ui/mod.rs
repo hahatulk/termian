@@ -2,6 +2,7 @@ pub mod assets;
 pub mod dialog;
 pub mod host_editor;
 pub mod hosts;
+pub mod key_editor;
 pub mod login_view;
 pub mod sections;
 pub mod sftp;

@@ -114,13 +114,17 @@ impl Shell {
     pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let content = match self.section {
             Section::Hosts => self.render_hosts(window, cx).into_any_element(),
-            Section::Keychain => self.render_keychain().into_any_element(),
+            Section::Keychain => self.render_keychain(cx).into_any_element(),
             Section::PortForwarding => self.render_port_forwarding().into_any_element(),
             Section::Snippets => self.render_snippets(cx).into_any_element(),
             Section::KnownHosts => self.render_known_hosts().into_any_element(),
             Section::Logs => self.render_logs().into_any_element(),
         };
-        let editor = if self.section == Section::Hosts { self.render_host_editor(window, cx) } else { None };
+        let editor = match self.section {
+            Section::Hosts => self.render_host_editor(window, cx),
+            Section::Keychain => self.render_key_editor(window, cx),
+            _ => None,
+        };
         div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).into_any_element()
     }
 

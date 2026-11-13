@@ -2,6 +2,7 @@
 
 pub mod edits;
 pub mod files;
+pub mod keys;
 pub mod legacy;
 pub mod login;
 pub mod remote_fs;

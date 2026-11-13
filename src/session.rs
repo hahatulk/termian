@@ -146,6 +146,8 @@ pub struct SshTarget {
     pub identity_files: Vec<PathBuf>,
     /// Saved password, tried once before asking.
     pub password: Option<String>,
+    /// Private key from the Keychain (and its passphrase), offered first.
+    pub key: Option<(String, Option<String>)>,
 }
 
 impl SshTarget {
@@ -163,14 +165,19 @@ impl SshTarget {
             known_hosts: dirs::data_dir().unwrap_or_default().join("termian-native").join("known_hosts"),
             identity_files: ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|f| home.join(".ssh").join(f)).collect(),
             password: None,
+            key: None,
         }
     }
 }
 
 impl SshTarget {
     /// A saved host: its address and port, user and saved password.
-    pub fn for_host(host: &crate::vault::Host) -> Self {
-        Self { password: host.password.clone(), ..Self::new(&host.destination(), host.username.clone()) }
+    pub fn for_host(host: &crate::vault::Host, key: Option<&crate::vault::SshKey>) -> Self {
+        Self {
+            password: host.password.clone(),
+            key: key.and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone()))),
+            ..Self::new(&host.destination(), host.username.clone())
+        }
     }
 }
 
@@ -405,6 +412,24 @@ async fn authenticate(
     let failed = |e: russh::Error| e.to_string();
     if handle.authenticate_none(user).await.map_err(failed)?.success() {
         return Ok(());
+    }
+    if let Some((private_key, passphrase)) = &target.key {
+        io.lock().await.log("Offering the key from the Keychain".into());
+        let key = match crate::keys::decode(private_key, passphrase.as_deref()) {
+            Ok(key) => Some(key),
+            Err(crate::keys::KeyCheck::NeedsPassphrase) => {
+                let typed = io.lock().await.ask("Passphrase for the Keychain key", false).await;
+                typed.and_then(|p| crate::keys::decode(private_key, Some(&p)).ok())
+            }
+            Err(_) => None,
+        };
+        if let Some(key) = key {
+            let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
+            if handle.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(failed)?.success() {
+                io.lock().await.log("Authenticated with the Keychain key".into());
+                return Ok(());
+            }
+        }
     }
     for path in target.identity_files.iter().filter(|p| p.is_file()) {
         io.lock().await.log(format!("Offering public key {}", path.display()));
@@ -747,6 +772,11 @@ pub(crate) mod tests {
                 Ok(if user == "root" && password == PASSWORD { Auth::Accept } else { Auth::reject() })
             }
 
+            async fn auth_publickey(&mut self, user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
+                let accepted = key.public_key.to_openssh().is_ok_and(|k| k.starts_with(crate::keys::tests::PLAIN_PUBLIC));
+                Ok(if user == "root" && accepted { Auth::Accept } else { Auth::reject() })
+            }
+
             async fn channel_open_session(
                 &mut self,
                 channel: Channel<Msg>,
@@ -836,6 +866,10 @@ pub(crate) mod tests {
         }
     }
 
+    fn target_for(port: u16, known_hosts: PathBuf) -> SshTarget {
+        target(port, known_hosts)
+    }
+
     fn target(port: u16, known_hosts: PathBuf) -> SshTarget {
         SshTarget {
             host: "127.0.0.1".into(),
@@ -844,6 +878,7 @@ pub(crate) mod tests {
             known_hosts,
             identity_files: vec![],
             password: None,
+            key: None,
         }
     }
 
@@ -857,6 +892,29 @@ pub(crate) mod tests {
         session.answer(Answer::HostKey(HostKeyDecision::Once));
         let output = collect_until(&mut session, "welcome");
         assert!(!output.contains("<prompt"), "no password question: {output:?}");
+    }
+
+    #[test]
+    fn the_keychain_key_logs_in_and_its_passphrase_is_asked_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.key = Some((crate::keys::tests::PLAIN.into(), None));
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "welcome");
+        assert!(!output.contains("<prompt"), "{output:?}");
+
+        // A key the server does not accept falls through to the password.
+        let mut target = target_for(server::start(), dir.path().join("known_hosts2"));
+        target.key = Some((crate::keys::tests::ENCRYPTED.into(), None));
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "echo=false>");
+        assert!(output.contains("<prompt Passphrase for the Keychain key"), "{output:?}");
+        session.answer(Answer::Text(Some(crate::keys::tests::PASSPHRASE.into())));
+        assert!(collect_until(&mut session, "echo=false>").contains("password"));
     }
 
     #[test]

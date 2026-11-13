@@ -30,6 +30,7 @@ pub struct Shell {
     vault_error: Option<String>,
     host_editor: Option<ui::host_editor::HostEditor>,
     host_menu: Option<ui::host_editor::HostMenu>,
+    key_editor: Option<ui::key_editor::KeyEditor>,
     editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
@@ -77,6 +78,7 @@ impl Shell {
         Self { tabs: Tabs::default(), vault, store, vault_error, section: Section::Hosts,
             host_editor: None,
             host_menu: None,
+            key_editor: None,
             editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
@@ -164,7 +166,7 @@ impl Shell {
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(host) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::for_host(host);
+        let target = SshTarget::for_host(host, host.key.and_then(|k| self.vault.key(k)));
         let (label, os) = (host.display_label().to_owned(), host.os.clone());
         self.open_ssh(label, os, target, window, cx);
     }
