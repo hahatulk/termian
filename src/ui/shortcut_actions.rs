@@ -158,6 +158,7 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &OpenPortForwarding, window, cx| shell.show_section(Section::PortForwarding, window, cx)))
             .on_action(cx.listener(|shell, _: &OpenSnippets, window, cx| shell.show_section(Section::Snippets, window, cx)))
             .on_action(cx.listener(|shell, _: &OpenLocalTerminal, window, cx| shell.open_local_terminal(window, cx)))
+            .on_action(cx.listener(|shell, _: &OpenSerialConnection, window, cx| shell.open_serial(window, cx)))
             .on_action(cx.listener(|shell, _: &CloseTab, _, cx| shell.close_active_tab(cx)))
             .on_action(cx.listener(|shell, _: &NextTab, window, cx| shell.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| shell.cycle_tab(-1, window, cx)))

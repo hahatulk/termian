@@ -158,6 +158,110 @@ pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: 
     Ok(session)
 }
 
+// ----------------------------------------------------------------- serial --
+
+/// Translates a serial line in a legacy charset: device bytes to UTF-8 for
+/// the terminal (keeping a split character for the next read), keys back.
+pub struct Charset {
+    encoding: &'static encoding_rs::Encoding,
+    decoder: encoding_rs::Decoder,
+}
+
+impl Charset {
+    pub fn new(encoding: &'static encoding_rs::Encoding) -> Self {
+        Self { encoding, decoder: encoding.new_decoder_without_bom_handling() }
+    }
+
+    pub fn decode(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if self.encoding == encoding_rs::UTF_8 {
+            return bytes.to_vec();
+        }
+        let mut text = String::with_capacity(bytes.len() * 3);
+        let _ = self.decoder.decode_to_string(bytes, &mut text, false);
+        text.into_bytes()
+    }
+
+    pub fn encode(&self, bytes: &[u8]) -> Vec<u8> {
+        if self.encoding == encoding_rs::UTF_8 {
+            return bytes.to_vec();
+        }
+        self.encoding.encode(&String::from_utf8_lossy(bytes)).0.into_owned()
+    }
+}
+
+/// Opens a listed serial port with the legacy settings (raw mode, 140 ms
+/// reads, 2 s writes). Only ports the system lists can be opened.
+pub fn serial(options: &crate::serial::SerialOptions) -> Result<Session, String> {
+    use crate::serial::{FlowControl, Parity};
+    options.validate()?;
+    if !crate::serial::list_ports().contains(&options.path) {
+        return Err("Serial port is not connected or was not found by the operating system".into());
+    }
+    let invalid = |e: String| std::io::Error::new(std::io::ErrorKind::InvalidInput, e);
+    let mut port = serial2::SerialPort::open(&options.path, |mut settings: serial2::Settings| {
+        settings.set_raw();
+        settings.set_baud_rate(options.baud_rate)?;
+        settings.set_char_size(serial2::CharSize::try_from(options.data_bits).map_err(|e| invalid(e.to_string()))?);
+        settings.set_stop_bits(serial2::StopBits::try_from(options.stop_bits).map_err(|e| invalid(e.to_string()))?);
+        settings.set_parity(match options.parity {
+            Parity::None => serial2::Parity::None,
+            Parity::Odd => serial2::Parity::Odd,
+            Parity::Even => serial2::Parity::Even,
+        });
+        settings.set_flow_control(match options.flow_control {
+            FlowControl::RtsCts => serial2::FlowControl::RtsCts,
+            FlowControl::XonXoff => serial2::FlowControl::XonXoff,
+            FlowControl::None | FlowControl::DsrDtr => serial2::FlowControl::None,
+        });
+        Ok(settings)
+    })
+    .map_err(|e| format!("Unable to open serial port {}: {e}", options.path))?;
+    port.set_read_timeout(std::time::Duration::from_millis(140)).map_err(|e| e.to_string())?;
+    port.set_write_timeout(std::time::Duration::from_secs(2)).map_err(|e| e.to_string())?;
+    let encoding = crate::serial::encoding(&options.charset).ok_or("unsupported charset")?;
+    let port = std::sync::Arc::new(port);
+    let (_, input_rx, events_tx, session) = channels();
+    let closed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    let (reader, stop) = (port.clone(), closed.clone());
+    std::thread::spawn(move || {
+        let mut charset = Charset::new(encoding);
+        let mut buffer = [0u8; 4096];
+        let reason = loop {
+            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                break None;
+            }
+            match reader.read(&mut buffer) {
+                Ok(0) => continue,
+                Ok(n) => {
+                    if events_tx.unbounded_send(SessionEvent::Output(charset.decode(&buffer[..n]))).is_err() {
+                        break None;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::TimedOut || e.kind() == std::io::ErrorKind::WouldBlock => continue,
+                Err(e) => break Some(format!("Connection closed with error: {e}")),
+            }
+        };
+        let _ = events_tx.unbounded_send(SessionEvent::Closed(reason));
+    });
+    std::thread::spawn(move || {
+        let charset = Charset::new(encoding);
+        for input in futures::executor::block_on_stream(input_rx) {
+            match input {
+                Input::Data(bytes) => {
+                    if port.write_all(&charset.encode(&bytes)).is_err() {
+                        break;
+                    }
+                }
+                Input::Close => break,
+                Input::Resize(..) | Input::Answer(_) => {}
+            }
+        }
+        closed.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+    Ok(session)
+}
+
 // -------------------------------------------------------------------- ssh --
 
 #[derive(Clone, Debug)]
@@ -1417,5 +1521,24 @@ pub(crate) mod tests {
         let t = SshTarget::new("example.com:2001", None);
         assert_eq!((t.host.as_str(), t.port), ("example.com", 2001));
         assert_eq!(SshTarget::new("example.com", None).port, 22);
+    }
+
+    #[test]
+    fn serial_charsets_translate_both_ways() {
+        let mut cp1251 = Charset::new(crate::serial::encoding("windows-1251").unwrap());
+        assert_eq!(cp1251.decode(&[0xcf, 0xf0, 0xe8]), "При".as_bytes());
+        assert_eq!(cp1251.encode("да".as_bytes()), [0xe4, 0xe0]);
+        let mut sjis = Charset::new(crate::serial::encoding("Shift_JIS").unwrap());
+        let mut out = sjis.decode(&[0x82]);
+        out.extend(sjis.decode(&[0xa0]));
+        assert_eq!(out, "あ".as_bytes(), "a character split between reads");
+        let mut utf8 = Charset::new(encoding_rs::UTF_8);
+        assert_eq!(utf8.decode(b"\x1b[0m ok"), b"\x1b[0m ok");
+    }
+
+    #[test]
+    fn a_port_the_system_does_not_list_is_refused() {
+        let options = crate::serial::SerialOptions { path: "/dev/not-a-port".into(), ..Default::default() };
+        assert!(serial(&options).err().unwrap().contains("not found"));
     }
 }

@@ -278,7 +278,15 @@ impl Shell {
         if self.side_panel.is_some() {
             view.update(cx, |view, cx| view.set_right_inset(ui::side_panel::WIDTH, cx));
         }
-        cx.subscribe(&view, move |shell, _, event: &TerminalEvent, cx| {
+        cx.subscribe(&view, move |shell, view, event: &TerminalEvent, cx| {
+            // A Serial tab gets its Logs row only once the port opens.
+            if let TerminalEvent::SerialConnected(label) = event {
+                let (entry, log) = shell.record_session(None, label, "serial".into());
+                shell.tab_history.insert(id, entry);
+                view.update(cx, |view, _| view.set_log(log));
+                return;
+            }
+            let history = shell.tab_history.get(&id).copied().or(history);
             if let TerminalEvent::Os(os) = event {
                 shell.host_os_detected(history, os);
                 return;
@@ -425,6 +433,13 @@ impl Shell {
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
         self.add_terminal(title, view, None, cx);
+    }
+
+    /// «SERIAL» / «Open Serial Connection»: a tab with the legacy serial form.
+    pub fn open_serial(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let settings = self.vault.terminal.clone();
+        let view = cx.new(|cx| TerminalView::serial(&settings, window, cx));
+        self.add_terminal("Serial".into(), view, None, cx);
     }
 
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {

@@ -13,6 +13,7 @@ pub mod palette;
 pub mod portable;
 pub mod remote_fs;
 pub mod session;
+pub mod serial;
 pub mod session_log;
 pub mod shortcuts;
 pub mod snippets;

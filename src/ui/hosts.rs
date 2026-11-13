@@ -278,7 +278,7 @@ impl Shell {
             .child(tool_button("terminal", "terminal", "TERMINAL").on_click(cx.listener(|shell, _, window, cx| {
                 shell.open_local_terminal(window, cx);
             })))
-            .child(tool_button("serial", "serial", "SERIAL"))
+            .child(tool_button("serial", "serial", "SERIAL").on_click(cx.listener(|shell, _, window, cx| shell.open_serial(window, cx))))
             .child(div().flex_1())
             .child(glyph("grid", 16., theme::TEXT))
             .child(glyph("tag", 16., theme::TEXT));

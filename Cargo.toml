@@ -33,6 +33,8 @@ russh = { version = "0.65", default-features = false, features = ["ring", "rsa",
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util", "fs"] }
 dirs = "7.0.0"
 futures = "0.3.34"
+serial2 = "0.2.39"
+encoding_rs = "0.8.35"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 russh-sftp = "3.0.1"
 minisign-verify = "0.3"

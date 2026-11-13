@@ -11,6 +11,9 @@ use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::login_view::{self, LoginActions, LoginTarget};
+#[path = "serial_form.rs"]
+mod serial_form;
+
 use super::assets::icon;
 use super::shortcut_actions::{ClearTerminalBuffer, CopyFromTerminal, OpenTerminalSearch, PasteToTerminal, SelectAllInTerminal};
 
@@ -29,6 +32,8 @@ pub enum TerminalEvent {
     Ended,
     /// «Detect OS» found the host's system.
     Os(String),
+    /// A serial port opened (its label); the window records the session.
+    SerialConnected(String),
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -71,6 +76,8 @@ pub struct TerminalView {
     search_focus: FocusHandle,
     /// Width the window gives to the side panel, beside the terminal.
     right_inset: f32,
+    /// The Serial tab's form, until it connects.
+    serial_form: Option<serial_form::SerialForm>,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -116,7 +123,18 @@ impl TerminalView {
             search_found: true,
             search_focus: cx.focus_handle(),
             right_inset: 0.,
+            serial_form: None,
         }
+    }
+
+    /// A Serial tab: the legacy form, then the port's session.
+    pub fn serial(settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut view = Self::build(session::replay(Vec::new()), None, settings, window, cx);
+        view.serial_form = Some(serial_form::SerialForm::new());
+        view.closed = true;
+        window.focus(&view.login_focus);
+        view.watch_serial_ports(window, cx);
+        view
     }
 
     /// New Settings → Terminal values: colours, font and scrollback change in place.
@@ -540,7 +558,7 @@ impl TerminalView {
     }
 
     pub fn focus(&self, window: &mut Window) {
-        window.focus(if self.login.is_some() { &self.login_focus } else { &self.focus });
+        window.focus(if self.login.is_some() || self.serial_form.is_some() { &self.login_focus } else { &self.focus });
     }
 
     fn login_answer(&mut self, answer: Answer, _: &mut Window, cx: &mut Context<Self>) {
@@ -651,6 +669,9 @@ impl Render for TerminalView {
                 submit: Self::login_submit,
             };
             return login_view::render(target, login, &self.login_focus, window, &actions, cx).into_any_element();
+        }
+        if let Some(form) = self.render_serial_form(window, cx) {
+            return form.into_any_element();
         }
         let viewport = window.viewport_size();
         self.fit(viewport.width - px(self.right_inset), viewport.height - px(TOP_INSET), window);
