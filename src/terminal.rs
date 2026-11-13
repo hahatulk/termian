@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point, Side};
+use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionType};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::search::{Match, RegexSearch};
 use alacritty_terminal::term::{viewport_to_point, Config, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use alacritty_terminal::Term;
@@ -127,6 +128,21 @@ pub struct Terminal {
     parser: Processor,
     listener: Listener,
     look: Look,
+    /// «Search terminal»: the query's compiled search and the current match.
+    search: Option<(String, RegexSearch)>,
+    found: Option<Match>,
+}
+
+/// Regex metacharacters escaped, so the query is matched literally.
+fn literal(query: &str) -> String {
+    let mut out = String::new();
+    for c in query.chars() {
+        if "\\.+*?()|[]{}^$#&-~".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 impl Terminal {
@@ -138,7 +154,7 @@ impl Terminal {
         let listener = Listener::default();
         let config = Config { scrolling_history: settings.scrollback_lines(), ..Config::default() };
         let size = Size { columns: columns.max(2), lines: lines.max(1) };
-        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings) }
+        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings), search: None, found: None }
     }
 
     /// New Settings → Terminal values for an open terminal.
@@ -223,6 +239,62 @@ impl Terminal {
         }
         self.feed(b"\x1b[3J");
         self.term.selection = None;
+    }
+
+    /// xterm's search addon as legacy uses it: case-insensitive literal text,
+    /// `previous` looks up from the last match (or the bottom), otherwise
+    /// down; it wraps around. `incremental` (typing) keeps the current match
+    /// when it still fits. The match is selected and scrolled into view.
+    pub fn find(&mut self, query: &str, previous: bool, incremental: bool) -> bool {
+        if query.is_empty() {
+            self.clear_search();
+            return false;
+        }
+        if self.search.as_ref().is_none_or(|(q, _)| q != query) {
+            let Ok(regex) = RegexSearch::new(&literal(&query.to_lowercase())) else { return false };
+            self.search = Some((query.to_owned(), regex));
+        }
+        let top = Point::new(Line(-(self.term.history_size() as i32)), Column(0));
+        let bottom = Point::new(Line(self.term.screen_lines() as i32 - 1), Column(self.term.columns() - 1));
+        // Typing keeps the match where it is while the longer query still fits there.
+        if let (true, Some(found)) = (incremental, self.found.clone()) {
+            let regex = &mut self.search.as_mut().expect("compiled above").1;
+            if let Some(kept) = self.term.search_next(regex, *found.start(), Direction::Right, Side::Left, Some(0)).filter(|m| m.start() == found.start()) {
+                self.found = Some(kept);
+                return self.select_found();
+            }
+        }
+        let (origin, direction, side) = match (&self.found, previous, incremental) {
+            (Some(found), true, true) => (found.start().sub(&self.term, Boundary::None, 1), Direction::Left, Side::Right),
+            (Some(found), true, false) => (found.start().sub(&self.term, Boundary::None, 1), Direction::Left, Side::Right),
+            (None, true, _) => (bottom, Direction::Left, Side::Right),
+            (Some(found), false, _) => (found.end().add(&self.term, Boundary::None, 1), Direction::Right, Side::Left),
+            (None, false, _) => (top, Direction::Right, Side::Left),
+        };
+        let regex = &mut self.search.as_mut().expect("compiled above").1;
+        self.found = self.term.search_next(regex, origin, direction, side, None);
+        self.select_found()
+    }
+
+    fn select_found(&mut self) -> bool {
+        match self.found.clone() {
+            Some(found) => {
+                let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
+                selection.update(*found.end(), Side::Right);
+                self.term.selection = Some(selection);
+                self.term.scroll_to_point(*found.start());
+                true
+            }
+            None => {
+                self.term.selection = None;
+                false
+            }
+        }
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search = None;
+        self.found = None;
     }
 
     pub fn clear_selection(&mut self) {
@@ -575,5 +647,28 @@ mod tests {
     fn paste_normalises_newlines_and_brackets() {
         assert_eq!(paste_bytes("a\nb", false), b"a\rb");
         assert_eq!(paste_bytes("x", true), b"\x1b[200~x\x1b[201~");
+    }
+
+    #[test]
+    fn search_finds_text_upwards_and_wraps() {
+        let mut t = Terminal::new(20, 3);
+        t.feed(b"alpha ERR one\r\nbeta\r\nerr two\r\nlast line (x)");
+        assert!(t.find("err", true, true));
+        assert_eq!(t.selection_text().as_deref(), Some("err"), "the bottom-most match first");
+        assert!(t.find("err", true, false));
+        assert_eq!(t.selection_text().as_deref(), Some("ERR"), "case-insensitive, from history");
+        assert!(t.find("err", true, false));
+        assert_eq!(t.selection_text().as_deref(), Some("err"), "wraps around");
+        assert!(t.find("err", false, false));
+        assert_eq!(t.selection_text().as_deref(), Some("ERR"), "next goes down and wraps too");
+        t.clear_search();
+        assert!(t.find("e", true, true));
+        assert!(t.find("er", true, true));
+        assert_eq!(t.selection_text().as_deref(), Some("er"));
+        assert!(t.find("err", true, true));
+        assert_eq!(t.selection_text().as_deref(), Some("err"), "typing stays on the bottom match");
+        assert!(t.find("(x)", true, true), "regex characters are literal");
+        assert!(!t.find("missing", true, true));
+        assert_eq!(t.selection_text(), None);
     }
 }

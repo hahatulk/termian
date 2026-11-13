@@ -11,7 +11,8 @@ use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::login_view::{self, LoginActions, LoginTarget};
-use super::shortcut_actions::{ClearTerminalBuffer, CopyFromTerminal, PasteToTerminal, SelectAllInTerminal};
+use super::assets::icon;
+use super::shortcut_actions::{ClearTerminalBuffer, CopyFromTerminal, OpenTerminalSearch, PasteToTerminal, SelectAllInTerminal};
 
 /// Where an SSH tab connects to; kept so the connection can be retried.
 #[derive(Clone)]
@@ -64,6 +65,10 @@ pub struct TerminalView {
     reconnect: Option<session::Backoff>,
     /// A snippet typed once the shell is first ready (legacy `startupSnippet`).
     startup: Option<String>,
+    /// «Search terminal»: the query while the bar is open, and whether it matched.
+    search: Option<String>,
+    search_found: bool,
+    search_focus: FocusHandle,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -105,6 +110,9 @@ impl TerminalView {
             was_ready: false,
             reconnect: None,
             startup: None,
+            search: None,
+            search_found: true,
+            search_focus: cx.focus_handle(),
         }
     }
 
@@ -302,6 +310,127 @@ impl TerminalView {
                 self.terminal.feed(b"\r\n\x1b[2m[Session closed]\x1b[0m\r\n");
             }
         }
+    }
+
+    /// Legacy search field keys: typing searches up from the last match,
+    /// Enter finds the previous match, Shift+Enter the next, Escape closes.
+    fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        let Some(query) = self.search.as_mut() else { return };
+        if keystroke.modifiers.platform || keystroke.modifiers.control {
+            if keystroke.modifiers.platform && keystroke.key == "v" {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    query.push_str(text.lines().next().unwrap_or(""));
+                    let query = query.clone();
+                    self.search_found = self.terminal.find(&query, true, true);
+                }
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        match keystroke.key.as_str() {
+            "escape" => {
+                self.close_search(window);
+            }
+            "enter" => {
+                let query = query.clone();
+                self.search_found = self.terminal.find(&query, !keystroke.modifiers.shift, false);
+            }
+            "backspace" => {
+                query.pop();
+                let query = query.clone();
+                self.search_found = self.terminal.find(&query, true, true) || query.is_empty();
+            }
+            _ => match keystroke.key_char.as_deref() {
+                Some(text) if !text.chars().any(char::is_control) => {
+                    query.push_str(text);
+                    let query = query.clone();
+                    self.search_found = self.terminal.find(&query, true, true);
+                }
+                _ => return,
+            },
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    fn step_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if let Some(query) = self.search.clone() {
+            self.search_found = self.terminal.find(&query, previous, false);
+            cx.notify();
+        }
+    }
+
+    fn close_search(&mut self, window: &mut Window) {
+        self.search = None;
+        self.search_found = true;
+        self.terminal.clear_search();
+        self.terminal.clear_selection();
+        window.focus(&self.focus);
+    }
+
+    fn render_search(&self, window: &Window, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
+        let query = self.search.as_ref()?;
+        let focused = self.search_focus.is_focused(window);
+        let arrow = |id: &str, up: bool| {
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .size(px(24.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .hover(|s| s.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
+                .child(
+                    gpui::svg()
+                        .path(icon("chevron"))
+                        .size(px(10.))
+                        .text_color(rgb(termian_native::theme::TEXT))
+                        .when(up, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
+                )
+        };
+        let empty = query.is_empty();
+        Some(
+            div()
+                .id("terminal-search")
+                .track_focus(&self.search_focus)
+                .on_key_down(cx.listener(Self::on_search_key))
+                .on_mouse_down(MouseButton::Left, cx.listener(|view, _, window, cx| {
+                    cx.stop_propagation();
+                    window.focus(&view.search_focus);
+                }))
+                .absolute()
+                .top(px(8.))
+                .right(px(16.))
+                .w(px(300.))
+                .h(px(30.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded(px(5.))
+                .bg(rgb(termian_native::theme::INPUT))
+                .border_1()
+                .border_color(rgb(if !self.search_found { termian_native::theme::ERROR } else if focused { termian_native::theme::ACCENT } else { termian_native::theme::INPUT }))
+                .font_family(".SystemUIFont")
+                .text_xs()
+                .child(gpui::svg().path(icon("search")).size(px(12.)).text_color(rgb(if focused || !empty { termian_native::theme::TEXT } else { termian_native::theme::TEXT_MUTED })))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .overflow_hidden()
+                        .text_color(rgb(if empty { termian_native::theme::TEXT_MUTED } else { termian_native::theme::TEXT }))
+                        .when(focused && empty, |d| d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(termian_native::theme::TEXT))))
+                        .child(div().truncate().child(if empty { "Search terminal".to_owned() } else { query.clone() }))
+                        .when(focused && !empty, |d| d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(termian_native::theme::TEXT)))),
+                )
+                .child(arrow("terminal-search-prev", true).on_click(cx.listener(|view, _, _, cx| view.step_search(true, cx))))
+                .child(arrow("terminal-search-next", false).on_click(cx.listener(|view, _, _, cx| view.step_search(false, cx)))),
+        )
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -564,6 +693,11 @@ impl Render for TerminalView {
                 view.terminal.clear_buffer();
                 cx.notify();
             }))
+            .on_action(cx.listener(|view, _: &OpenTerminalSearch, window, cx| {
+                view.search.get_or_insert_with(String::new);
+                window.focus(&view.search_focus);
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -580,6 +714,7 @@ impl Render for TerminalView {
             .line_height(px(line_height))
             .children(lines)
             .children(cursor)
+            .children(self.render_search(window, cx))
             .into_any_element()
     }
 }
