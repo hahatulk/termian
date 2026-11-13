@@ -6767,10 +6767,12 @@ dependencies = [
  "scrypt 0.11.0",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "ureq",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -12,6 +12,7 @@ pub mod remote_fs;
 pub mod session;
 pub mod session_log;
 pub mod store;
+pub mod sync;
 pub mod tabs;
 pub mod terminal;
 pub mod theme;
