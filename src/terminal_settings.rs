@@ -42,6 +42,8 @@ pub const KEEP_ALIVE_KEY: &str = "keep_alive_interval";
 pub struct TerminalSettings {
     pub autoreconnect: bool,
     pub shell_history_import: bool,
+    /// Installs the shell hooks that record commands (Shell History).
+    pub shell_integration: bool,
     /// «Select text to copy & Right click to paste».
     pub copy_on_select: bool,
     pub bell_sound: bool,
@@ -68,6 +70,7 @@ impl Default for TerminalSettings {
         Self {
             autoreconnect: true,
             shell_history_import: true,
+            shell_integration: true,
             copy_on_select: false,
             bell_sound: false,
             option_is_meta: true,

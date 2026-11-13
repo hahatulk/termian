@@ -15,6 +15,7 @@ pub mod remote_fs;
 pub mod session;
 pub mod serial;
 pub mod session_log;
+pub mod shell_integration;
 pub mod shortcuts;
 pub mod snippets;
 pub mod split_tree;

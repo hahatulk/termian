@@ -36,6 +36,21 @@ pub enum TerminalEvent {
     SerialConnected(String),
     /// Bytes the user typed or pasted (for Broadcast input).
     Input(Vec<u8>),
+    /// Shell integration saw a command finish.
+    Command(String),
+}
+
+/// Shell integration of one session: installed once the output is quiet,
+/// commands reported after the hooks say they are ready.
+#[derive(Default)]
+struct Integration {
+    scanner: termian_native::shell_integration::Scanner,
+    /// Wanted for this tab (a shell, and Settings → Terminal allows it).
+    wanted: bool,
+    waiting: bool,
+    answered: bool,
+    ready: bool,
+    command: Option<String>,
 }
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
@@ -81,6 +96,8 @@ pub struct TerminalView {
     area: Option<(f32, f32, f32, f32)>,
     /// The Serial tab's form, until it connects.
     serial_form: Option<serial_form::SerialForm>,
+    integration: Integration,
+    last_output: std::time::Instant,
 }
 
 type Faces = ((SharedString, f32), (SharedString, f32));
@@ -89,8 +106,14 @@ type Faces = ((SharedString, f32), (SharedString, f32));
 const FALLBACK_FONT: &str = "Menlo";
 
 impl TerminalView {
+    /// A local shell; it gets the shell integration once it is quiet.
     pub fn new(session: Session, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        Self::build(session, None, settings, window, cx)
+        let mut view = Self::build(session, None, settings, window, cx);
+        if settings.shell_integration && !cfg!(windows) {
+            view.integration.wanted = true;
+            view.schedule_integration(window, cx);
+        }
+        view
     }
 
     pub fn ssh(connection: Connection, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -127,6 +150,8 @@ impl TerminalView {
             search_focus: cx.focus_handle(),
             area: None,
             serial_form: None,
+            integration: Integration::default(),
+            last_output: std::time::Instant::now(),
         }
     }
 
@@ -267,7 +292,12 @@ impl TerminalView {
                 if self.reconnect.take().is_some() {
                     self.terminal.feed(b"\r\n\x1b[2m[Reconnected]\x1b[0m\r\n");
                 }
-                if let Some(script) = self.startup.take() {
+                if self.settings.shell_integration {
+                    // A new shell (also after a reconnect) gets the hooks; a
+                    // startup snippet is typed after them.
+                    self.integration = Integration { wanted: true, ..Integration::default() };
+                    self.schedule_integration(window, cx);
+                } else if let Some(script) = self.startup.take() {
                     self.run(&script);
                 }
                 window.focus(&self.focus);
@@ -301,6 +331,11 @@ impl TerminalView {
                 }
             }
             SessionEvent::Output(bytes) => {
+                self.last_output = std::time::Instant::now();
+                let (bytes, events) = self.integration.scanner.scan(&bytes);
+                for event in events {
+                    self.shell_event(event, cx);
+                }
                 if let Some(log) = &self.log {
                     log.append(&bytes);
                 }
@@ -553,6 +588,89 @@ impl TerminalView {
         if !self.closed && self.serial_form.is_none() && self.login.is_none() {
             self.terminal.scroll(i32::MIN / 2);
             self.session.write(bytes);
+        }
+    }
+
+    /// Waits until the shell has been quiet for a moment (a login banner is
+    /// done), then installs the hooks.
+    fn schedule_integration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.integration.waiting = true;
+        let generation = self.generation;
+        cx.spawn_in(window, async move |this, cx| {
+            let begun = std::time::Instant::now();
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(100)).await;
+                let done = this.update(cx, |view, cx| {
+                    if view.generation != generation || !view.integration.waiting {
+                        return true;
+                    }
+                    let quiet = view.last_output.elapsed() >= std::time::Duration::from_millis(300);
+                    if quiet || begun.elapsed() >= std::time::Duration::from_secs(3) {
+                        view.install_integration(cx);
+                        return true;
+                    }
+                    false
+                });
+                if !matches!(done, Ok(false)) {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Types the install line behind the alternate screen; the line leaves
+    /// it, and if the shell cannot run it the terminal leaves it anyway.
+    fn install_integration(&mut self, cx: &mut Context<Self>) {
+        self.integration.waiting = false;
+        if self.closed {
+            return;
+        }
+        const ENTER_ALT: &[u8] = b"\x1b[?1049h";
+        self.terminal.feed(ENTER_ALT);
+        if let Some(log) = &self.log {
+            log.append(ENTER_ALT);
+        }
+        let line = termian_native::shell_integration::install_line();
+        self.session.write(&paste_bytes(line.trim_end_matches('\r'), self.terminal.bracketed_paste()));
+        self.session.write(b"\r");
+        if let Some(script) = self.startup.take() {
+            self.run(&script);
+        }
+        let generation = self.generation;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            let _ = this.update(cx, |view, cx| {
+                if view.generation == generation && !view.integration.answered {
+                    const LEAVE_ALT: &[u8] = b"\x1b[?1049l\r\x1b[K";
+                    view.terminal.feed(LEAVE_ALT);
+                    if let Some(log) = &view.log {
+                        log.append(LEAVE_ALT);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn shell_event(&mut self, event: termian_native::shell_integration::ShellEvent, cx: &mut Context<Self>) {
+        use termian_native::shell_integration::ShellEvent;
+        let state = &mut self.integration;
+        match event {
+            ShellEvent::Installing => state.answered = true,
+            ShellEvent::Ready => {
+                state.answered = true;
+                state.ready = true;
+            }
+            // Events before Ready come from the install line itself.
+            ShellEvent::CommandStarted(command) if state.ready => state.command = Some(command),
+            ShellEvent::CommandExited(_) => {
+                if let Some(command) = state.command.take() {
+                    cx.emit(TerminalEvent::Command(command));
+                }
+            }
+            _ => {}
         }
     }
 

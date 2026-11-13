@@ -423,7 +423,12 @@ impl Shell {
     }
 
     fn render_panel_history(&self, panel: &SidePanel, cx: &mut Context<Self>) -> Div {
-        let commands: &[ShellCommand] = &self.vault.shell_history;
+        // Legacy «Host History»: a saved host's own commands; everything for local and unsaved sessions.
+        let host = self.workspaces.get(&self.tabs.active().id).and_then(|w| w.panes.get(&w.focused)).and_then(|p| match p.origin {
+            super::workspace::Origin::Host(host) => Some(host),
+            _ => None,
+        });
+        let commands: Vec<(usize, &ShellCommand)> = self.vault.shell_history.iter().enumerate().filter(|(_, c)| host.is_none() || c.host == host).collect();
         if commands.is_empty() {
             return div()
                 .flex_1()
@@ -451,7 +456,7 @@ impl Shell {
                 .text_color(rgb(0xffffff))
                 .child(text.to_owned())
         };
-        let rows = commands.iter().enumerate().map(|(i, command)| {
+        let rows = commands.into_iter().map(|(i, command)| {
             let hover = SharedString::from(format!("panel-history-{i}"));
             let saving = panel.saving.as_ref().filter(|(row, _)| *row == i).map(|(_, l)| l.clone());
             let script = command.script.clone();

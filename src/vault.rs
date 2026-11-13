@@ -163,7 +163,13 @@ pub struct ShellCommand {
     /// Unix seconds; 0 when unknown.
     pub completed_at: i64,
     pub rating: i64,
+    /// The saved host it ran on (`None`: local, unsaved or imported).
+    #[serde(default)]
+    pub host: Option<HostId>,
 }
+
+/// Shell History keeps this many commands.
+const SHELL_HISTORY_LIMIT: usize = 2000;
 
 /// A snippet package: a folder of snippets on the Snippets screen.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -413,6 +419,21 @@ impl Vault {
         }
         self.shell_history.sort_by(|a, b| b.completed_at.cmp(&a.completed_at).then(b.rating.cmp(&a.rating)));
         self.legacy_shell_history_imported = true;
+    }
+
+    /// A command the shell integration saw finish: on top, a repeat moving
+    /// up with a higher rating instead of being listed twice.
+    pub fn record_command(&mut self, script: &str, host: Option<HostId>, completed_at: i64) {
+        let script = script.trim();
+        if script.is_empty() {
+            return;
+        }
+        let rating = match self.shell_history.iter().position(|c| c.script == script && c.host == host) {
+            Some(index) => self.shell_history.remove(index).rating + 1,
+            None => 1,
+        };
+        self.shell_history.insert(0, ShellCommand { script: script.to_owned(), completed_at, rating, host });
+        self.shell_history.truncate(SHELL_HISTORY_LIMIT);
     }
 
     pub fn history_entry_mut(&mut self, id: u64) -> Option<&mut HistoryEntry> {
@@ -893,11 +914,18 @@ pub(crate) mod tests {
     #[test]
     fn shell_history_imports_once_newest_first() {
         let mut v = Vault::default();
-        let cmd = |script: &str, completed_at, rating| ShellCommand { script: script.into(), completed_at, rating };
+        let cmd = |script: &str, completed_at, rating| ShellCommand { script: script.into(), completed_at, rating, host: None };
         v.import_shell_history(vec![cmd("ls", 10, 1), cmd("top", 20, 1), cmd("df", 20, 3)]);
         v.import_shell_history(vec![cmd("ls", 10, 1)]);
         assert_eq!(v.shell_history.iter().map(|c| c.script.as_str()).collect::<Vec<_>>(), ["df", "top", "ls"]);
         assert!(v.legacy_shell_history_imported);
+        v.record_command(" uptime ", Some(7), 30);
+        v.record_command("ls", None, 31);
+        v.record_command("uptime", Some(7), 32);
+        assert_eq!((v.shell_history[0].script.as_str(), v.shell_history[0].rating, v.shell_history[0].host), ("uptime", 2, Some(7)), "a repeat moves up");
+        assert_eq!(v.shell_history.iter().filter(|c| c.script == "uptime").count(), 1);
+        v.record_command("  ", None, 33);
+        assert_eq!(v.shell_history[0].script, "uptime");
     }
 
     #[test]
@@ -986,7 +1014,7 @@ pub fn demo() -> Vault {
         shell_history: ["docker compose ps", "kubectl -n default get pods", "tail -f /var/log/syslog"]
             .iter()
             .enumerate()
-            .map(|(i, script)| ShellCommand { script: script.to_string(), completed_at: 1_794_000_000 - i as i64 * 60, rating: 1 })
+            .map(|(i, script)| ShellCommand { script: script.to_string(), completed_at: 1_794_000_000 - i as i64 * 60, rating: 1, host: None })
             .collect(),
         known_hosts: ["192.168.1.180", "[95.80.105.230]:50703", "10.0.209.12", "[192.168.88.59]:2001"]
             .iter()

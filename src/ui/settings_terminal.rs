@@ -264,6 +264,7 @@ impl SettingsWindow {
                 .into_any_element(),
             self.switch_row("term-autoreconnect", "Autoreconnect", t.autoreconnect, |t, v| t.autoreconnect = v, cx),
             self.switch_row("term-history", "Import shell history", t.shell_history_import, |t, v| t.shell_history_import = v, cx),
+            self.switch_row("term-integration", "Shell integration (record commands)", t.shell_integration, |t, v| t.shell_integration = v, cx),
             self.switch_row("term-copy", "Select text to copy & Right click to paste", t.copy_on_select, |t, v| t.copy_on_select = v, cx),
             self.switch_row("term-bell", "Bell sound", t.bell_sound, |t, v| t.bell_sound = v, cx),
         ];

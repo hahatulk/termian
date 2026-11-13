@@ -186,6 +186,7 @@ pub fn load_shell_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<
                 script,
                 completed_at: ms.map_or(0, |ms| (ms / 1000.) as i64),
                 rating: v.get("rating").and_then(Value::as_f64).map_or(1, |r| r as i64),
+                host: None,
             })
         })
         .collect())
@@ -474,8 +475,8 @@ mod tests {
         ]);
         let commands = load_shell_history(root, &cipher()).unwrap();
         assert_eq!(commands, vec![
-            ShellCommand { script: "ls -la".into(), completed_at: 1_794_000_000, rating: 2 },
-            ShellCommand { script: "uptime".into(), completed_at: 0, rating: 1 },
+            ShellCommand { script: "ls -la".into(), completed_at: 1_794_000_000, rating: 2, host: None },
+            ShellCommand { script: "uptime".into(), completed_at: 0, rating: 1, host: None },
         ]);
     }
 

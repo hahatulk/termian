@@ -167,6 +167,14 @@ impl Shell {
                 }
                 TerminalEvent::Os(os) => shell.host_os_detected(history, os),
                 TerminalEvent::Input(bytes) => shell.broadcast_input(tab, pane, bytes, cx),
+                TerminalEvent::Command(command) => {
+                    let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
+                        Origin::Host(host) => Some(host),
+                        _ => None,
+                    });
+                    shell.vault.record_command(command, host, crate::now());
+                    shell.save_vault();
+                }
                 TerminalEvent::Ended | TerminalEvent::Close => {
                     if shell.session_ended(history) {
                         shell.backup_logs_soon(cx);
