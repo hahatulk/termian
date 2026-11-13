@@ -112,42 +112,50 @@ impl Shell {
         }
         let Some(main) = self.main_window else { return };
         let shell = cx.entity();
-        let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
-            ..Default::default()
-        };
-        let opened = cx.open_window(options, |window, cx| {
-            cx.new(|cx| {
-                let focus = cx.focus_handle();
-                window.focus(&focus);
-                let observe = cx.observe(&shell, |_, _, cx| cx.notify());
-                SettingsWindow {
-                    shell,
-                    main,
-                    tab: tab.unwrap_or(Tab::Account),
-                    focus,
-                    logs_period: None,
-                    logs_busy: false,
-                    logs_result: None,
-                    disable_logs: false,
-                    editing: None,
-                    sftp_error: None,
-                    menu: None,
-                    script_open: false,
-                    _observe: observe,
+        // The window draws itself from the shell as it opens, so it opens
+        // once this update of the shell is over.
+        cx.spawn(async move |this, cx| {
+            let opened = cx.update(|cx| {
+                let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
+                let options = WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
+                    ..Default::default()
+                };
+                cx.open_window(options, |window, cx| {
+                    cx.new(|cx| {
+                        let focus = cx.focus_handle();
+                        window.focus(&focus);
+                        let observe = cx.observe(&shell, |_, _, cx| cx.notify());
+                        SettingsWindow {
+                            shell,
+                            main,
+                            tab: tab.unwrap_or(Tab::Account),
+                            focus,
+                            logs_period: None,
+                            logs_busy: false,
+                            logs_result: None,
+                            disable_logs: false,
+                            editing: None,
+                            sftp_error: None,
+                            menu: None,
+                            script_open: false,
+                            _observe: observe,
+                        }
+                    })
+                })
+            });
+            let _ = this.update(cx, |shell, cx| match opened {
+                Ok(Ok(handle)) => {
+                    shell.settings_window = Some(handle);
+                    // A fresh status, as the legacy window asks for one when it opens.
+                    shell.check_cloud(false, cx);
                 }
-            })
-        });
-        match opened {
-            Ok(handle) => {
-                self.settings_window = Some(handle);
-                // A fresh status, as the legacy window asks for one when it opens.
-                self.check_cloud(false, cx);
-            }
-            Err(error) => self.vault_error = Some(format!("Could not open Settings: {error}")),
-        }
+                Ok(Err(error)) => shell.vault_error = Some(format!("Could not open Settings: {error}")),
+                Err(_) => {}
+            });
+        })
+        .detach();
     }
 
     /// Records sessions again, or stops and deletes this vault's logs.
@@ -168,14 +176,22 @@ pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
     cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None), KeyBinding::new("cmd-q", Quit, None)]);
     #[cfg(not(target_os = "macos"))]
     cx.bind_keys([KeyBinding::new("ctrl-,", OpenSettings, None), KeyBinding::new("ctrl-1", OpenVaults, None), KeyBinding::new("ctrl-2", OpenSftp, None)]);
+    // Menu actions arrive while the focused window is being updated, so the
+    // main window is reached once that dispatch is over.
     cx.on_action(move |_: &OpenSettings, cx| {
-        let _ = main.update(cx, |shell, _, cx| shell.open_settings(None, cx));
+        cx.defer(move |cx| {
+            let _ = main.update(cx, |shell, _, cx| shell.open_settings(None, cx));
+        });
     });
     cx.on_action(move |_: &OpenVaults, cx| {
-        let _ = main.update(cx, |shell, window, cx| shell.show_pinned(0, window, cx));
+        cx.defer(move |cx| {
+            let _ = main.update(cx, |shell, window, cx| shell.show_pinned(0, window, cx));
+        });
     });
     cx.on_action(move |_: &OpenSftp, cx| {
-        let _ = main.update(cx, |shell, window, cx| shell.show_pinned(1, window, cx));
+        cx.defer(move |cx| {
+            let _ = main.update(cx, |shell, window, cx| shell.show_pinned(1, window, cx));
+        });
     });
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.set_menus(vec![Menu {
