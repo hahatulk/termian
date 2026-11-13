@@ -49,6 +49,10 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         store("ssh_identities").iter().filter_map(|(id, v)| Some((*id, text(v.get("username"))?))).collect();
     let mut config_identity: HashMap<u64, u64> =
         store("ssh_configs").iter().filter_map(|(id, v)| Some((*id, link(v, "identity")?))).collect();
+    let config_ports: HashMap<u64, u16> = store("ssh_configs")
+        .iter()
+        .filter_map(|(id, v)| Some((*id, u16::try_from(v.get("port")?.as_f64()? as u64).ok()?)))
+        .collect();
     for (_, v) in store("ssh_config_identities") {
         if let (Some(config), Some(identity)) = (link(v, "ssh_config"), link(v, "identity")) {
             config_identity.insert(config, identity);
@@ -77,6 +81,8 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
                 .and_then(|identity| usernames.get(identity))
                 .cloned(),
             tags: host_tags.remove(id).unwrap_or_default(),
+            port: link(v, "ssh_config").and_then(|config| config_ports.get(&config)).copied(),
+            password: None,
         })
         .collect();
 

@@ -144,6 +144,8 @@ pub struct SshTarget {
     pub known_hosts: PathBuf,
     /// Private key files to offer, in order; missing files are skipped.
     pub identity_files: Vec<PathBuf>,
+    /// Saved password, tried once before asking.
+    pub password: Option<String>,
 }
 
 impl SshTarget {
@@ -160,7 +162,15 @@ impl SshTarget {
             username,
             known_hosts: dirs::data_dir().unwrap_or_default().join("termian-native").join("known_hosts"),
             identity_files: ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|f| home.join(".ssh").join(f)).collect(),
+            password: None,
         }
+    }
+}
+
+impl SshTarget {
+    /// A saved host: its address and port, user and saved password.
+    pub fn for_host(host: &crate::vault::Host) -> Self {
+        Self { password: host.password.clone(), ..Self::new(&host.destination(), host.username.clone()) }
     }
 }
 
@@ -415,6 +425,13 @@ async fn authenticate(
             io.lock().await.log("Authenticated with public key".into());
             return Ok(());
         }
+    }
+    if let Some(password) = &target.password {
+        io.lock().await.log("Trying the saved password".into());
+        if handle.authenticate_password(user, password).await.map_err(failed)?.success() {
+            return Ok(());
+        }
+        io.lock().await.log("The saved password was not accepted".into());
     }
     for _ in 0..PASSWORD_ATTEMPTS {
         let prompt = format!("{user}@{}'s password", target.host);
@@ -826,7 +843,31 @@ pub(crate) mod tests {
             username: Some("root".into()),
             known_hosts,
             identity_files: vec![],
+            password: None,
         }
+    }
+
+    #[test]
+    fn a_saved_password_logs_in_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.password = Some(server::PASSWORD.into());
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "welcome");
+        assert!(!output.contains("<prompt"), "no password question: {output:?}");
+    }
+
+    #[test]
+    fn a_wrong_saved_password_falls_back_to_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.password = Some("stale".into());
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        assert!(collect_until(&mut session, "echo=false>").contains("<prompt root@127.0.0.1's password"));
     }
 
     #[test]

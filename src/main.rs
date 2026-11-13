@@ -11,6 +11,7 @@ use termian_native::vault::HostId;
 use ui::terminal_view::{Connection, TerminalEvent, TerminalView};
 use termian_native::legacy::{cipher::FieldCipher, profile};
 use termian_native::tabs::{Tab, TabKind, Tabs};
+use termian_native::store::Store;
 use termian_native::theme;
 use termian_native::vault::{GroupId, Vault};
 use ui::assets::{icon, Assets};
@@ -25,7 +26,11 @@ const WINDOW_CONTROLS_INSET: f32 = 12.;
 pub struct Shell {
     tabs: Tabs,
     vault: Vault,
+    store: Option<Store>,
     vault_error: Option<String>,
+    host_editor: Option<ui::host_editor::HostEditor>,
+    host_menu: Option<ui::host_editor::HostMenu>,
+    editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
     terminals: HashMap<TabId, Entity<TerminalView>>,
@@ -38,12 +43,8 @@ pub struct Shell {
 }
 
 /// Reads hosts from the legacy profile without modifying it.
-/// `TERMIAN_LEGACY_INDEXEDDB` overrides the profile location; `TERMIAN_DEMO`
-/// shows sample data instead.
+/// `TERMIAN_LEGACY_INDEXEDDB` overrides the profile location.
 fn load_legacy_vault() -> Result<Vault, String> {
-    if std::env::var_os("TERMIAN_DEMO").is_some() {
-        return Ok(termian_native::vault::demo());
-    }
     let dir = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB")
         .map(Into::into)
         .or_else(profile::default_indexeddb_dir)
@@ -52,13 +53,31 @@ fn load_legacy_vault() -> Result<Vault, String> {
     profile::load_vault(&dir, &cipher)
 }
 
+/// The native vault (ADR 0002), imported from the legacy profile on first run.
+/// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
+fn open_vault() -> (Vault, Option<Store>, Option<String>) {
+    let (store, import): (Result<Store, String>, fn() -> Result<Vault, String>) = if std::env::var_os("TERMIAN_DEMO").is_some() {
+        (Ok(Store::demo()), || Ok(termian_native::vault::demo()))
+    } else {
+        (Store::open_default(), load_legacy_vault)
+    };
+    match store {
+        Ok(store) => match store.load_or_import(import) {
+            Ok(vault) => (vault, Some(store), None),
+            Err(error) => (Vault::default(), None, Some(error)),
+        },
+        // Without a store the legacy hosts are still shown, read-only.
+        Err(error) => (import().unwrap_or_default(), None, Some(format!("changes cannot be saved: {error}"))),
+    }
+}
+
 impl Shell {
     fn new(cx: &mut Context<Self>) -> Self {
-        let (vault, vault_error) = match load_legacy_vault() {
-            Ok(vault) => (vault, None),
-            Err(error) => (Vault::default(), Some(error)),
-        };
-        Self { tabs: Tabs::default(), vault, vault_error, section: Section::Hosts,
+        let (vault, store, vault_error) = open_vault();
+        Self { tabs: Tabs::default(), vault, store, vault_error, section: Section::Hosts,
+            host_editor: None,
+            host_menu: None,
+            editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
             query: String::new(),
@@ -145,8 +164,8 @@ impl Shell {
 
     pub fn connect_host(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(host) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::new(&host.address, host.username.clone());
-        let (label, os) = (host.label.clone(), host.os.clone());
+        let target = SshTarget::for_host(host);
+        let (label, os) = (host.display_label().to_owned(), host.os.clone());
         self.open_ssh(label, os, target, window, cx);
     }
 
@@ -218,6 +237,7 @@ impl Render for Shell {
             )
             .child(div().flex_1().min_h_0().child(content))
             .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))
+            .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| d.children(self.render_host_menu(window, cx)))
     }
 }
 

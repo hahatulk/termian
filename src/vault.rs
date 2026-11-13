@@ -1,16 +1,18 @@
 //! Vault contents shown on the Hosts screen: groups (nestable) and hosts.
 
+use serde::{Deserialize, Serialize};
+
 pub type GroupId = u64;
 pub type HostId = u64;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     pub id: GroupId,
     pub label: String,
     pub parent: Option<GroupId>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Host {
     pub id: HostId,
     pub label: String,
@@ -20,9 +22,28 @@ pub struct Host {
     pub group: Option<GroupId>,
     pub username: Option<String>,
     pub tags: Vec<String>,
+    /// SSH port when it is not 22.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Saved in the native vault only; never read from the legacy profile.
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 impl Host {
+    /// `address:port` for the SSH target; the address alone on port 22.
+    pub fn destination(&self) -> String {
+        match self.port {
+            Some(port) if port != 22 => format!("{}:{port}", self.address),
+            _ => self.address.clone(),
+        }
+    }
+
+    /// Name on cards and tabs: the label, or the address when there is none.
+    pub fn display_label(&self) -> &str {
+        if self.label.trim().is_empty() { &self.address } else { &self.label }
+    }
+
     /// Card subtitle as in the legacy UI: protocol, user, then tags.
     pub fn subtitle(&self) -> String {
         std::iter::once("ssh")
@@ -39,7 +60,7 @@ impl Host {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SshKey {
     pub id: u64,
     pub label: String,
@@ -67,7 +88,7 @@ pub fn key_kind(public_key: &str) -> String {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Identity {
     pub id: u64,
     pub label: String,
@@ -86,7 +107,7 @@ impl Identity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Snippet {
     pub id: u64,
     pub label: String,
@@ -101,14 +122,14 @@ impl Snippet {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct KnownHost {
     pub id: u64,
     /// `host` or `[host]:port`, as in OpenSSH known_hosts.
     pub host: String,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
     pub groups: Vec<Group>,
     pub hosts: Vec<Host>,
@@ -154,6 +175,46 @@ impl Vault {
         self.hosts.iter().filter(|h| query.is_empty() || h.matches(query)).collect()
     }
 
+    /// A free id for a new record of any kind.
+    pub fn next_id(&self) -> u64 {
+        let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id));
+        ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).max().unwrap_or(0) + 1
+    }
+
+    pub fn host(&self, id: HostId) -> Option<&Host> {
+        self.hosts.iter().find(|h| h.id == id)
+    }
+
+    /// Adds the host, or replaces the one with the same id.
+    pub fn save_host(&mut self, host: Host) {
+        match self.hosts.iter_mut().find(|h| h.id == host.id) {
+            Some(existing) => *existing = host,
+            None => self.hosts.push(host),
+        }
+    }
+
+    pub fn remove_host(&mut self, id: HostId) -> Option<Host> {
+        let index = self.hosts.iter().position(|h| h.id == id)?;
+        Some(self.hosts.remove(index))
+    }
+
+    /// Duplicate in the legacy host menu: a copy under a new id, right after the original.
+    pub fn duplicate_host(&mut self, id: HostId) -> Option<HostId> {
+        let index = self.hosts.iter().position(|h| h.id == id)?;
+        let copy = Host { id: self.next_id(), ..self.hosts[index].clone() };
+        let new_id = copy.id;
+        self.hosts.insert(index + 1, copy);
+        Some(new_id)
+    }
+
+    /// Tags used by any host, sorted, for the Tags suggestions.
+    pub fn all_tags(&self) -> Vec<String> {
+        let mut tags: Vec<String> = self.hosts.iter().flat_map(|h| h.tags.iter().cloned()).collect();
+        tags.sort_by_key(|t| t.to_lowercase());
+        tags.dedup();
+        tags
+    }
+
     fn is_within(&self, mut group: Option<GroupId>, ancestor: Option<GroupId>) -> bool {
         for _ in 0..=self.groups.len() {
             if group == ancestor {
@@ -181,6 +242,8 @@ pub(crate) mod tests {
             group,
             username: None,
             tags: vec![],
+            port: None,
+            password: None,
         }
     }
 
@@ -204,6 +267,22 @@ pub(crate) mod tests {
 
     fn labels(hosts: Vec<&Host>) -> Vec<&str> {
         hosts.into_iter().map(|h| h.label.as_str()).collect()
+    }
+
+    #[test]
+    fn hosts_are_saved_duplicated_and_removed() {
+        let mut v = vault();
+        let id = v.next_id();
+        v.save_host(Host { port: Some(2222), ..host(id, "", None) });
+        assert_eq!(v.host(id).unwrap().display_label(), format!("10.0.0.{id}"));
+        assert_eq!(v.host(id).unwrap().destination(), format!("10.0.0.{id}:2222"));
+        let copy = v.duplicate_host(10).unwrap();
+        let position = |id| v.hosts.iter().position(|h| h.id == id).unwrap();
+        assert_eq!(position(copy), position(10) + 1);
+        assert_eq!(v.host(copy).unwrap().label, "Termian");
+        assert!(v.remove_host(copy).is_some() && v.host(copy).is_none());
+        v.save_host(Host { label: "renamed".into(), ..v.host(10).unwrap().clone() });
+        assert_eq!(v.host(10).unwrap().label, "renamed");
     }
 
     #[test]
@@ -287,6 +366,8 @@ pub fn demo() -> Vault {
         group,
         username: user.map(Into::into),
         tags: tags.iter().map(|t| t.to_string()).collect(),
+        port: None,
+        password: None,
     };
     Vault {
         groups: vec![

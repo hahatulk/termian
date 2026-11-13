@@ -300,6 +300,7 @@ mod tests {
             username: Some("root".into()),
             known_hosts: state.path().join("known_hosts"),
             identity_files: vec![],
+            password: None,
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
@@ -352,6 +353,7 @@ mod tests {
             username: Some("root".into()),
             known_hosts: dir.path().join("known_hosts"),
             identity_files: vec![],
+            password: None,
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();
@@ -379,6 +381,7 @@ mod tests {
             username: Some("root".into()),
             known_hosts: state.join("known_hosts"),
             identity_files: vec![],
+            password: None,
         };
         let mut remote = RemoteFs::connect(target);
         let mut events = remote.take_events().unwrap();

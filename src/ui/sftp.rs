@@ -261,10 +261,20 @@ impl Shell {
             .child(remote.w_1_2())
     }
 
-    fn connect_sftp(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+    /// "Connect with SFTP" from a host card: the SFTP tab, remote side on that host.
+    pub fn open_sftp_for(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.all().iter().find(|t| matches!(t.kind, termian_native::tabs::TabKind::Sftp)).map(|t| t.id) {
+            self.tabs.activate(tab);
+        }
+        self.disconnect_sftp();
+        self.connect_sftp(host, window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn connect_sftp(&mut self, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
-        let target = SshTarget::new(&entry.address, entry.username.clone());
-        let (label, os) = (entry.label.clone(), entry.os.clone());
+        let target = SshTarget::for_host(entry);
+        let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.connect_sftp_target(label, os, target, window, cx);
     }
 

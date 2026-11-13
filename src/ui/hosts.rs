@@ -73,6 +73,8 @@ pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String)
         .child(tile)
         .child(
             div()
+                .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
                 .overflow_hidden()
@@ -118,7 +120,8 @@ impl Shell {
             Section::KnownHosts => self.render_known_hosts().into_any_element(),
             Section::Logs => self.render_logs().into_any_element(),
         };
-        div().size_full().flex().child(self.render_sidebar(cx)).child(content).into_any_element()
+        let editor = if self.section == Section::Hosts { self.render_host_editor(window, cx) } else { None };
+        div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -242,7 +245,7 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(tool_button("new-host", "new_host", "NEW HOST"))
+            .child(tool_button("new-host", "new_host", "NEW HOST").on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
             .child(tool_button("terminal", "terminal", "TERMINAL").on_click(cx.listener(|shell, _, window, cx| {
                 shell.open_local_terminal(window, cx);
             })))
@@ -254,7 +257,7 @@ impl Shell {
         let mut body = div().id("hosts-scroll").flex_1().overflow_y_scroll().px_5().pb_5();
 
         if let Some(error) = &self.vault_error {
-            body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(format!("Could not read the legacy profile: {error}")));
+            body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(format!("Vault: {error}")));
         }
 
         if !self.query.trim().is_empty() {
@@ -289,13 +292,35 @@ impl Shell {
 
     fn render_host(&self, host: &Host, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = host.id;
-        card(format!("host-{id}").into(), host_tile(host), host.label.clone(), host.subtitle()).on_click(cx.listener(
-            move |shell, event: &gpui::ClickEvent, window, cx| {
+        let group = SharedString::from(format!("host-card-{id}"));
+        // The pencil shows on hover, as the legacy entity cell's edit button.
+        let edit = div()
+            .id(SharedString::from(format!("host-edit-{id}")))
+            .size(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .invisible()
+            .group_hover(group.clone(), |s| s.visible())
+            .hover(|s| s.bg(rgb(theme::INPUT)))
+            .child(svg().path(icon("edit")).size(px(12.)).text_color(rgb(theme::TEXT)))
+            .on_click(cx.listener(move |shell, _, window, cx| {
+                cx.stop_propagation();
+                shell.edit_host(id, window, cx);
+            }));
+        card(format!("host-{id}").into(), host_tile(host), host.display_label().to_owned(), host.subtitle())
+            .group(group)
+            .child(edit)
+            .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
                 if event.click_count() >= 2 {
                     shell.connect_host(id, window, cx);
                 }
-            },
-        ))
+            }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                shell.open_host_menu(id, event, cx);
+            }))
     }
 
     fn render_group(&self, group: &Group, cx: &mut Context<Self>) -> Stateful<Div> {
