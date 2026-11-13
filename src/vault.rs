@@ -254,6 +254,21 @@ pub struct Vault {
     pub history: Vec<HistoryEntry>,
     #[serde(default)]
     pub rules: Vec<ForwardingRule>,
+    /// Portable JSON of each record as last received from a snapshot, keyed
+    /// `kind|id`: fields this client does not model survive a sync.
+    #[serde(default)]
+    pub portable: std::collections::BTreeMap<String, serde_json::Value>,
+    /// Snapshot collections and settings this client does not model, kept as they are.
+    #[serde(default)]
+    pub foreign: serde_json::Value,
+    /// Passwords and private keys were not loaded (read from the legacy
+    /// profile): uploading this data would erase them in the cloud.
+    #[serde(default)]
+    pub secrets_missing: bool,
+    #[serde(default)]
+    pub cloud: Option<crate::cloud::CloudConfig>,
+    #[serde(default)]
+    pub sync_state: Option<crate::sync::State>,
 }
 
 impl Vault {
@@ -790,6 +805,6 @@ pub fn demo() -> Vault {
             .enumerate()
             .map(|(i, host)| HistoryEntry { id: i as u64 + 1, host: Some(*host), connected_at: 1_794_000_000 - i as i64 * 3600, ..HistoryEntry::default() })
             .collect(),
-        rules: Vec::new(),
+        ..Vault::default()
     }
 }

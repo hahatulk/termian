@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use super::cipher::FieldCipher;
 use super::ssv::{self, Value};
-use crate::vault::{key_kind, Group, Host, Identity, KnownHost, Snippet, SshKey, Vault};
+use crate::vault::{key_kind, ForwardingRule, Group, Host, Identity, KnownHost, RuleKind, Snippet, SshKey, Vault};
 
 /// Keychain entry that holds the legacy local key.
 pub const KEYCHAIN_SERVICE: &str = "termian";
@@ -126,7 +126,29 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
-    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts, history: Vec::new(), rules: Vec::new() })
+    let rules = store("pf_rules")
+        .iter()
+        .map(|(id, v)| {
+            let port = |field: &str| v.get(field).and_then(Value::as_f64).and_then(|n| u16::try_from(n as u64).ok());
+            ForwardingRule {
+                id: *id,
+                label: text(v.get("label")).unwrap_or_default(),
+                kind: match text(v.get("pf_type")).as_deref() {
+                    Some("Remote Rule") => RuleKind::Remote,
+                    Some("Dynamic Rule") => RuleKind::Dynamic,
+                    _ => RuleKind::Local,
+                },
+                host: link(v, "host"),
+                bind_address: text(v.get("bound_address")).filter(|a| !a.is_empty()).unwrap_or_else(|| "127.0.0.1".into()),
+                port: port("local_port"),
+                destination: text(v.get("hostname")).unwrap_or_default(),
+                destination_port: port("remote_port"),
+            }
+        })
+        .collect();
+
+    // Secrets are never decrypted here, so this data must not be uploaded as is.
+    Ok(Vault { groups, hosts, keys, identities, snippets, known_hosts, rules, secrets_missing: true, ..Vault::default() })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
@@ -197,6 +219,7 @@ mod tests {
         Text(&'a str),
         Secret(&'a str),
         Link(i32),
+        Int(i32),
     }
 
     fn record(fields: &[(&str, F)]) -> Vec<u8> {
@@ -206,6 +229,7 @@ mod tests {
             e.key(key);
             match field {
                 F::Text(s) => e.string(s),
+                F::Int(n) => e.int(*n),
                 F::Secret(s) => e.string(&cipher().encrypt(s, [i as u8; 24])),
                 F::Link(n) => {
                     e.begin_object();
@@ -303,6 +327,31 @@ mod tests {
         assert_eq!(vault.known_hosts[0].host, "[10.0.0.1]:2001");
         let debug = format!("{vault:?}");
         assert!(!debug.contains("PRIVATE KEY") && !debug.contains("\"pw\""), "secrets leaked: {debug}");
+    }
+
+    #[test]
+    fn loads_port_forwarding_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(dir.path(), "pf_rules", vec![(9., record(&[
+            ("label", F::Secret("postgres")),
+            ("pf_type", F::Text("Remote Rule")),
+            ("host", F::Link(220)),
+            ("local_port", F::Int(8080)),
+            ("hostname", F::Secret("127.0.0.1")),
+            ("remote_port", F::Int(5432)),
+        ]))]);
+        let vault = load_vault(dir.path(), &cipher()).unwrap();
+        assert_eq!(vault.rules, vec![ForwardingRule {
+            id: 9,
+            label: "postgres".into(),
+            kind: RuleKind::Remote,
+            host: Some(220),
+            bind_address: "127.0.0.1".into(),
+            port: Some(8080),
+            destination: "127.0.0.1".into(),
+            destination_port: Some(5432),
+        }]);
+        assert!(vault.secrets_missing, "profile data is never sent to the cloud as is");
     }
 
     #[test]
