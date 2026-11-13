@@ -1,6 +1,7 @@
 //! New Tab, as in the legacy client: the "Search hosts or tabs" field on
-//! top, then "Recent connections" (click selects, double click or Restore
-//! connects), or the "Recent sessions" empty state when there is no history.
+//! top (it opens the command palette), then "Recent connections" (click
+//! selects, double click or Restore connects), or the "Recent sessions"
+//! empty state when there is no history.
 
 use gpui::{div, prelude::*, px, rgb, AnyElement, ClickEvent, Context, Div, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::theme;
@@ -19,9 +20,9 @@ pub struct Launcher {
 }
 
 #[cfg(target_os = "macos")]
-const PALETTE_SHORTCUT: &str = "⌘K";
+pub const PALETTE_SHORTCUT: &str = "⌘K";
 #[cfg(not(target_os = "macos"))]
-const PALETTE_SHORTCUT: &str = "Ctrl+K";
+pub const PALETTE_SHORTCUT: &str = "Ctrl+K";
 
 impl Shell {
     /// Connects from a New Tab: the session takes the New Tab's place.
@@ -40,15 +41,14 @@ impl Shell {
     fn on_launcher_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let paste = cx.read_from_clipboard().and_then(|item| item.text());
         match dialog::edit(Some(&mut self.launcher.query), &event.keystroke, paste) {
-            Key::Edited => self.launcher.selected.clear(),
+            // Typing goes to the command palette, as the legacy field does.
+            Key::Edited => {
+                let query = std::mem::take(&mut self.launcher.query);
+                self.open_palette(query, window, cx);
+            }
             Key::Enter => {
-                // Enter restores the selected connections, or opens the first search result.
-                let hosts = if self.launcher.selected.is_empty() {
-                    self.vault.search(&self.launcher.query).first().map(|h| vec![h.id]).unwrap_or_default()
-                } else {
-                    self.launcher.selected.clone()
-                };
-                if !self.launcher.query.trim().is_empty() || !hosts.is_empty() {
+                let hosts = self.launcher.selected.clone();
+                if !hosts.is_empty() {
                     self.launch(hosts, window, cx);
                 }
             }
@@ -125,10 +125,7 @@ impl Shell {
                     .when(focused && !query.is_empty(), |d| d.child(caret())),
             )
             .child(div().mx(px(5.)).text_color(rgb(theme::TEXT_MUTED)).child(PALETTE_SHORTCUT))
-            .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.launcher_focus);
-                cx.notify();
-            }));
+            .on_click(cx.listener(|shell, _, window, cx| shell.open_palette(String::new(), window, cx)));
 
         let section = |title: &str, actions: Vec<AnyElement>| {
             div()
@@ -142,12 +139,7 @@ impl Shell {
                 .child(div().flex().items_center().gap(px(10.)).child(div().flex_1().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child(title.to_owned())).children(actions))
         };
 
-        let body = if !query.trim().is_empty() {
-            // Typing searches hosts here; the legacy field opens the command palette instead.
-            let rows: Vec<_> = self.vault.search(query).iter().take(20).filter_map(|h| self.launcher_row(h.id, false, cx)).collect();
-            let found = !rows.is_empty();
-            section(if found { "Hosts" } else { "No hosts found" }, Vec::new()).children(rows)
-        } else {
+        let body = {
             let recent: Vec<HostId> = self.vault.recent_hosts().iter().map(|h| h.id).collect();
             if recent.is_empty() {
                 div()

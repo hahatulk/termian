@@ -5,6 +5,7 @@ pub mod files;
 pub mod keys;
 pub mod legacy;
 pub mod login;
+pub mod palette;
 pub mod remote_fs;
 pub mod session;
 pub mod store;

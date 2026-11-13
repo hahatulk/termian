@@ -35,6 +35,10 @@ pub struct Shell {
     group_menu: Option<ui::group_editor::GroupMenu>,
     launcher: ui::launcher::Launcher,
     launcher_focus: FocusHandle,
+    palette: Option<ui::palette::Palette>,
+    palette_focus: FocusHandle,
+    /// Holds the keyboard when nothing else does, so shortcuts like ⌘K work.
+    root_focus: FocusHandle,
     editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
@@ -87,6 +91,9 @@ impl Shell {
             group_menu: None,
             launcher: Default::default(),
             launcher_focus: cx.focus_handle(),
+            palette: None,
+            palette_focus: cx.focus_handle(),
+            root_focus: cx.focus_handle(),
             editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
@@ -255,11 +262,18 @@ impl Render for Shell {
             .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| {
                 d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))
             })
+            .track_focus(&self.root_focus)
+            .children(self.render_palette(window, cx))
+            .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
     }
 }
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        #[cfg(target_os = "macos")]
+        cx.bind_keys([gpui::KeyBinding::new("cmd-k", ui::palette::OpenPalette, None)]);
+        #[cfg(not(target_os = "macos"))]
+        cx.bind_keys([gpui::KeyBinding::new("ctrl-k", ui::palette::OpenPalette, None)]);
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         cx.open_window(
             WindowOptions {
@@ -271,7 +285,12 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_, cx| cx.new(Shell::new),
+            |window, cx| {
+                let shell = cx.new(Shell::new);
+                let focus = shell.read(cx).root_focus.clone();
+                window.focus(&focus);
+                shell
+            },
         )
         .expect("failed to open the main window");
         cx.activate(true);
