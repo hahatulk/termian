@@ -31,6 +31,8 @@ pub struct Shell {
     host_editor: Option<ui::host_editor::HostEditor>,
     host_menu: Option<ui::host_editor::HostMenu>,
     key_editor: Option<ui::key_editor::KeyEditor>,
+    group_editor: Option<ui::group_editor::GroupEditor>,
+    group_menu: Option<ui::group_editor::GroupMenu>,
     editor_focus: FocusHandle,
     section: Section,
     group: Option<GroupId>,
@@ -79,6 +81,8 @@ impl Shell {
             host_editor: None,
             host_menu: None,
             key_editor: None,
+            group_editor: None,
+            group_menu: None,
             editor_focus: cx.focus_handle(),
             group: None,
             terminals: HashMap::new(),
@@ -239,7 +243,9 @@ impl Render for Shell {
             )
             .child(div().flex_1().min_h_0().child(content))
             .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))
-            .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| d.children(self.render_host_menu(window, cx)))
+            .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| {
+                d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))
+            })
     }
 }
 

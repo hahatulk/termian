@@ -52,7 +52,7 @@ pub struct HostMenu {
     confirm_remove: bool,
 }
 
-fn field_box(focused: bool) -> Div {
+pub(super) fn field_box(focused: bool) -> Div {
     div()
         .h(px(40.))
         .px_3()
@@ -65,11 +65,11 @@ fn field_box(focused: bool) -> Div {
         .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
 }
 
-fn caret() -> Div {
+pub(super) fn caret() -> Div {
     div().w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))
 }
 
-fn card(title: &str) -> Div {
+pub(super) fn card(title: &str) -> Div {
     div()
         .p(px(15.))
         .pb(px(20.))
@@ -81,7 +81,7 @@ fn card(title: &str) -> Div {
         .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(title.to_owned()))
 }
 
-fn menu_row(id: String, label: &str, red: bool, disabled: bool) -> Stateful<Div> {
+pub(super) fn menu_row(id: String, label: &str, red: bool, disabled: bool) -> Stateful<Div> {
     div()
         .id(SharedString::from(id))
         .h(px(32.))
@@ -99,7 +99,7 @@ fn menu_row(id: String, label: &str, red: bool, disabled: bool) -> Stateful<Div>
         .child(label.to_owned())
 }
 
-fn menu_panel(id: &str) -> Stateful<Div> {
+pub(super) fn menu_panel(id: &str) -> Stateful<Div> {
     div()
         .id(SharedString::from(id.to_owned()))
         .w(px(MENU_WIDTH))
@@ -158,6 +158,8 @@ impl Shell {
     fn open_editor(&mut self, host: Host, is_new: bool, window: &mut Window, cx: &mut Context<Self>) {
         let port = host.port.map(|p| p.to_string()).unwrap_or_default();
         self.host_menu = None;
+        self.group_editor = None;
+        self.group_menu = None;
         self.host_editor = Some(HostEditor {
             host,
             is_new,
@@ -408,7 +410,7 @@ impl Shell {
                     cx.notify();
                 }))
             };
-            let mut list = div().id("editor-group-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).child(choice(None, "No group".into(), cx));
+            let mut list = div().id("editor-group-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No group".into(), cx));
             for group in &self.vault.groups {
                 // Nested groups read as a path: work / Cenix.
                 let path = self.vault.breadcrumbs(Some(group.id)).iter().map(|g| g.label.as_str()).collect::<Vec<_>>().join(" / ");
@@ -498,8 +500,8 @@ impl Shell {
 
         let general = card("General")
             .child(self.input(Field::Label, "Label", &host.label, false, window, cx))
-            .child(group_picker)
-            .children(groups)
+            // Lists open over the form, like the legacy autocomplete menus.
+            .child(div().relative().child(group_picker).children(groups.map(|list| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list)))))
             .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)));
 
         let ssh = card("SSH")
@@ -622,7 +624,7 @@ impl Shell {
                     }))
                 })
             };
-            let mut list = div().id("editor-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).child(choice(None, "No key".into(), true, cx));
+            let mut list = div().id("editor-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No key".into(), true, cx));
             for key in &self.vault.keys {
                 // Keys read from the legacy profile carry no private key and cannot be used yet.
                 let usable = key.private_key.is_some();
@@ -631,7 +633,8 @@ impl Shell {
             }
             list
         });
-        div().flex().flex_col().gap(px(10.)).child(picker).children(list)
+        // Opens upwards: the picker sits at the bottom of the form, above Connect.
+        div().relative().child(picker).children(list.map(|list| gpui::deferred(div().absolute().bottom_full().left_0().right_0().mb_1().child(list))))
     }
 
     pub fn open_host_menu(&mut self, host: HostId, event: &MouseDownEvent, cx: &mut Context<Self>) {

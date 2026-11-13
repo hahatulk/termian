@@ -121,7 +121,7 @@ impl Shell {
             Section::Logs => self.render_logs().into_any_element(),
         };
         let editor = match self.section {
-            Section::Hosts => self.render_host_editor(window, cx),
+            Section::Hosts => self.render_host_editor(window, cx).or_else(|| self.render_group_editor(window, cx)),
             Section::Keychain => self.render_key_editor(window, cx),
             _ => None,
         };
@@ -249,7 +249,29 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(tool_button("new-host", "new_host", "NEW HOST").on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(1.))
+                    .child(tool_button("new-host", "new_host", "NEW HOST").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
+                    // The split button's arrow: New Host / New Group, as in the legacy toolbar.
+                    .child(
+                        div()
+                            .id("new-menu")
+                            .h(px(26.))
+                            .px_2()
+                            .flex()
+                            .items_center()
+                            .rounded_r_md()
+                            .bg(rgb(theme::INPUT))
+                            .child(glyph("chevron", 8., theme::TEXT))
+                            .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                                let at = event.position();
+                                shell.open_group_menu(None, gpui::Point { x: at.x - px(20.), y: at.y + px(14.) }, cx);
+                            })),
+                    ),
+            )
             .child(tool_button("terminal", "terminal", "TERMINAL").on_click(cx.listener(|shell, _, window, cx| {
                 shell.open_local_terminal(window, cx);
             })))
@@ -331,10 +353,32 @@ impl Shell {
         let id = group.id;
         let count = self.vault.hosts_under(Some(id)).len();
         let noun = if count == 1 { "Host" } else { "Hosts" };
+        let hover = SharedString::from(format!("group-card-{id}"));
+        let edit = div()
+            .id(SharedString::from(format!("group-edit-{id}")))
+            .size(px(28.))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_md()
+            .invisible()
+            .group_hover(hover.clone(), |s| s.visible())
+            .hover(|s| s.bg(rgb(theme::INPUT)))
+            .child(svg().path(icon("edit")).size(px(12.)).text_color(rgb(theme::TEXT)))
+            .on_click(cx.listener(move |shell, _, window, cx| {
+                cx.stop_propagation();
+                shell.edit_group(id, window, cx);
+            }));
         card(format!("group-{id}").into(), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {noun}"))
+            .group(hover)
+            .child(edit)
             .on_click(cx.listener(move |shell, _, _, cx| {
                 shell.group = Some(id);
                 cx.notify();
+            }))
+            .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
+                shell.open_group_card_menu(id, event, cx);
             }))
     }
 

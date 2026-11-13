@@ -203,6 +203,49 @@ impl Vault {
         }
     }
 
+    /// Adds the group, or replaces the one with the same id.
+    pub fn save_group(&mut self, group: Group) {
+        match self.groups.iter_mut().find(|g| g.id == group.id) {
+            Some(existing) => *existing = group,
+            None => self.groups.push(group),
+        }
+    }
+
+    /// The group and every group inside it.
+    pub fn subtree(&self, id: GroupId) -> Vec<GroupId> {
+        let mut out = vec![id];
+        let mut index = 0;
+        while index < out.len() {
+            let parent = out[index];
+            let children: Vec<GroupId> = self.groups.iter().filter(|g| g.parent == Some(parent) && !out.contains(&g.id)).map(|g| g.id).collect();
+            out.extend(children);
+            index += 1;
+        }
+        out
+    }
+
+    /// Groups a group may move into: not itself and not one of its own subgroups.
+    pub fn parent_choices(&self, id: GroupId) -> Vec<&Group> {
+        let excluded = self.subtree(id);
+        self.groups.iter().filter(|g| !excluded.contains(&g.id)).collect()
+    }
+
+    /// `work / Cenix`.
+    pub fn group_path(&self, id: GroupId) -> String {
+        self.breadcrumbs(Some(id)).iter().map(|g| g.label.as_str()).collect::<Vec<_>>().join(" / ")
+    }
+
+    /// Removes a group with its subgroups and their hosts, as the legacy
+    /// "Remove a group … And these hosts" does. Returns the removed hosts.
+    pub fn remove_group(&mut self, id: GroupId) -> Vec<Host> {
+        let groups = self.subtree(id);
+        let (removed, kept): (Vec<Host>, Vec<Host>) =
+            std::mem::take(&mut self.hosts).into_iter().partition(|h| h.group.is_some_and(|g| groups.contains(&g)));
+        self.hosts = kept;
+        self.groups.retain(|g| !groups.contains(&g.id));
+        removed
+    }
+
     pub fn key(&self, id: u64) -> Option<&SshKey> {
         self.keys.iter().find(|k| k.id == id)
     }
@@ -300,6 +343,21 @@ pub(crate) mod tests {
 
     fn labels(hosts: Vec<&Host>) -> Vec<&str> {
         hosts.into_iter().map(|h| h.label.as_str()).collect()
+    }
+
+    #[test]
+    fn groups_move_without_cycles_and_remove_with_their_hosts() {
+        let mut v = vault();
+        assert_eq!(v.subtree(1), [1, 3]);
+        let choices: Vec<GroupId> = v.parent_choices(1).iter().map(|g| g.id).collect();
+        assert_eq!(choices, [2], "work cannot move into itself or Ugoloc");
+        assert_eq!(v.group_path(3), "work / Ugoloc");
+        v.save_group(Group { id: 3, label: "Ugoloc".into(), parent: Some(2) });
+        assert_eq!(v.group_path(3), "private / Ugoloc");
+        let removed: Vec<HostId> = v.remove_group(2).iter().map(|h| h.id).collect();
+        assert_eq!(removed, [10, 12]);
+        assert!(v.group(2).is_none() && v.group(3).is_none());
+        assert_eq!(v.hosts.iter().map(|h| h.id).collect::<Vec<_>>(), [11, 13]);
     }
 
     #[test]

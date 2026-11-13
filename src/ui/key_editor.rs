@@ -142,7 +142,19 @@ impl Shell {
         let focused = self.key_editor.as_ref().is_some_and(|e| e.field == field) && self.editor_focus.is_focused(window);
         let multiline = field == Field::PrivateKey;
         let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        let lines: Vec<String> = if shown.is_empty() { vec![String::new()] } else { shown.lines().map(str::to_owned).collect() };
+        // Base64 lines have no spaces to wrap at, so the key is cut into rows that fit.
+        let width = if multiline { 46 } else { usize::MAX };
+        let lines: Vec<String> = if shown.is_empty() {
+            vec![String::new()]
+        } else {
+            shown
+                .lines()
+                .flat_map(|line| {
+                    let chars: Vec<char> = line.chars().collect();
+                    if chars.is_empty() { vec![String::new()] } else { chars.chunks(width).map(|c| c.iter().collect()).collect() }
+                })
+                .collect()
+        };
         let last = lines.len() - 1;
         div()
             .id(SharedString::from(format!("key-field-{label}")))
