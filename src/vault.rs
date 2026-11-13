@@ -139,6 +139,63 @@ pub struct KnownHost {
     pub host: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RuleKind {
+    Local,
+    Remote,
+    Dynamic,
+}
+
+/// A port forwarding rule, with the legacy field meanings: `port` is the
+/// local port (Local, Dynamic) or the port opened on the server (Remote).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ForwardingRule {
+    pub id: u64,
+    pub label: String,
+    pub kind: RuleKind,
+    pub host: Option<HostId>,
+    pub bind_address: String,
+    pub port: Option<u16>,
+    pub destination: String,
+    pub destination_port: Option<u16>,
+}
+
+impl ForwardingRule {
+    pub fn new(id: u64, kind: RuleKind) -> Self {
+        let label = match kind {
+            RuleKind::Local => "Local Rule",
+            RuleKind::Remote => "Remote Rule",
+            RuleKind::Dynamic => "Dynamic Rule",
+        };
+        Self { id, label: label.into(), kind, host: None, bind_address: "127.0.0.1".into(), port: None, destination: String::new(), destination_port: None }
+    }
+
+    /// Everything the rule needs to run, as the legacy `isValid`.
+    pub fn is_valid(&self) -> bool {
+        let base = self.host.is_some() && self.port.is_some();
+        match self.kind {
+            RuleKind::Dynamic => base,
+            RuleKind::Local | RuleKind::Remote => base && !self.destination.trim().is_empty() && self.destination_port.is_some(),
+        }
+    }
+
+    /// `From home lab:8080 to 10.0.0.5:80` (Dynamic: just the From part).
+    pub fn rule_text(&self, vault: &Vault) -> String {
+        let host = self.host.and_then(|h| vault.host(h)).map(|h| h.display_label().to_owned()).unwrap_or_default();
+        let port = self.port.map(|p| p.to_string()).unwrap_or_default();
+        let from = format!("From {host}:{port}");
+        match self.kind {
+            RuleKind::Dynamic => from,
+            _ => format!("{from} to {}:{}", self.destination, self.destination_port.map(|p| p.to_string()).unwrap_or_default()),
+        }
+    }
+
+    /// Card title: the label, or the rule when the label is empty.
+    pub fn title(&self, vault: &Vault) -> String {
+        if self.label.trim().is_empty() && self.is_valid() { self.rule_text(vault) } else { self.label.clone() }
+    }
+}
+
 /// One connection in the history the New Tab screen lists.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HistoryEntry {
@@ -161,6 +218,8 @@ pub struct Vault {
     /// Newest first.
     #[serde(default)]
     pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub rules: Vec<ForwardingRule>,
 }
 
 impl Vault {
@@ -225,7 +284,7 @@ impl Vault {
 
     /// A free id for a new record of any kind.
     pub fn next_id(&self) -> u64 {
-        let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id));
+        let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id)).chain(self.rules.iter().map(|r| r.id));
         ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).max().unwrap_or(0) + 1
     }
 
@@ -282,6 +341,21 @@ impl Vault {
         self.hosts = kept;
         self.groups.retain(|g| !groups.contains(&g.id));
         removed
+    }
+
+    pub fn rule(&self, id: u64) -> Option<&ForwardingRule> {
+        self.rules.iter().find(|r| r.id == id)
+    }
+
+    pub fn save_rule(&mut self, rule: ForwardingRule) {
+        match self.rules.iter_mut().find(|r| r.id == rule.id) {
+            Some(existing) => *existing = rule,
+            None => self.rules.push(rule),
+        }
+    }
+
+    pub fn remove_rule(&mut self, id: u64) {
+        self.rules.retain(|r| r.id != id);
     }
 
     pub fn key(&self, id: u64) -> Option<&SshKey> {
@@ -381,6 +455,25 @@ pub(crate) mod tests {
 
     fn labels(hosts: Vec<&Host>) -> Vec<&str> {
         hosts.into_iter().map(|h| h.label.as_str()).collect()
+    }
+
+    #[test]
+    fn forwarding_rules_read_like_the_legacy_cards() {
+        let v = vault();
+        let mut rule = ForwardingRule::new(50, RuleKind::Local);
+        assert!(!rule.is_valid());
+        assert_eq!(rule.title(&v), "Local Rule");
+        rule.host = Some(11);
+        rule.port = Some(8080);
+        rule.destination = "10.0.0.5".into();
+        rule.destination_port = Some(80);
+        assert!(rule.is_valid());
+        assert_eq!(rule.rule_text(&v), "From Office VPN:8080 to 10.0.0.5:80");
+        rule.label.clear();
+        assert_eq!(rule.title(&v), "From Office VPN:8080 to 10.0.0.5:80");
+        let dynamic = ForwardingRule { kind: RuleKind::Dynamic, destination: String::new(), destination_port: None, ..rule };
+        assert!(dynamic.is_valid());
+        assert_eq!(dynamic.rule_text(&v), "From Office VPN:8080");
     }
 
     #[test]
@@ -562,5 +655,6 @@ pub fn demo() -> Vault {
             .enumerate()
             .map(|(i, host)| HistoryEntry { host: *host, connected_at: 1_794_000_000 - i as i64 * 3600 })
             .collect(),
+        rules: Vec::new(),
     }
 }

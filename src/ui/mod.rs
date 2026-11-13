@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod dialog;
 pub mod host_editor;
+pub mod forwarding;
 pub mod group_editor;
 pub mod hosts;
 pub mod key_editor;

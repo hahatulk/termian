@@ -266,6 +266,8 @@ pub(crate) struct Verifier {
     port: u16,
     known_hosts: PathBuf,
     io: SharedPrompter,
+    /// Remote port forwarding: where connections the server sends back go.
+    pub(crate) forward_to: Option<(String, u16)>,
 }
 
 fn key_label(key: &PublicKey) -> String {
@@ -274,6 +276,30 @@ fn key_label(key: &PublicKey) -> String {
 
 impl client::Handler for Verifier {
     type Error = russh::Error;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<client::Msg>,
+        _: &str,
+        _: u32,
+        _: &str,
+        _: u32,
+        reply: client::ChannelOpenHandle,
+        _: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some((host, port)) = self.forward_to.clone() else {
+            reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
+            return Ok(());
+        };
+        reply.accept().await;
+        tokio::spawn(async move {
+            if let Ok(mut local) = tokio::net::TcpStream::connect((host.as_str(), port)).await {
+                let mut remote = channel.into_stream();
+                let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+            }
+        });
+        Ok(())
+    }
 
     async fn check_server_key(&mut self, server_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         let key: PublicKey = match server_key {
@@ -368,6 +394,11 @@ async fn run_ssh(
 
 /// Opens an authenticated SSH connection, asking `io` whatever login needs.
 pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Handle<Verifier>, String> {
+    connect_forwarding(target, io, None).await
+}
+
+/// [`connect`] that also accepts connections the server forwards back (remote forwarding).
+pub(crate) async fn connect_forwarding(target: &SshTarget, io: SharedPrompter, forward_to: Option<(String, u16)>) -> Result<Handle<Verifier>, String> {
     let address = format!("{}:{}", target.host, target.port);
     {
         let mut io = io.lock().await;
@@ -383,7 +414,7 @@ pub(crate) async fn connect(target: &SshTarget, io: SharedPrompter) -> Result<Ha
 
     let config = client::Config { keepalive_interval: Some(Duration::from_secs(30)), keepalive_max: 3, ..Default::default() };
     let verifier =
-        Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone() };
+        Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to };
     let mut handle = client::connect_stream(Arc::new(config), stream, verifier).await.map_err(|error| match error {
         russh::Error::UnknownKey => "Host key verification failed.".to_string(),
         other => format!("SSH handshake failed: {other}"),
@@ -825,6 +856,46 @@ pub(crate) mod tests {
             async fn shell_request(&mut self, channel: ChannelId, session: &mut ServerSession) -> Result<(), Self::Error> {
                 session.data(channel, b"welcome\r\n".to_vec())?;
                 session.channel_success(channel)
+            }
+
+            async fn channel_open_direct_tcpip(
+                &mut self,
+                channel: Channel<Msg>,
+                host: &str,
+                port: u32,
+                _: &str,
+                _: u32,
+                reply: server::ChannelOpenHandle,
+                _: &mut ServerSession,
+            ) -> Result<(), Self::Error> {
+                // Local and dynamic forwarding: connect to the asked address from here.
+                self.sftp.insert(channel.id());
+                let address = format!("{host}:{port}");
+                reply.accept().await;
+                tokio::spawn(async move {
+                    if let Ok(mut target) = tokio::net::TcpStream::connect(address).await {
+                        let mut stream = channel.into_stream();
+                        let _ = tokio::io::copy_bidirectional(&mut target, &mut stream).await;
+                    }
+                });
+                Ok(())
+            }
+
+            async fn tcpip_forward(&mut self, address: &str, port: &mut u32, session: &mut ServerSession) -> Result<bool, Self::Error> {
+                // Remote forwarding: listen here and send each connection back to the client.
+                let Ok(listener) = tokio::net::TcpListener::bind((address, *port as u16)).await else { return Ok(false) };
+                *port = u32::from(listener.local_addr().map(|a| a.port()).unwrap_or(0));
+                let (handle, address, bound) = (session.handle(), address.to_owned(), *port);
+                tokio::spawn(async move {
+                    while let Ok((mut socket, peer)) = listener.accept().await {
+                        let Ok(channel) = handle.channel_open_forwarded_tcpip(address.clone(), bound, peer.ip().to_string(), u32::from(peer.port())).await else { break };
+                        tokio::spawn(async move {
+                            let mut stream = channel.into_stream();
+                            let _ = tokio::io::copy_bidirectional(&mut socket, &mut stream).await;
+                        });
+                    }
+                });
+                Ok(true)
             }
 
             async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {

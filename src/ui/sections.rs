@@ -9,7 +9,7 @@ use super::hosts::{card, section_title, tile, tool_button};
 use crate::Shell;
 
 /// Toolbar row plus a scrollable body, shared by every section.
-fn page(id: &str, toolbar: Vec<Stateful<Div>>, body: impl IntoElement) -> Div {
+pub(super) fn page(id: &str, toolbar: Vec<Stateful<Div>>, body: impl IntoElement) -> Div {
     div()
         .flex_1()
         .h_full()
@@ -33,12 +33,12 @@ fn page(id: &str, toolbar: Vec<Stateful<Div>>, body: impl IntoElement) -> Div {
         .child(div().id(SharedString::from(id.to_owned())).flex_1().overflow_y_scroll().px_5().pb_5().child(body))
 }
 
-fn grid() -> Div {
+pub(super) fn grid() -> Div {
     div().grid().grid_cols(4).gap_3()
 }
 
 /// Centered illustration and text shown when a section has no items.
-fn empty_state(icon_name: &str, title: &str, text: &str) -> Div {
+pub(super) fn empty_state(icon_name: &str, title: &str, text: &str) -> Div {
     div()
         .pt(px(220.))
         .flex()
@@ -85,18 +85,6 @@ impl Shell {
         }
         let add_key = tool_button("new-key", "keychain", "KEY").on_click(cx.listener(|shell, _, window, cx| shell.new_key(window, cx)));
         page("keychain-scroll", vec![add_key], body)
-    }
-
-    pub fn render_port_forwarding(&self) -> Div {
-        page(
-            "forwarding-scroll",
-            vec![tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING")],
-            empty_state(
-                "port_forwarding",
-                "Set up port forwarding",
-                "Save port forwarding to access databases, web apps, and other services.",
-            ),
-        )
     }
 
     pub fn render_snippets(&self, cx: &mut Context<Self>) -> Div {

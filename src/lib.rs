@@ -2,6 +2,7 @@
 
 pub mod edits;
 pub mod files;
+pub mod forwarding;
 pub mod keys;
 pub mod legacy;
 pub mod login;
