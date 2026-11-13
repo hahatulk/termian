@@ -283,7 +283,9 @@ impl Shell {
                 shell.host_os_detected(history, os);
                 return;
             }
-            shell.session_ended(history);
+            if shell.session_ended(history) {
+                shell.backup_logs_soon(cx);
+            }
             if let TerminalEvent::Close = event {
                 shell.close_terminal_tab(id);
             }
@@ -306,12 +308,14 @@ impl Shell {
         }
     }
 
-    /// Writes a session's end time into its Logs row, once.
-    fn session_ended(&mut self, history: Option<u64>) {
+    /// Writes a session's end time into its Logs row, once; `true` then.
+    fn session_ended(&mut self, history: Option<u64>) -> bool {
         if let Some(entry) = history.and_then(|h| self.vault.history_entry_mut(h)).filter(|e| e.disconnected_at.is_none()) {
             entry.disconnected_at = Some(now());
             self.save_vault();
+            return true;
         }
+        false
     }
 
     /// Closes a tab; dropping its terminal ends the session and finishes its log.
@@ -380,6 +384,35 @@ impl Shell {
 
     /// Opens a session log read-only in a new tab (FR-L4).
     pub fn open_log(&mut self, history: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(entry) = self.vault.history.iter().find(|e| e.id == history) else { return };
+        let Some(log) = &entry.log else { return };
+        // A log missing here comes back from its own-cloud copy first, as in legacy.
+        let file = self.logs_dir.join(session_log::file_name(&log.name));
+        if !file.exists() {
+            if let Some(cloud) = self.vault.cloud.as_ref().and_then(|c| c.validate().ok()) {
+                let (logs_dir, name) = (self.logs_dir.clone(), log.name.clone());
+                let task = cx.background_spawn(async move { termian_native::log_backup::restore(&cloud, &logs_dir, &name) });
+                cx.spawn_in(window, async move |this, cx| {
+                    let restored = task.await;
+                    let _ = this.update_in(cx, |shell, window, cx| {
+                        if let Err(error) = &restored {
+                            eprintln!("[Termian] Session log was not restored from the cloud: {error}");
+                        }
+                        if matches!(restored, Ok(true)) {
+                            shell.open_log(history, window, cx);
+                        } else {
+                            shell.open_log_file(history, window, cx);
+                        }
+                    });
+                })
+                .detach();
+                return;
+            }
+        }
+        self.open_log_file(history, window, cx);
+    }
+
+    fn open_log_file(&mut self, history: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.history.iter().find(|e| e.id == history) else { return };
         let Some(log) = &entry.log else { return };
         let key: Option<[u8; 32]> = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &log.key).ok().and_then(|k| k.try_into().ok());

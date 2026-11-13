@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use gpui::{div, prelude::*, px, rgb, rgba, svg, AnimationExt, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
+use termian_native::log_backup;
 use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Report, Status};
 use termian_native::sync::{ConflictInfo, Prefer};
 use termian_native::theme;
@@ -232,6 +233,11 @@ pub struct CloudState {
     /// One cloud operation at a time, like the legacy queue.
     running: bool,
     started: bool,
+    /// Session log backup: one run at a time; stopped for an old server
+    /// until restart, paused for an hour after a credential error (as legacy).
+    logs_running: bool,
+    logs_unsupported: bool,
+    logs_paused_until: Option<std::time::Instant>,
 }
 
 /// Dark hover text for the header buttons.
@@ -352,6 +358,16 @@ impl Shell {
         })
         .detach();
         cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(log_backup::FIRST_RUN).await;
+            loop {
+                if this.update(cx, |shell, cx| shell.backup_logs(cx)).is_err() {
+                    break;
+                }
+                cx.background_executor().timer(log_backup::INTERVAL).await;
+            }
+        })
+        .detach();
+        cx.spawn(async move |this, cx| {
             cx.background_executor().timer(AUTO_SYNC_FIRST).await;
             loop {
                 let alive = this.update(cx, |shell, cx| shell.auto_sync(cx));
@@ -360,6 +376,49 @@ impl Shell {
                 }
                 cx.background_executor().timer(AUTO_SYNC_INTERVAL).await;
             }
+        })
+        .detach();
+    }
+
+    /// A session ended: its log is complete, back it up shortly.
+    pub fn backup_logs_soon(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(log_backup::AFTER_SESSION).await;
+            let _ = this.update(cx, |shell, cx| shell.backup_logs(cx));
+        })
+        .detach();
+    }
+
+    /// Silent: it never touches the sync status or the header badges. It
+    /// follows the hourly auto-sync switch, as the legacy backup does.
+    fn backup_logs(&mut self, cx: &mut Context<Self>) {
+        let state = &self.cloud;
+        if state.logs_running || state.logs_unsupported || state.logs_paused_until.is_some_and(|t| std::time::Instant::now() < t) {
+            return;
+        }
+        let Some(cloud) = self.vault.cloud.as_ref().filter(|c| c.auto_sync).and_then(|c| c.validate().ok()) else { return };
+        let history = self.vault.history.clone();
+        if history.iter().all(|e| e.log.is_none()) {
+            return;
+        }
+        self.cloud.logs_running = true;
+        let logs_dir = self.logs_dir.clone();
+        let task = cx.background_spawn(async move { log_backup::backup(&cloud, &logs_dir, &history) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |shell, _| {
+                shell.cloud.logs_running = false;
+                match result {
+                    Ok(outcome) => shell.cloud.logs_unsupported = outcome.unsupported,
+                    Err(message) => {
+                        if self_cloud::is_credential_error(&message) {
+                            shell.cloud.logs_paused_until = Some(std::time::Instant::now() + log_backup::INTERVAL);
+                        }
+                        let message = shell.vault.cloud.as_ref().map_or(message.clone(), |c| c.redact(&message));
+                        eprintln!("[Termian] Session log backup failed: {}", message.chars().take(240).collect::<String>());
+                    }
+                }
+            });
         })
         .detach();
     }

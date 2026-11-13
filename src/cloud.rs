@@ -304,6 +304,40 @@ impl Cloud {
         }
     }
 
+    /// `<server>/v1/logs/<name>` next to the snapshot endpoint.
+    fn log_endpoint(&self, name: &str) -> url::Url {
+        let mut endpoint = self.endpoint.clone();
+        let path = endpoint.path().trim_end_matches("/snapshot").to_owned();
+        endpoint.set_path(&format!("{path}/logs/{name}"));
+        endpoint
+    }
+
+    /// Stores a session log backup sealed like a snapshot. `Ok(false)`: the
+    /// server is older than the logs API (404/405).
+    pub fn put_log(&self, name: &str, payload: &Value) -> Result<bool, String> {
+        let body = seal(payload, &self.passphrase)?;
+        let request = self.authorize(ureq::request("PUT", self.log_endpoint(name).as_str()).timeout(REQUEST_TIMEOUT));
+        match request.set("content-type", "application/octet-stream").send_bytes(&body) {
+            Ok(_) => Ok(true),
+            Err(ureq::Error::Status(404 | 405, _)) => Ok(false),
+            Err(ureq::Error::Status(code, response)) => Err(status_error("Отправка лога сессии", code, response.header("retry-after"))),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// The decrypted log backup, or `None` when the cloud has none.
+    pub fn get_log(&self, name: &str) -> Result<Option<Value>, String> {
+        let response = match self.authorize(ureq::request("GET", self.log_endpoint(name).as_str()).timeout(REQUEST_TIMEOUT)).call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(404 | 405, _)) => return Ok(None),
+            Err(ureq::Error::Status(code, response)) => return Err(status_error("Загрузка лога сессии", code, response.header("retry-after"))),
+            Err(error) => return Err(error.to_string()),
+        };
+        let mut body = Vec::new();
+        response.into_reader().take(MAX_BYTES as u64 + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+        Ok(Some(open(&body, &self.passphrase)?))
+    }
+
     /// Seals and stores a snapshot; returns the new revision.
     pub fn upload(&self, snapshot: &Value, condition: Condition) -> Result<Option<String>, String> {
         let body = seal(snapshot, &self.passphrase)?;
@@ -359,11 +393,15 @@ pub(crate) mod tests {
     }
 
     /// A tiny cloud-sync-server: one snapshot, ETag revisions, If-Match / If-None-Match, auth.
+    /// Session log backups of every test server, keyed by server URL and name.
+    static LOGS: std::sync::LazyLock<Mutex<std::collections::HashMap<String, Vec<u8>>>> = std::sync::LazyLock::new(Default::default);
+
     pub(crate) fn server() -> (String, Arc<Mutex<Option<(Vec<u8>, u64)>>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
         let stored: Arc<Mutex<Option<(Vec<u8>, u64)>>> = Arc::default();
         let state = stored.clone();
+        let url_key = url.clone();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -396,6 +434,19 @@ pub(crate) mod tests {
                 let etag = |rev: u64| format!("\"r{rev}\"");
                 let (status, reply, tag) = if auth != "Bearer test-token" {
                     ("401 Unauthorized", Vec::new(), None)
+                } else if let Some(name) = path.strip_prefix("/v1/logs/") {
+                    let mut logs = LOGS.lock().unwrap();
+                    let key = format!("{url_key}/{name}");
+                    match method.as_str() {
+                        "PUT" => {
+                            logs.insert(key, body);
+                            ("200 OK", Vec::new(), None)
+                        }
+                        _ => match logs.get(&key) {
+                            Some(bytes) => ("200 OK", bytes.clone(), None),
+                            None => ("404 Not Found", Vec::new(), None),
+                        },
+                    }
                 } else if path.starts_with("/v1/logs") {
                     // cloud-sync-server answers a cleanup with how many logs it removed.
                     let removed = if method == "DELETE" && path == "/v1/logs?since=123" { 7 } else { 0 };

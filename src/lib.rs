@@ -7,6 +7,7 @@ pub mod forwarding;
 pub mod keys;
 pub mod known_hosts;
 pub mod legacy;
+pub mod log_backup;
 pub mod login;
 pub mod palette;
 pub mod portable;
