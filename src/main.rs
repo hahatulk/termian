@@ -49,6 +49,7 @@ pub struct Shell {
     package_editor: Option<ui::snippets::PackageEditor>,
     snippet_menu: Option<ui::snippets::SnippetMenu>,
     shell_history: Option<ui::snippets::ShellHistoryPanel>,
+    known_menu: Option<ui::known_hosts::KnownMenu>,
     /// «Save targets» under «Select targets»; on by default and remembered, as in legacy.
     snippet_save_targets: bool,
     launcher: ui::launcher::Launcher,
@@ -193,6 +194,7 @@ impl Shell {
             package_editor: None,
             snippet_menu: None,
             shell_history: None,
+            known_menu: None,
             snippet_save_targets: true,
             launcher: Default::default(),
             logs_view: Default::default(),

@@ -231,7 +231,7 @@ impl SshTarget {
             host,
             port,
             username,
-            known_hosts: dirs::data_dir().unwrap_or_default().join("termian-native").join("known_hosts"),
+            known_hosts: crate::known_hosts::default_path(),
             identity_files: ["id_ed25519", "id_ecdsa", "id_rsa"].iter().map(|f| home.join(".ssh").join(f)).collect(),
             password: None,
             key: None,

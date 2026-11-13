@@ -5,6 +5,7 @@ pub mod edits;
 pub mod files;
 pub mod forwarding;
 pub mod keys;
+pub mod known_hosts;
 pub mod legacy;
 pub mod login;
 pub mod palette;

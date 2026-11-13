@@ -100,16 +100,5 @@ impl Shell {
         page("keychain-scroll", vec![split], body)
     }
 
-    pub fn render_known_hosts(&self) -> Div {
-        let known = &self.vault.known_hosts;
-        let body = if known.is_empty() {
-            empty_state("known_hosts", "No known hosts", "Host keys you trust appear here after the first connection.")
-        } else {
-            div().child(section_title("Known Hosts")).child(grid().children(known.iter().map(|entry| {
-                card(format!("known-{}", entry.id).into(), tile("known_hosts", theme::TILE_BLUE), entry.host.clone(), String::new())
-            })))
-        };
-        page("known-scroll", vec![tool_button("import-known", "download", "IMPORT")], body)
-    }
 
 }

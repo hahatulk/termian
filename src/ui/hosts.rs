@@ -117,7 +117,7 @@ impl Shell {
             Section::Keychain => self.render_keychain(cx).into_any_element(),
             Section::PortForwarding => self.render_port_forwarding(cx).into_any_element(),
             Section::Snippets => self.render_snippets(cx).into_any_element(),
-            Section::KnownHosts => self.render_known_hosts().into_any_element(),
+            Section::KnownHosts => self.render_known_hosts(cx).into_any_element(),
             Section::Logs => self.render_logs(cx).into_any_element(),
         };
         let editor = match self.section {
@@ -125,6 +125,7 @@ impl Shell {
             Section::Keychain => self.render_key_editor(window, cx).or_else(|| self.render_identity_editor(window, cx)).or_else(|| self.render_keychain_menu(cx)),
             Section::PortForwarding => self.render_forwarding_overlay(window, cx),
             Section::Snippets => self.render_snippets_overlay(window, cx),
+            Section::KnownHosts => self.render_known_menu(window, cx),
             _ => None,
         };
         div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).into_any_element()

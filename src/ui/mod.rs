@@ -7,6 +7,7 @@ pub mod group_editor;
 pub mod hosts;
 pub mod identity_editor;
 pub mod key_editor;
+pub mod known_hosts;
 pub mod launcher;
 pub mod palette;
 pub mod login_view;
