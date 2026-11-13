@@ -17,6 +17,7 @@ pub mod serial;
 pub mod session_log;
 pub mod shortcuts;
 pub mod snippets;
+pub mod split_tree;
 pub mod store;
 pub mod self_cloud;
 pub mod sync;
