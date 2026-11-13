@@ -66,6 +66,8 @@ pub struct Shell {
     sftp_dialog_focus: FocusHandle,
     cloud: ui::cloud::CloudState,
     update: ui::update::UpdateState,
+    main_window: Option<gpui::WindowHandle<Shell>>,
+    settings_window: Option<gpui::WindowHandle<ui::settings::SettingsWindow>>,
     cloud_focus: FocusHandle,
 }
 
@@ -136,6 +138,8 @@ impl Shell {
             sftp_dialog_focus: cx.focus_handle(),
             cloud: Default::default(),
             update: Default::default(),
+            main_window: None,
+            settings_window: None,
             cloud_focus: cx.focus_handle(),
         }
     }
@@ -223,7 +227,7 @@ impl Shell {
     fn record_session(&mut self, host: Option<HostId>, label: &str, subtitle: String) -> (u64, Option<session_log::SessionLog>) {
         let key = session_log::new_key();
         let name = format!("{}-{}", now(), self.vault.history.iter().map(|e| e.id).max().unwrap_or(0) + 1);
-        let log = session_log::SessionLog::start(&self.logs_dir, &name, key).ok();
+        let log = if self.vault.logs_disabled { None } else { session_log::SessionLog::start(&self.logs_dir, &name, key).ok() };
         let entry = HistoryEntry {
             host,
             connected_at: now(),
@@ -364,7 +368,7 @@ fn main() {
         #[cfg(not(target_os = "macos"))]
         cx.bind_keys([gpui::KeyBinding::new("ctrl-k", ui::palette::OpenPalette, None)]);
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
-        cx.open_window(
+        let main = cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 titlebar: Some(TitlebarOptions {
@@ -386,6 +390,8 @@ fn main() {
             },
         )
         .expect("failed to open the main window");
+        let _ = main.update(cx, |shell, _, _| shell.main_window = Some(main));
+        ui::settings::install_menus(main, cx);
         cx.activate(true);
     });
 }

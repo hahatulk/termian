@@ -12,6 +12,7 @@ pub mod palette;
 pub mod login_view;
 pub mod logs;
 pub mod sections;
+pub mod settings;
 pub mod sftp;
 pub mod sftp_actions;
 pub mod terminal_view;

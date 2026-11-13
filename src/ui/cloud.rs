@@ -374,7 +374,7 @@ impl Shell {
     }
 
     /// Read-only comparison; `for_dialog` also fills an open dialog's panel.
-    fn check_cloud(&mut self, for_dialog: bool, cx: &mut Context<Self>) {
+    pub fn check_cloud(&mut self, for_dialog: bool, cx: &mut Context<Self>) {
         if self.cloud.running {
             return;
         }

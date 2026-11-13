@@ -62,6 +62,34 @@ impl Status {
     }
 }
 
+impl Status {
+    /// Download progress in percent, when the server reported the size.
+    pub fn percent(&self) -> Option<u64> {
+        let total = self.total.filter(|t| *t > 0)?;
+        Some((self.downloaded.unwrap_or(0) * 100 / total).min(100))
+    }
+
+    /// Settings → Version → «Обновления» text, as legacy words it; `time`
+    /// formats `checked_at` (Unix ms).
+    pub fn text(&self, time: impl Fn(u64) -> String) -> String {
+        let mb = |bytes: u64| format!("{:.1}", bytes as f64 / 1_048_576.0);
+        let version = self.version.as_ref().map_or_else(|| "Новая версия".to_owned(), |v| format!("Termian {v}"));
+        let checked = self.checked_at.map(|at| format!(" Проверено: {}.", time(at))).unwrap_or_default();
+        match self.state {
+            State::Disabled => "Автообновление отключено: это локальная сборка или задан TERMIAN_DISABLE_UPDATES.".into(),
+            State::Checking => "Проверка обновлений…".into(),
+            State::Downloading => match self.percent() {
+                Some(percent) => format!("Загрузка {version}: {percent}% ({} из {} МБ)", mb(self.downloaded.unwrap_or(0)), mb(self.total.unwrap_or(0))),
+                None => format!("Загрузка {version}: {} МБ", mb(self.downloaded.unwrap_or(0))),
+            },
+            State::Installed => format!("{version} загружена и будет установлена при перезапуске. Открытые SSH-сессии при перезапуске закроются."),
+            State::Error => format!("Не удалось проверить или загрузить обновление.{checked}"),
+            State::Idle if self.checked_at.is_some() => format!("Установлена последняя версия.{checked}"),
+            State::Idle => "Обновления проверяются автоматически через 20 секунд после запуска и затем каждые 6 часов.".into(),
+        }
+    }
+}
+
 /// Only CI release builds update themselves: a local build keeps the crate
 /// version and must not be replaced by the published release.
 pub fn enabled() -> bool {
@@ -471,6 +499,22 @@ mod tests {
         replace_exe(&exe, &next).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), next);
         assert_eq!(std::fs::read(with_suffix(&exe, ".old")).unwrap(), b"old");
+    }
+
+    #[test]
+    fn version_tab_text_follows_the_state() {
+        let time = |_| "13.11.2026, 10:00".to_owned();
+        let mut status = Status::default();
+        assert!(status.text(time).starts_with("Обновления проверяются автоматически"));
+        status = Status { state: State::Downloading, version: Some("1.3.0".into()), downloaded: Some(3 * 1_048_576), total: Some(12 * 1_048_576), ..Status::default() };
+        assert_eq!(status.text(time), "Загрузка Termian 1.3.0: 25% (3.0 из 12.0 МБ)");
+        status.total = None;
+        assert_eq!(status.text(time), "Загрузка Termian 1.3.0: 3.0 МБ");
+        status = Status { state: State::Idle, checked_at: Some(1), ..Status::default() };
+        assert_eq!(status.text(time), "Установлена последняя версия. Проверено: 13.11.2026, 10:00.");
+        status.state = State::Installed;
+        assert!(status.text(time).starts_with("Новая версия загружена"));
+        assert!(Status { state: State::Disabled, ..Status::default() }.text(time).contains("TERMIAN_DISABLE_UPDATES"));
     }
 
     #[test]

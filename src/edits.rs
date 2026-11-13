@@ -152,7 +152,29 @@ impl Associations {
     }
 
     pub fn remember(&mut self, file_name: &str, app: PathBuf) -> Result<(), String> {
-        self.apps.insert(extension(file_name), app);
+        self.set(&extension(file_name), app)
+    }
+
+    /// Settings → SFTP → «File type associations»: extension and app, sorted.
+    pub fn list(&self) -> Vec<(String, PathBuf)> {
+        self.apps.iter().map(|(ext, app)| (ext.clone(), app.clone())).collect()
+    }
+
+    /// Another app for `ext`; an empty path is ignored, as the legacy field does.
+    pub fn set(&mut self, ext: &str, app: PathBuf) -> Result<(), String> {
+        if app.as_os_str().is_empty() {
+            return Ok(());
+        }
+        self.apps.insert(ext.to_owned(), app);
+        self.save()
+    }
+
+    pub fn forget(&mut self, ext: &str) -> Result<(), String> {
+        self.apps.remove(ext);
+        self.save()
+    }
+
+    fn save(&self) -> Result<(), String> {
         let map: BTreeMap<&String, String> = self.apps.iter().map(|(k, v)| (k, v.to_string_lossy().into_owned())).collect();
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -254,5 +276,14 @@ mod tests {
         assert_eq!(again.app_for("todo.txt"), Some(Path::new("/Applications/TextEdit.app")));
         assert_eq!(again.app_for("image.png"), None);
         assert_eq!(again.app_for(".bashrc"), None);
+
+        let mut apps = again;
+        apps.remember("a.log", "/Applications/Console.app".into()).unwrap();
+        assert_eq!(apps.list().iter().map(|(ext, _)| ext.as_str()).collect::<Vec<_>>(), ["log", "txt"]);
+        apps.set("txt", "/Applications/Nova.app".into()).unwrap();
+        apps.set("txt", PathBuf::new()).unwrap();
+        apps.forget("log").unwrap();
+        let saved = Associations::load(dir.path().join("apps.json"));
+        assert_eq!(saved.list(), vec![("txt".to_owned(), PathBuf::from("/Applications/Nova.app"))]);
     }
 }

@@ -203,7 +203,7 @@ pub struct Actions {
     next_request: u64,
     /// Remote files opened in local apps.
     pub edits: Edits,
-    associations: Associations,
+    pub associations: Associations,
     /// The loop that looks for saved copies is running.
     watching: bool,
     /// The changed-files list is expanded.

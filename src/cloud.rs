@@ -200,6 +200,14 @@ pub struct Remote {
     pub revision: Option<String>,
 }
 
+/// The cloud's answer to a log cleanup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogsRemoved {
+    Removed(u64),
+    /// An older server without the logs API.
+    Unsupported,
+}
+
 /// How an upload must relate to what is on the server.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Condition {
@@ -227,7 +235,10 @@ fn status_error(context: &str, code: u16, retry_after: Option<&str>) -> String {
 
 impl Cloud {
     fn request(&self, method: &str) -> ureq::Request {
-        let request = ureq::request(method, self.endpoint.as_str()).timeout(REQUEST_TIMEOUT);
+        self.authorize(ureq::request(method, self.endpoint.as_str()).timeout(REQUEST_TIMEOUT))
+    }
+
+    fn authorize(&self, request: ureq::Request) -> ureq::Request {
         // With Basic auth the proxy owns Authorization; the token moves to X-Termian-Token.
         match &self.basic {
             Some(basic) => request.set("authorization", &format!("Basic {basic}")).set("x-termian-token", &self.token),
@@ -274,6 +285,23 @@ impl Cloud {
     pub fn fetch(&self) -> Result<Option<Remote>, String> {
         let Some((body, revision)) = self.call("GET", None, &Condition::Any)? else { return Ok(None) };
         Ok(Some(Remote { snapshot: open(&body, &self.passphrase)?, revision }))
+    }
+
+    /// `DELETE /v1/logs?since=` (Unix ms, 0 = all): the cloud copies of session logs.
+    pub fn delete_logs(&self, since: u64) -> Result<LogsRemoved, String> {
+        let mut endpoint = self.endpoint.clone();
+        let path = endpoint.path().trim_end_matches("/snapshot").to_owned();
+        endpoint.set_path(&format!("{path}/logs"));
+        endpoint.set_query(Some(&format!("since={since}")));
+        match self.authorize(ureq::request("DELETE", endpoint.as_str()).timeout(REQUEST_TIMEOUT)).call() {
+            Ok(response) => {
+                let body: Value = response.into_string().ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
+                Ok(LogsRemoved::Removed(body["removed"].as_u64().unwrap_or(0)))
+            }
+            Err(ureq::Error::Status(404 | 405, _)) => Ok(LogsRemoved::Unsupported),
+            Err(ureq::Error::Status(code, response)) => Err(status_error("Очистка логов в облаке", code, response.header("retry-after"))),
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     /// Seals and stores a snapshot; returns the new revision.
@@ -344,6 +372,7 @@ pub(crate) mod tests {
                     continue;
                 }
                 let method = line.split_whitespace().next().unwrap_or("").to_owned();
+                let path = line.split_whitespace().nth(1).unwrap_or("").to_owned();
                 let (mut length, mut auth, mut if_match, mut if_none) = (0usize, String::new(), None, None);
                 loop {
                     let mut header = String::new();
@@ -367,6 +396,10 @@ pub(crate) mod tests {
                 let etag = |rev: u64| format!("\"r{rev}\"");
                 let (status, reply, tag) = if auth != "Bearer test-token" {
                     ("401 Unauthorized", Vec::new(), None)
+                } else if path.starts_with("/v1/logs") {
+                    // cloud-sync-server answers a cleanup with how many logs it removed.
+                    let removed = if method == "DELETE" && path == "/v1/logs?since=123" { 7 } else { 0 };
+                    ("200 OK", format!("{{\"removed\":{removed}}}").into_bytes(), None)
                 } else {
                     match method.as_str() {
                         "GET" | "HEAD" => match &*snapshot {
@@ -394,6 +427,17 @@ pub(crate) mod tests {
             }
         });
         (url, stored)
+    }
+
+    #[test]
+    fn log_cleanup_reaches_the_logs_endpoint() {
+        let (url, stored) = server();
+        let cloud = config(&format!("{url}/v1/snapshot")).validate().unwrap();
+        assert_eq!(cloud.delete_logs(123).unwrap(), LogsRemoved::Removed(7));
+        assert_eq!(cloud.delete_logs(0).unwrap(), LogsRemoved::Removed(0));
+        assert!(stored.lock().unwrap().is_none(), "the snapshot is untouched");
+        let wrong = CloudConfig { token: "other".into(), ..config(&url) }.validate().unwrap();
+        assert!(wrong.delete_logs(0).unwrap_err().contains("отклонил авторизацию"));
     }
 
     #[test]

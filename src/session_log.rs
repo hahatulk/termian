@@ -184,6 +184,74 @@ impl Drop for SessionLog {
     }
 }
 
+/// Settings → Account → «Логи сессий»: id, button, confirmation wording, period.
+pub const PERIODS: [(&str, &str, &str, Duration); 4] = [
+    ("hour", "За час", "за последний час", Duration::from_secs(3600)),
+    ("day", "За день", "за последний день", Duration::from_secs(86_400)),
+    ("week", "За неделю", "за последнюю неделю", Duration::from_secs(604_800)),
+    ("all", "Все", "все", Duration::ZERO),
+];
+
+/// Unix ms from which a period clears; 0 clears everything.
+pub fn period_start(period: Duration, now: SystemTime) -> u64 {
+    if period.is_zero() {
+        return 0;
+    }
+    now.checked_sub(period).and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// What a cleanup removed on this device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cleared {
+    /// Connections removed from Logs (and Recent connections).
+    pub entries: usize,
+    /// Log files deleted.
+    pub files: usize,
+}
+
+/// The legacy cleanup: connections started since `since` (Unix ms, 0 = all)
+/// leave the history with their logs, then every other log file written since
+/// then goes too, except logs of the connections that stay.
+pub fn clear(history: &mut Vec<crate::vault::HistoryEntry>, dir: &Path, since: u64) -> Cleared {
+    let started = |entry: &crate::vault::HistoryEntry| since == 0 || (entry.connected_at.max(0) as u64).saturating_mul(1000) >= since;
+    let before = history.len();
+    history.retain(|entry| !started(entry));
+    let keep: std::collections::HashSet<String> = history.iter().filter_map(|e| e.log.as_ref()).map(|log| format!("{}.log", log.name)).collect();
+    let mut files = 0;
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let modified = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
+        if name.ends_with(".log") && (since == 0 || modified >= since) && !keep.contains(&name) && std::fs::remove_file(entry.path()).is_ok() {
+            files += 1;
+        }
+    }
+    Cleared { entries: before - history.len(), files }
+}
+
+/// Settings → Logs → «Disable Logs»: the logs of this vault are deleted; the
+/// connections stay in history without them. Returns how many files went.
+pub fn delete_all(history: &mut [crate::vault::HistoryEntry], dir: &Path) -> usize {
+    let mut files = 0;
+    for entry in history.iter_mut() {
+        if let Some(log) = entry.log.take() {
+            files += usize::from(valid_name(&log.name) && std::fs::remove_file(dir.join(format!("{}.log", log.name))).is_ok());
+        }
+    }
+    files
+}
+
+/// Result line under the cleanup buttons; `remote` is the cloud's answer, if
+/// the cloud is configured.
+pub fn cleared_text(cleared: Cleared, remote: Option<Result<crate::cloud::LogsRemoved, String>>) -> String {
+    let cloud = match remote {
+        None => String::new(),
+        Some(Err(error)) => format!(" Облако: {error}"),
+        Some(Ok(crate::cloud::LogsRemoved::Unsupported)) => " Сервер не поддерживает удаление логов.".into(),
+        Some(Ok(crate::cloud::LogsRemoved::Removed(n))) => format!(" В облаке удалено логов: {n}."),
+    };
+    format!("Удалено записей: {}, лишних файлов: {}.{cloud}", cleared.entries, cleared.files)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +339,40 @@ mod tests {
         assert_eq!(prune(dir.path(), later, RETENTION), 1);
         assert!(!dir.path().join("old.log").exists() && dir.path().join("keep.txt").exists());
         assert_eq!(prune(dir.path(), SystemTime::now(), RETENTION), 0);
+    }
+
+    #[test]
+    fn cleanup_removes_recent_connections_and_their_logs() {
+        use crate::vault::{HistoryEntry, LogRef};
+        let dir = tempfile::tempdir().unwrap();
+        let now = SystemTime::now();
+        let now_s = now.duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
+        let entry = |id: u64, connected_at: i64, log: &str| HistoryEntry { id, connected_at, log: Some(LogRef { name: log.into(), key: String::new() }), ..HistoryEntry::default() };
+        let mut history = vec![entry(1, now_s - 60, "recent"), entry(2, now_s - 3 * 86_400, "old-but-written"), entry(3, now_s - 7200, "earlier")];
+        for name in ["recent", "old-but-written", "earlier", "orphan"] {
+            std::fs::write(dir.path().join(format!("{name}.log")), b"x").unwrap();
+        }
+        std::fs::write(dir.path().join("notes.txt"), b"x").unwrap();
+        let earlier = std::fs::File::options().write(true).open(dir.path().join("earlier.log")).unwrap();
+        earlier.set_modified(now - Duration::from_secs(7200)).unwrap();
+
+        let cleared = clear(&mut history, dir.path(), period_start(PERIODS[0].3, now));
+        assert_eq!(cleared, Cleared { entries: 1, files: 2 }, "recent.log and the orphan written within the hour");
+        assert_eq!(history.iter().map(|e| e.id).collect::<Vec<_>>(), [2, 3]);
+        assert!(dir.path().join("old-but-written.log").exists(), "kept: its connection started earlier");
+        assert!(dir.path().join("earlier.log").exists() && !dir.path().join("orphan.log").exists());
+
+        let mut copy = history.clone();
+        assert_eq!(delete_all(&mut copy, dir.path()), 2);
+        assert!(copy.iter().all(|e| e.log.is_none()) && copy.len() == 2, "connections stay");
+        for name in ["earlier", "old-but-written"] {
+            std::fs::write(dir.path().join(format!("{name}.log")), b"x").unwrap();
+        }
+        assert_eq!(clear(&mut history, dir.path(), 0), Cleared { entries: 2, files: 2 });
+        assert!(history.is_empty() && dir.path().join("notes.txt").exists());
+        assert_eq!(period_start(Duration::ZERO, now), 0);
+        assert_eq!(cleared_text(Cleared { entries: 3, files: 1 }, None), "Удалено записей: 3, лишних файлов: 1.");
+        assert!(cleared_text(Cleared::default(), Some(Ok(crate::cloud::LogsRemoved::Removed(4)))).ends_with(" В облаке удалено логов: 4."));
+        assert!(cleared_text(Cleared::default(), Some(Ok(crate::cloud::LogsRemoved::Unsupported))).ends_with("не поддерживает удаление логов."));
     }
 }

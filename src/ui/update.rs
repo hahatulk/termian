@@ -63,9 +63,22 @@ impl Shell {
                 shell.update.status.set(State::Downloading, Some(version.clone()), None);
                 cx.notify();
             });
-            let installed = cx
-                .background_spawn(async move { updater::download(&package, |_, _| {}).and_then(|bytes| updater::install(&bytes)) })
-                .await;
+            // Progress every 256 KB reaches Settings → Version through a channel.
+            let (progress, mut reports) = futures::channel::mpsc::unbounded::<(u64, Option<u64>)>();
+            let task = cx.background_spawn(async move {
+                updater::download(&package, |downloaded, total| {
+                    let _ = progress.unbounded_send((downloaded, total));
+                })
+                .and_then(|bytes| updater::install(&bytes))
+            });
+            while let Some((downloaded, total)) = futures::StreamExt::next(&mut reports).await {
+                let _ = this.update(cx, |shell, cx| {
+                    shell.update.status.downloaded = Some(downloaded);
+                    shell.update.status.total = total;
+                    cx.notify();
+                });
+            }
+            let installed = task.await;
             let _ = this.update(cx, |shell, cx| shell.finish_update(installed.map(|()| Some(version)), cx));
         })
         .detach();
@@ -84,7 +97,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn restart_for_update(&mut self, cx: &mut Context<Self>) {
+    pub fn restart_for_update(&mut self, cx: &mut Context<Self>) {
         match updater::relaunch() {
             Ok(()) => cx.quit(),
             Err(error) => {

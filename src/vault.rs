@@ -265,6 +265,10 @@ pub struct Vault {
     /// profile): uploading this data would erase them in the cloud.
     #[serde(default)]
     pub secrets_missing: bool,
+    /// Settings → Logs → «Disabled»: sessions are not recorded. Device-local,
+    /// as legacy keeps log settings out of the snapshot.
+    #[serde(default)]
+    pub logs_disabled: bool,
     #[serde(default)]
     pub cloud: Option<crate::cloud::CloudConfig>,
     #[serde(default)]

@@ -441,6 +441,62 @@ pub fn download(vault: &mut Vault, backups: &Path) -> Result<Report, String> {
     Ok(Report::Done("Данные загружены и применены".into()))
 }
 
+/// Dot colour of the Settings → Account status line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    Idle,
+    Ok,
+    Busy,
+    Error,
+}
+
+impl Tone {
+    pub fn color(self) -> u32 {
+        match self {
+            Tone::Idle => 0x9ea5b3,
+            Tone::Ok => 0x00cc74,
+            Tone::Busy => 0xf0bc6b,
+            Tone::Error => 0xec706f,
+        }
+    }
+}
+
+/// The server answered: «Получить данные с сервера» is offered only then.
+pub fn connected(status: &Status) -> bool {
+    matches!(status, Status::Checked(preview) if *preview != Preview::Unconfigured)
+}
+
+/// `host:port` of the configured address, as the legacy settings show it.
+pub fn server_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| u.port().map(|p| format!("{h}:{p}")).unwrap_or_else(|| h.to_owned())))
+        .unwrap_or_else(|| url.to_owned())
+}
+
+/// Settings → Account → «Своё облако» status line (legacy `Hs`).
+pub fn settings_status(status: &Status, url: Option<&str>) -> (String, Tone) {
+    let Some(url) = url else { return ("Сервер не настроен".into(), Tone::Idle) };
+    let host = server_host(url);
+    let summary = |preview: &Preview| match preview {
+        Preview::Synced => "данные совпадают".to_owned(),
+        Preview::Empty => "снимок пуст".to_owned(),
+        Preview::Conflicts(_) => "изменения есть на обеих сторонах".to_owned(),
+        Preview::Changes(_) => match preview.counts() {
+            (up, 0) => format!("есть локальные изменения: {up}"),
+            (0, down) => format!("на сервере новые данные: {down}"),
+            _ => "изменения есть на обеих сторонах".to_owned(),
+        },
+        Preview::Unconfigured => String::new(),
+    };
+    match status {
+        Status::Checking | Status::Syncing => (format!("Проверка подключения к {host}…"), Tone::Busy),
+        Status::Checked(Preview::Unconfigured) => ("Сервер не настроен".into(), Tone::Idle),
+        Status::Checked(preview) => (format!("Подключено к {host} · {}", summary(preview)), Tone::Ok),
+        Status::Error { .. } => (format!("Нет подключения к {host}"), Tone::Error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +665,21 @@ mod tests {
         assert_eq!(labels(&b), ["web"]);
         assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), BACKUPS_KEPT);
         assert_eq!(sync(&mut Vault::default(), None, backups.path()).unwrap_err(), NOT_CONFIGURED);
+    }
+
+    #[test]
+    fn settings_status_reads_like_the_legacy_account_tab() {
+        let url = Some("https://sync.example:8443/base");
+        let change = |upload| crate::sync::Change { upload, kind: "hosts".into(), label: "web".into(), action: "modified" };
+        assert_eq!(settings_status(&Status::default(), None), ("Сервер не настроен".to_owned(), Tone::Idle));
+        assert_eq!(settings_status(&Status::Checking, url).0, "Проверка подключения к sync.example:8443…");
+        assert_eq!(settings_status(&Status::Checked(Preview::Synced), url), ("Подключено к sync.example:8443 · данные совпадают".to_owned(), Tone::Ok));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(true), change(true)])), url).0.ends_with("есть локальные изменения: 2"));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false)])), url).0.ends_with("на сервере новые данные: 1"));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false), change(true)])), url).0.ends_with("обеих сторонах"));
+        let error = Status::Error { message: "x".into(), credentials: false };
+        assert_eq!(settings_status(&error, url), ("Нет подключения к sync.example:8443".to_owned(), Tone::Error));
+        assert!(connected(&Status::Checked(Preview::Empty)) && !connected(&error) && !connected(&Status::Checking));
+        assert_eq!(server_host("https://h.example/x"), "h.example");
     }
 }
