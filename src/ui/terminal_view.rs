@@ -97,6 +97,9 @@ pub struct TerminalView {
     /// The Serial tab's form, until it connects.
     serial_form: Option<serial_form::SerialForm>,
     integration: Integration,
+    /// The screen as it was before the install line: shown instead of the
+    /// alternate screen the line is typed on, until the shell leaves it.
+    frozen: Option<termian_native::terminal::Snapshot>,
     last_output: std::time::Instant,
     autocomplete: Autocomplete,
 }
@@ -164,6 +167,7 @@ impl TerminalView {
             area: None,
             serial_form: None,
             integration: Integration::default(),
+            frozen: None,
             last_output: std::time::Instant::now(),
             autocomplete: Autocomplete::default(),
         }
@@ -354,6 +358,9 @@ impl TerminalView {
                     log.append(&bytes);
                 }
                 self.terminal.feed(&bytes);
+                if self.frozen.is_some() && !self.terminal.alt_screen() {
+                    self.frozen = None;
+                }
                 if self.terminal.take_bell() {
                     self.ring();
                 }
@@ -649,6 +656,7 @@ impl TerminalView {
             return;
         }
         const ENTER_ALT: &[u8] = b"\x1b[?1049h";
+        self.frozen = Some(self.terminal.snapshot());
         self.terminal.feed(ENTER_ALT);
         if let Some(log) = &self.log {
             log.append(ENTER_ALT);
@@ -666,6 +674,7 @@ impl TerminalView {
                 if view.generation == generation && !view.integration.answered {
                     const LEAVE_ALT: &[u8] = b"\x1b[?1049l\r\x1b[K";
                     view.terminal.feed(LEAVE_ALT);
+                    view.frozen = None;
                     if let Some(log) = &view.log {
                         log.append(LEAVE_ALT);
                     }
@@ -962,7 +971,7 @@ impl Render for TerminalView {
         let viewport = window.viewport_size();
         let (width, height) = self.area.map_or((viewport.width, viewport.height - px(TOP_INSET)), |(_, _, w, h)| (px(w), px(h)));
         self.fit(width, height, window);
-        let snapshot = self.terminal.snapshot();
+        let snapshot = self.frozen.clone().unwrap_or_else(|| self.terminal.snapshot());
         let focused = self.focus.is_focused(window);
         let cell_width = self.cell_width.unwrap_or(8.);
         let line_height = self.line_height();

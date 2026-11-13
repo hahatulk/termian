@@ -202,6 +202,11 @@ impl Terminal {
         self.term.mode().contains(TermMode::APP_CURSOR)
     }
 
+    /// The program switched to the alternate screen (`?1049h`).
+    pub fn alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
     pub fn bracketed_paste(&self) -> bool {
         self.term.mode().contains(TermMode::BRACKETED_PASTE)
     }
