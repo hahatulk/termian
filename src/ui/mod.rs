@@ -1,4 +1,5 @@
 pub mod assets;
+pub mod cloud;
 pub mod dialog;
 pub mod host_editor;
 pub mod forwarding;

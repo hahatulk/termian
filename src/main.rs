@@ -64,6 +64,8 @@ pub struct Shell {
     sftp_filter_focus: FocusHandle,
     sftp_answer_focus: FocusHandle,
     sftp_dialog_focus: FocusHandle,
+    cloud: ui::cloud::CloudState,
+    cloud_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -131,6 +133,8 @@ impl Shell {
             sftp_filter_focus: cx.focus_handle(),
             sftp_answer_focus: cx.focus_handle(),
             sftp_dialog_focus: cx.focus_handle(),
+            cloud: Default::default(),
+            cloud_focus: cx.focus_handle(),
         }
     }
 
@@ -296,8 +300,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, cx)).collect();
-        let toolbar = ["sync", "upload", "download"]
-            .map(|name| div().px_2().child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT))));
+        let toolbar = self.render_cloud_buttons(cx);
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
             TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
@@ -346,6 +349,7 @@ impl Render for Shell {
             })
             .track_focus(&self.root_focus)
             .children(self.render_palette(window, cx))
+            .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
     }
 }
@@ -369,6 +373,7 @@ fn main() {
             },
             |window, cx| {
                 let shell = cx.new(Shell::new);
+                shell.update(cx, |shell, cx| shell.start_cloud(cx));
                 let focus = shell.read(cx).root_focus.clone();
                 window.focus(&focus);
                 shell

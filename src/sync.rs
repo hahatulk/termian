@@ -421,8 +421,31 @@ pub struct ConflictInfo {
     pub text: String,
 }
 
+/// One record that a sync would move, for the preview.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct Change {
+    /// The record goes to the cloud (`true`) or comes to this device.
+    pub upload: bool,
+    pub kind: String,
+    pub label: String,
+    /// `added`, `modified` or `removed` on the side it comes from.
+    pub action: &'static str,
+}
+
+impl Change {
+    pub fn text(&self) -> String {
+        let action = match self.action {
+            "added" => "добавлено",
+            "removed" => "удалено",
+            _ => "изменено",
+        };
+        format!("{} «{}»: {}", kind_label(&self.kind), self.label, action)
+    }
+}
+
 #[derive(Debug)]
 pub struct Merged {
+    pub changes: Vec<Change>,
     pub conflicts: Vec<ConflictInfo>,
     pub from_local: usize,
     pub from_remote: usize,
@@ -450,6 +473,7 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
     let base = base.unwrap_or(&empty);
     let (mut to_local, mut to_remote, mut conflicts) = (BTreeMap::new(), BTreeMap::new(), Vec::new());
     let (mut from_local, mut from_remote) = (0, 0);
+    let mut changes = Vec::new();
     let owners = owner_labels(&[&l_records, &r_records]);
     let keys: std::collections::BTreeSet<&String> = l_records.keys().chain(r_records.keys()).collect();
     for key in keys {
@@ -493,6 +517,17 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
             "remote" => from_remote += 1,
             _ => {}
         }
+        if choice == "local" || choice == "remote" {
+            let (from, to) = if choice == "local" { (l, r) } else { (r, l) };
+            let item = from.or(to).expect("a key comes from one side");
+            let label = if item.label.is_empty() { owners.get(key).cloned().unwrap_or_else(|| "запись".into()) } else { item.label.clone() };
+            let action = match (from, to) {
+                (None, _) => "removed",
+                (Some(_), None) => "added",
+                _ => "modified",
+            };
+            changes.push(Change { upload: choice == "local", kind: item.kind.clone(), label, action });
+        }
         if let Some(record) = for_local {
             to_local.insert(key.clone(), record.clone());
         }
@@ -501,7 +536,7 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
         }
     }
     if !conflicts.is_empty() {
-        return Merged { conflicts, from_local, from_remote, local: Value::Null, remote: Value::Null, import_needed: false, upload_needed: false };
+        return Merged { changes, conflicts, from_local, from_remote, local: Value::Null, remote: Value::Null, import_needed: false, upload_needed: false };
     }
     restore_references(&mut to_local, &[&l_records, &r_records]);
     restore_references(&mut to_remote, &[&r_records, &l_records]);
@@ -511,6 +546,7 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
     }
     template["createdAt"] = json!(now);
     Merged {
+        changes,
         conflicts,
         from_local,
         from_remote,
