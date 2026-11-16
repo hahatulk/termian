@@ -42,8 +42,9 @@ pub struct HostEditor {
     tag: String,
     port: String,
     groups_open: bool,
-    keys_open: bool,
-    identities_open: bool,
+    pub(super) keys_open: bool,
+    /// The «+ SSH.id, Key, Certificate, FIDO2» menu is open.
+    pub(super) key_menu: bool,
     menu_open: bool,
     /// "Remove a host" is showing.
     confirm_remove: bool,
@@ -60,15 +61,6 @@ pub struct HostMenu {
     host: HostId,
     position: Point<Pixels>,
     confirm_remove: bool,
-}
-
-/// `deploy (root)`; just the label when the username is the same or unknown.
-fn identity_label(identity: &termian_native::vault::Identity) -> String {
-    if identity.username.is_empty() || identity.username == identity.label {
-        identity.label.clone()
-    } else {
-        format!("{} ({})", identity.label, identity.username)
-    }
 }
 
 pub(super) fn field_box(focused: bool) -> Div {
@@ -190,7 +182,7 @@ impl Shell {
             port,
             groups_open: false,
             keys_open: false,
-            identities_open: false,
+            key_menu: false,
             menu_open: false,
             confirm_remove: false,
             confirm_discard: false,
@@ -462,7 +454,7 @@ impl Shell {
                     cx.notify();
                 }))
             };
-            let mut list = div().id("editor-group-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No group".into(), cx));
+            let mut list = div().id("editor-group-list").occlude().max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No group".into(), cx));
             for group in &self.vault.groups {
                 // Nested groups read as a path: work / Cenix.
                 let path = self.vault.breadcrumbs(Some(group.id)).iter().map(|g| g.label.as_str()).collect::<Vec<_>>().join(" / ");
@@ -557,24 +549,31 @@ impl Shell {
             .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)))
             .child(self.render_backspace_row(cx));
 
-        let ssh = card("SSH")
+        // Legacy: «SSH on [22] port», then «Credentials», then the other settings.
+        let divider = || div().h(px(1.)).bg(rgb(theme::SURFACE_ACTIVE));
+        let ssh = div()
+            .p(px(15.))
+            .pb(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .rounded_lg()
+            .bg(rgb(theme::SURFACE))
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_color(rgb(theme::TEXT_MUTED))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(rgb(theme::TEXT))
                     .child("SSH on")
                     .child(self.input(Field::Port, "22", &editor.port, false, window, cx).w(px(90.)))
                     .child("port"),
             )
-            .child(self.render_identity_picker(cx))
-            // With an identity, its username, password and key are used instead.
-            .when(host.identity.is_none(), |card| {
-                card.child(self.input(Field::Username, "Username", host.username.as_deref().unwrap_or(""), false, window, cx))
-                    .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx))
-                    .child(self.render_key_picker(cx))
-            })
+            .child(divider())
+            .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child("Credentials"))
+            .children(self.render_credentials(window, cx))
+            .child(divider())
             .children(self.render_ssh_settings(cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
@@ -671,90 +670,6 @@ impl Shell {
         // The confirmation covers the whole window, above the slider; one
         // wrapper either way so opening it does not replay the slide.
         .map(|slider| div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).children(confirm).into_any_element())
-    }
-
-    /// "Identity": credentials saved in the Keychain, or the host's own.
-    fn render_identity_picker(&self, cx: &mut Context<Self>) -> Div {
-        let Some(editor) = &self.host_editor else { return div() };
-        let chosen = editor.host.identity.and_then(|i| self.vault.identity(i));
-        let label = chosen.map(identity_label);
-        let picker = div()
-            .id("editor-identity")
-            .child(
-                field_box(editor.identities_open)
-                    .child(svg().path(icon("identity")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                    .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Identity".into())))
-                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
-            )
-            .on_click(cx.listener(|shell, _, _, cx| {
-                if let Some(editor) = &mut shell.host_editor {
-                    editor.identities_open = !editor.identities_open;
-                }
-                cx.notify();
-            }));
-        let list = editor.identities_open.then(|| {
-            let choice = |id: Option<u64>, label: String, cx: &mut Context<Self>| {
-                menu_row(format!("editor-identity-{id:?}"), &label, false, false).on_click(cx.listener(move |shell, _, _, cx| {
-                    if let Some(editor) = &mut shell.host_editor {
-                        editor.host.identity = id;
-                        editor.identities_open = false;
-                    }
-                    shell.autosave();
-                    cx.notify();
-                }))
-            };
-            let mut list = div().id("editor-identity-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No identity".into(), cx));
-            for identity in &self.vault.identities {
-                list = list.child(choice(Some(identity.id), identity_label(identity), cx));
-            }
-            gpui::deferred(div().absolute().bottom_full().left_0().right_0().mb_1().child(list))
-        });
-        div().relative().child(picker).children(list)
-    }
-
-    /// "Key" under the password: one of the Keychain keys, or none.
-    fn render_key_picker(&self, cx: &mut Context<Self>) -> Div {
-        let Some(editor) = &self.host_editor else { return div() };
-        let chosen = editor.host.key.and_then(|k| self.vault.key(k));
-        let label = chosen.map(|k| format!("{} ({})", k.label, k.kind));
-        let picker = div()
-            .id("editor-key")
-            .child(
-                field_box(editor.keys_open)
-                    .child(svg().path(icon("keychain")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                    .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Key".into())))
-                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
-            )
-            .on_click(cx.listener(|shell, _, _, cx| {
-                if let Some(editor) = &mut shell.host_editor {
-                    editor.keys_open = !editor.keys_open;
-                }
-                cx.notify();
-            }));
-        let list = editor.keys_open.then(|| {
-            let choice = |id: Option<u64>, label: String, usable: bool, cx: &mut Context<Self>| {
-                menu_row(format!("editor-key-{id:?}"), &label, false, !usable).when(usable, |d| {
-                    d.on_click(cx.listener(move |shell, _, _, cx| {
-                        if let Some(editor) = &mut shell.host_editor {
-                            editor.host.key = id;
-                            editor.keys_open = false;
-                        }
-                        shell.autosave();
-                        cx.notify();
-                    }))
-                })
-            };
-            let mut list = div().id("editor-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No key".into(), true, cx));
-            for key in &self.vault.keys {
-                // A key whose private part could not be read from the legacy profile cannot be used.
-                let usable = key.private_key.is_some();
-                let note = if usable { String::new() } else { " — not available in this client".into() };
-                list = list.child(choice(Some(key.id), format!("{} ({}){note}", key.label, key.kind), usable, cx));
-            }
-            list
-        });
-        // Opens upwards: the picker sits at the bottom of the form, above Connect.
-        div().relative().child(picker).children(list.map(|list| gpui::deferred(div().absolute().bottom_full().left_0().right_0().mb_1().child(list))))
     }
 
     pub fn open_host_menu(&mut self, host: HostId, event: &MouseDownEvent, cx: &mut Context<Self>) {

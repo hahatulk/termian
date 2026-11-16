@@ -105,6 +105,13 @@ pub fn date_label(at: i64) -> String {
     chrono::Local.timestamp_opt(at, 0).single().map(|t| t.format("%b %d, %Y").to_string()).unwrap_or_default()
 }
 
+/// Legacy `formatSessionLogTitle`: `Log: web, 21:05:12 Nov 14, 2026`.
+pub fn log_tab_title(label: &str, connected: i64) -> String {
+    use chrono::TimeZone;
+    let time = chrono::Local.timestamp_opt(connected, 0).single().map(|t| t.format("%H:%M:%S").to_string()).unwrap_or_default();
+    format!("Log: {label}, {time} {}", date_label(connected))
+}
+
 /// `21:05 - 22:40`, with `(+1d)` when the session ran past midnight.
 pub fn times_label(connected: i64, disconnected: i64) -> String {
     use chrono::TimeZone;
@@ -260,6 +267,13 @@ pub fn cleared_text(cleared: Cleared, remote: Option<Result<crate::cloud::LogsRe
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn log_tabs_are_titled_like_legacy() {
+        use chrono::TimeZone;
+        let at = chrono::Local.with_ymd_and_hms(2026, 11, 14, 21, 5, 12).unwrap().timestamp();
+        assert_eq!(log_tab_title("web", at), "Log: web, 21:05:12 Nov 14, 2026");
+    }
     use super::*;
 
     fn wait_for(path: &Path, predicate: impl Fn(&[u8]) -> bool) -> Vec<u8> {

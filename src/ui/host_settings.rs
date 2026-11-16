@@ -45,10 +45,191 @@ fn choice(id: String, label: &str, value: Option<&str>, checked: bool) -> Statef
 }
 
 fn list(id: &str) -> Stateful<Div> {
-    div().id(SharedString::from(id.to_owned())).max_h(px(240.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg()
+    // Menus open over other rows: clicks must not reach them.
+    div().id(SharedString::from(id.to_owned())).occlude().max_h(px(240.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg()
 }
 
 impl Shell {
+    /// Legacy «Credentials»: Username (saved identities are suggested while it
+    /// is focused), Password, and «+ SSH.id, Key, Certificate, FIDO2».
+    pub(super) fn render_credentials(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(editor) = &self.host_editor else { return Vec::new() };
+        let host = &editor.host;
+        let mut out = Vec::new();
+        let field_icon = |name: &str| svg().path(icon(name)).size(px(14.)).text_color(rgb(theme::TEXT_MUTED));
+        let clear = |id: &str| {
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .size(px(22.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .child(svg().path(icon("close")).size(px(9.)).text_color(rgb(theme::TEXT_MUTED)))
+        };
+
+        match host.identity.and_then(|id| self.vault.identity(id)) {
+            // A chosen identity stands in for the username, password and key.
+            Some(identity) => {
+                out.push(
+                    field_box(false)
+                        .child(field_icon("identity"))
+                        .child(div().flex_1().truncate().text_color(rgb(theme::TEXT)).child(identity.label.clone()))
+                        .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(identity.subtitle()))
+                        .child(clear("credentials-identity-clear").on_click(cx.listener(|shell, _, _, cx| {
+                            if let Some(editor) = &mut shell.host_editor {
+                                editor.host.identity = None;
+                            }
+                            shell.autosave();
+                            cx.notify();
+                        })))
+                        .into_any_element(),
+                );
+                return out;
+            }
+            None => {
+                let username = host.username.clone().unwrap_or_default();
+                let focused = editor.field == Field::Username && self.editor_focus.is_focused(window);
+                let typed = username.to_lowercase();
+                let matches: Vec<_> = self
+                    .vault
+                    .identities
+                    .iter()
+                    .filter(|i| typed.is_empty() || i.label.to_lowercase().contains(&typed) || i.username.to_lowercase().contains(&typed))
+                    .collect();
+                let suggestions = (focused && !matches.is_empty()).then(|| {
+                    let mut menu = list("credentials-identities");
+                    for identity in matches {
+                        let id = identity.id;
+                        let detail = std::iter::once(identity.username.clone())
+                            .chain(identity.password.as_ref().map(|_| "••••••".to_owned()))
+                            .chain(identity.key.and_then(|k| self.vault.key(k)).map(|k| k.label.clone()))
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        menu = menu.child(
+                            menu_row(format!("credentials-identity-{id}"), "", false, false)
+                                .h(px(44.))
+                                .gap_2()
+                                .child(svg().path(icon("identity")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+                                .child(div().flex().flex_col().child(identity.label.clone()).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(detail)))
+                                .on_click(cx.listener(move |shell, _, _, cx| {
+                                    if let Some(editor) = &mut shell.host_editor {
+                                        editor.host.identity = Some(id);
+                                        editor.host.username = None;
+                                        editor.field = Field::Label;
+                                    }
+                                    shell.autosave();
+                                    cx.notify();
+                                })),
+                        );
+                    }
+                    menu
+                });
+                out.push(
+                    div()
+                        .relative()
+                        .child(self.input(Field::Username, "Username", &username, false, window, cx))
+                        .children(suggestions.map(|menu| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(menu)).with_priority(1)))
+                        .into_any_element(),
+                );
+                out.push(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx).into_any_element());
+            }
+        }
+
+        // The key: chosen, being picked, or the legacy «+» button with its menu.
+        if let Some(key) = host.key.and_then(|k| self.vault.key(k)) {
+            out.push(
+                field_box(false)
+                    .child(field_icon("keychain"))
+                    .child(div().flex_1().truncate().text_color(rgb(theme::TEXT)).child(key.label.clone()))
+                    .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(key.kind.clone()))
+                    .child(clear("credentials-key-clear").on_click(cx.listener(|shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.host.key = None;
+                        }
+                        shell.autosave();
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        } else if editor.keys_open {
+            let mut menu = list("credentials-keys");
+            for key in &self.vault.keys {
+                let id = key.id;
+                // A key whose private part could not be read from the legacy profile cannot be used.
+                let usable = key.private_key.is_some();
+                let label = if usable { key.label.clone() } else { format!("{} — not available in this client", key.label) };
+                menu = menu.child(menu_row(format!("credentials-key-{id}"), &label, false, !usable).when(usable, |d| {
+                    d.on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.host.key = Some(id);
+                            editor.keys_open = false;
+                        }
+                        shell.autosave();
+                        cx.notify();
+                    }))
+                }));
+            }
+            out.push(
+                div()
+                    .relative()
+                    .child(
+                        field_box(true)
+                            .id("credentials-key-field")
+                            .child(field_icon("keychain"))
+                            .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child("Key"))
+                            .child(clear("credentials-key-cancel").on_click(cx.listener(|shell, _, _, cx| {
+                                if let Some(editor) = &mut shell.host_editor {
+                                    editor.keys_open = false;
+                                }
+                                cx.notify();
+                            }))),
+                    )
+                    .child(gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(menu)).with_priority(1))
+                    .into_any_element(),
+            );
+        } else {
+            let open = editor.key_menu;
+            let button = div()
+                .id("credentials-add")
+                .h(px(36.))
+                .px_2()
+                .flex()
+                .items_center()
+                .gap_2()
+                .rounded_md()
+                .text_color(rgb(theme::TEXT))
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .child(svg().path(icon("plus")).size(px(12.)).text_color(rgb(theme::TEXT)))
+                .child("SSH.id, Key, Certificate, FIDO2")
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    if let Some(editor) = &mut shell.host_editor {
+                        editor.key_menu = !editor.key_menu;
+                    }
+                    cx.notify();
+                }));
+            // SSH.id is a cloud service, and certificates and FIDO2 keys are not
+            // supported here: only Key can be chosen.
+            let menu = open.then(|| {
+                list("credentials-add-menu")
+                    .child(menu_row("credentials-add-sshid".into(), "SSH.id — Passkeys for SSH", false, true))
+                    .child(menu_row("credentials-add-key".into(), "Key", false, false).on_click(cx.listener(|shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.key_menu = false;
+                            editor.keys_open = true;
+                        }
+                        cx.notify();
+                    })))
+                    .child(menu_row("credentials-add-certificate".into(), "Certificate", false, true))
+                    .child(menu_row("credentials-add-fido2".into(), "FIDO2", false, true))
+            });
+            out.push(div().relative().child(button).children(menu.map(|menu| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(menu)).with_priority(1))).into_any_element());
+        }
+        out
+    }
+
     fn change_host_settings(&mut self, change: impl FnOnce(&mut termian_native::vault::HostSettings), cx: &mut Context<Self>) {
         if let Some(editor) = &mut self.host_editor {
             change(&mut editor.host.settings);
@@ -153,7 +334,7 @@ impl Shell {
     /// The host's terminal theme with a small preview; it opens the theme list.
     fn theme_row(&self, cx: &mut Context<Self>) -> Stateful<Div> {
         let name = self.host_editor.as_ref().and_then(|e| e.host.settings.theme_name().map(str::to_owned));
-        let shown = name.clone().unwrap_or_else(|| self.vault.terminal.color_scheme.clone());
+        let shown = name.clone().unwrap_or_else(|| self.vault.terminal.theme().name.clone());
         div()
             .id("editor-theme")
             .flex()

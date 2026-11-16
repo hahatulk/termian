@@ -508,7 +508,7 @@ impl Shell {
             Some(Err(error)) => (Vec::new(), Some(error)),
             None => (Vec::new(), Some(session_log::UNREADABLE_LOG.to_owned())),
         };
-        let title = entry.label.clone();
+        let title = session_log::log_tab_title(&entry.label, entry.connected_at);
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
         self.add_terminal(title, view, None, ui::workspace::Origin::None, cx);
