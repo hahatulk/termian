@@ -26,6 +26,9 @@ pub enum Field {
     Port,
     Username,
     Password,
+    /// A row of «Environment Variables».
+    EnvName(usize),
+    EnvValue(usize),
 }
 
 pub struct HostEditor {
@@ -34,7 +37,7 @@ pub struct HostEditor {
     pub is_new: bool,
     /// Opened with NEW HOST: the title stays "New Host" while it is open.
     created_here: bool,
-    field: Field,
+    pub(super) field: Field,
     /// Tag being typed, added with Enter.
     tag: String,
     port: String,
@@ -44,6 +47,12 @@ pub struct HostEditor {
     menu_open: bool,
     /// "Remove a host" is showing.
     confirm_remove: bool,
+    /// «Do you want to discard changes?» is showing.
+    confirm_discard: bool,
+    /// The open menu of a setting row (Backspace, Agent Forwarding, ...).
+    pub(super) picker: Option<super::host_settings::Picker>,
+    /// The «Environment Variables» or «Select Color Theme» panel over the form.
+    pub(super) panel: Option<super::host_settings::Panel>,
 }
 
 /// Right-click menu of a host card.
@@ -156,6 +165,7 @@ impl Shell {
             password: None,
             key: None,
             identity: None,
+            settings: Default::default(),
         };
         self.open_editor(host, true, window, cx);
     }
@@ -183,6 +193,9 @@ impl Shell {
             identities_open: false,
             menu_open: false,
             confirm_remove: false,
+            confirm_discard: false,
+            picker: None,
+            panel: None,
         });
         window.focus(&self.editor_focus);
         cx.notify();
@@ -199,7 +212,7 @@ impl Shell {
 
     /// Saves the draft as typed, like the legacy form: a new host appears
     /// once it has an address.
-    fn autosave(&mut self) {
+    pub(super) fn autosave(&mut self) {
         let Some(editor) = &mut self.host_editor else { return };
         editor.host.port = editor.port.parse().ok();
         if editor.host.address.trim().is_empty() && editor.is_new {
@@ -211,6 +224,17 @@ impl Shell {
     }
 
     fn close_editor(&mut self, cx: &mut Context<Self>) {
+        // A new host with something typed but no address is not saved:
+        // legacy asks before throwing it away.
+        if let Some(editor) = &mut self.host_editor {
+            let host = &editor.host;
+            let typed = !host.label.trim().is_empty() || !host.tags.is_empty() || host.username.is_some() || host.password.is_some() || host.group.is_some() || host.settings != Default::default() || !editor.port.is_empty();
+            if editor.is_new && host.address.trim().is_empty() && typed && !editor.confirm_discard {
+                editor.confirm_discard = true;
+                cx.notify();
+                return;
+            }
+        }
         self.host_editor = None;
         cx.notify();
     }
@@ -249,6 +273,13 @@ impl Shell {
     fn on_editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.host_editor else { return };
+        if editor.confirm_discard {
+            if event.keystroke.key == "escape" {
+                editor.confirm_discard = false;
+                cx.notify();
+            }
+            return;
+        }
         if editor.confirm_remove {
             if event.keystroke.key == "escape" {
                 editor.confirm_remove = false;
@@ -272,6 +303,13 @@ impl Shell {
             Field::Port => &mut editor.port,
             Field::Username => editor.host.username.get_or_insert_with(String::new),
             Field::Password => editor.host.password.get_or_insert_with(String::new),
+            Field::EnvName(i) | Field::EnvValue(i) => {
+                let env = &mut editor.host.settings.env;
+                if i >= env.len() {
+                    return;
+                }
+                if matches!(editor.field, Field::EnvName(_)) { &mut env[i].name } else { &mut env[i].value }
+            }
         };
         let before = value.clone();
         let key = dialog::edit(Some(value), &event.keystroke, paste);
@@ -307,8 +345,10 @@ impl Shell {
                 }
                 // Enter in the connection fields connects, as in the legacy form.
                 Field::Address | Field::Port | Field::Username | Field::Password => self.connect_from_editor(window, cx),
-                Field::Label => {}
+                Field::Label | Field::EnvName(_) | Field::EnvValue(_) => {}
             },
+            // Escape leaves a sub-panel first, then the form.
+            Key::Escape if editor.panel.is_some() => editor.panel = None,
             Key::Escape => self.close_editor(cx),
             Key::Ignored => {
                 // Backspace on an empty tag field removes the last tag.
@@ -323,7 +363,7 @@ impl Shell {
         cx.notify();
     }
 
-    fn input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(editor) = &self.host_editor else { return div().id("none") };
         let focused = editor.field == field && self.editor_focus.is_focused(window);
         let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
@@ -514,7 +554,8 @@ impl Shell {
             .child(self.input(Field::Label, "Label", &host.label, false, window, cx))
             // Lists open over the form, like the legacy autocomplete menus.
             .child(div().relative().child(group_picker).children(groups.map(|list| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list)))))
-            .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)));
+            .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)))
+            .child(self.render_backspace_row(cx));
 
         let ssh = card("SSH")
             .child(
@@ -533,7 +574,8 @@ impl Shell {
                 card.child(self.input(Field::Username, "Username", host.username.as_deref().unwrap_or(""), false, window, cx))
                     .child(self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx))
                     .child(self.render_key_picker(cx))
-            });
+            })
+            .children(self.render_ssh_settings(cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(
@@ -577,6 +619,28 @@ impl Shell {
                 .on_click(cx.listener(move |shell, _, _, cx| shell.remove_host(id, cx)));
             dialog::backdrop(remove_card(host, close, remove))
         });
+        // Legacy «Do you want to discard changes?» for an unfinished new host.
+        let confirm = confirm.or_else(|| {
+            editor.confirm_discard.then(|| {
+                let close = dialog::close_button("discard-close").on_click(cx.listener(|shell, _, _, cx| {
+                    if let Some(editor) = &mut shell.host_editor {
+                        editor.confirm_discard = false;
+                    }
+                    cx.notify();
+                }));
+                let discard = dialog::button("discard-confirm", "Discard changes", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
+                    shell.host_editor = None;
+                    cx.notify();
+                }));
+                dialog::backdrop(dialog::card(
+                    "Do you want to discard changes?",
+                    false,
+                    close,
+                    dialog::text("Not all required fields are filled. Do you want to finish editing and discard all changes?"),
+                    vec![discard.into_any_element()],
+                ))
+            })
+        });
 
         Some(
             div()
@@ -596,7 +660,11 @@ impl Shell {
                 .border_color(rgb(theme::TITLE_BAR))
                 .shadow_lg()
                 .child(header)
-                .child(div().id("editor-body").flex_1().overflow_y_scroll().p(px(15.)).flex().flex_col().gap(px(15.)).child(address).child(general).child(ssh))
+                .map(|d| match editor.panel {
+                    // A sub-panel takes the form's place, as the legacy nested sliders do.
+                    Some(panel) => d.child(div().flex_1().min_h_0().child(self.render_host_panel(panel, window, cx))),
+                    None => d.child(div().id("editor-body").flex_1().overflow_y_scroll().p(px(15.)).flex().flex_col().gap(px(15.)).child(address).child(general).child(ssh)),
+                })
                 .child(footer)
                 .children(menu),
         )

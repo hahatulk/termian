@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Map, Value};
 
 use crate::sync::{empty_snapshot, Device, KINDS};
-use crate::vault::{ForwardingRule, Group, Host, Identity, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
+use crate::vault::{EnvVar, ForwardingRule, Group, Host, HostSettings, Identity, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
 
 /// Collections kept as they are.
 const FOREIGN: [&str; 3] = ["telnetConfigs", "proxies", "workspaceTemplates"];
@@ -47,6 +47,26 @@ fn optional(value: &Value, field: &str) -> Option<String> {
 
 fn id_of(value: &Value, field: &str) -> Option<Value> {
     value.get(field).and_then(|v| v.get("local_id")).filter(|v| !v.is_null()).cloned()
+}
+
+/// Legacy host settings from a host and its SSH config; the startup snippet is
+/// linked by the caller.
+fn host_settings(host: &Value, config: &Value) -> HostSettings {
+    HostSettings {
+        ctrl_h_backspace: host.get("backspace").and_then(Value::as_str).is_some_and(|b| b != "default"),
+        agent_forwarding: config.get("agent_forwarding").and_then(Value::as_bool).unwrap_or(false),
+        charset: optional(config, "charset").filter(|c| !c.eq_ignore_ascii_case("UTF-8")),
+        env: config
+            .get("env_variables")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|v| Some(EnvVar { name: v.get("name")?.as_str()?.to_owned(), value: v.get("value").and_then(Value::as_str).unwrap_or_default().to_owned() }))
+            .filter(|v| !v.name.is_empty())
+            .collect(),
+        startup_snippet: None,
+        color_scheme: config.get("color_scheme").filter(|c| !c.is_null()).cloned(),
+    }
 }
 
 fn rule_type(kind: RuleKind) -> &'static str {
@@ -131,10 +151,16 @@ pub fn export(vault: &Vault, now: &str) -> Value {
             }
             None => None,
         };
+        let settings = &host.settings;
         let config = overlay(vault, &key("sshConfigs-of-host", host.id), json!({
             "local_id": links.config,
             "port": host.port.unwrap_or(22),
             "identity": reference(identity),
+            "agent_forwarding": settings.agent_forwarding,
+            "charset": settings.charset,
+            "env_variables": settings.env.iter().map(|v| json!({"name": v.name, "value": v.value})).collect::<Vec<_>>(),
+            "startup_snippet": reference(settings.startup_snippet.filter(|id| vault.snippets.iter().any(|s| s.id == *id))),
+            "color_scheme": settings.color_scheme,
         }));
         configs.push(config.clone());
         hosts.push(overlay(vault, &key("hosts", host.id), json!({
@@ -144,6 +170,12 @@ pub fn export(vault: &Vault, now: &str) -> Value {
             "os_name": host.os.clone().unwrap_or_default(),
             "tags": host.tags,
             "group": reference(host.group),
+            // Ctrl+H keeps the value it arrived with ("legacy" when set here).
+            "backspace": if host.settings.ctrl_h_backspace {
+                vault.portable.get(&key("hosts", host.id)).and_then(|h| h.get("backspace")).and_then(Value::as_str).filter(|b| *b != "default").unwrap_or("legacy")
+            } else {
+                "default"
+            },
             "ssh_config": config,
         })));
     }
@@ -306,6 +338,7 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
     }
 
     let mut hosts = Vec::new();
+    let mut startup_snippets = Vec::new();
     for raw in list("hosts") {
         let id = assign("hosts", &raw, &mut pairs, &mut ids);
         let config = id_of(&raw, "ssh_config").and_then(|c| configs.get(&token(&c))).cloned();
@@ -324,7 +357,12 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
             identity: shared,
             tags: raw.get("tags").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_owned).collect(),
             port: config.as_ref().and_then(|c| c.get("port")).and_then(Value::as_u64).and_then(|p| u16::try_from(p).ok()).filter(|p| *p != 22),
+            settings: config.as_ref().map(|c| host_settings(&raw, c)).unwrap_or_else(|| host_settings(&raw, &Value::Null)),
         });
+        // Snippets come later; the startup snippet is linked once they have ids.
+        if let Some(snippet) = config.as_ref().and_then(|c| id_of(c, "startup_snippet")) {
+            startup_snippets.push((hosts.len() - 1, snippet));
+        }
         if let Some(config) = config {
             // The config and hidden identity keep their own ids so the next export matches.
             let config_id = ids.get(&("sshConfigs", token(&config["local_id"]))).copied().unwrap_or(0);
@@ -359,6 +397,9 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
             targets: targets.filter_map(|h| h.get("local_id")).filter_map(|h| ids.get(&("hosts", token(h))).copied()).collect(),
         });
         portable.insert(key("snippets", id), raw);
+    }
+    for (host, snippet) in startup_snippets {
+        hosts[host].settings.startup_snippet = ids.get(&("snippets", token(&snippet))).copied();
     }
     let mut rules = Vec::new();
     for raw in list("portForwardingRules") {
@@ -439,7 +480,7 @@ mod tests {
         vault.groups.push(Group { id: 2, label: "db".into(), parent: Some(1) });
         vault.keys.push(SshKey { id: 3, label: "deploy".into(), kind: "ED25519".into(), private_key: Some("PRIVATE".into()), public_key: Some("ssh-ed25519 AAAA".into()), passphrase: None });
         vault.identities.push(Identity { id: 4, label: "ops".into(), username: "ops".into(), password: Some("pw".into()), key: Some(3), ..Identity::default() });
-        let host = |id, label: &str| Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: Some(2), username: None, tags: vec![], port: None, password: None, key: None, identity: None };
+        let host = |id, label: &str| Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: Some(2), username: None, tags: vec![], port: None, password: None, key: None, identity: None, settings: HostSettings::default() };
         vault.hosts.push(Host { username: Some("root".into()), password: Some("secret".into()), port: Some(2222), tags: vec!["prod".into()], ..host(5, "web") });
         vault.hosts.push(Host { identity: Some(4), ..host(6, "api") });
         vault.packages.push(SnippetPackage { id: 9, label: "tools".into() });
@@ -486,6 +527,32 @@ mod tests {
     }
 
     #[test]
+    fn host_settings_travel_in_the_legacy_fields() {
+        let mut vault = sample();
+        vault.hosts[0].settings = HostSettings {
+            ctrl_h_backspace: true,
+            agent_forwarding: true,
+            charset: Some("KOI8-R".into()),
+            env: vec![EnvVar { name: "LANG".into(), value: "C".into() }],
+            startup_snippet: Some(7),
+            color_scheme: Some(json!("Night Owl")),
+        };
+        let snapshot = validate_snapshot(&export(&vault, NOW)).unwrap();
+        let web = snapshot["hosts"].as_array().unwrap().iter().find(|h| h["label"] == "web").unwrap();
+        assert_eq!(web["backspace"], "legacy");
+        let config = &web["ssh_config"];
+        assert_eq!((config["agent_forwarding"].clone(), config["charset"].clone()), (json!(true), json!("KOI8-R")));
+        assert_eq!(config["env_variables"], json!([{"name": "LANG", "value": "C"}]));
+        assert_eq!(config["color_scheme"], "Night Owl");
+        let mut copy = Vault::default();
+        import(&mut copy, &snapshot).unwrap();
+        let web = copy.hosts.iter().find(|h| h.label == "web").unwrap();
+        let snippet = copy.snippets.iter().find(|s| s.label == "top").unwrap().id;
+        assert_eq!(web.settings, HostSettings { startup_snippet: Some(snippet), ..vault.hosts[0].settings.clone() });
+        assert_eq!(copy.hosts.iter().find(|h| h.label == "api").unwrap().settings, HostSettings::default(), "defaults stay empty");
+    }
+
+    #[test]
     fn fields_and_collections_this_client_does_not_model_survive() {
         let mut snapshot = validate_snapshot(&export(&sample(), NOW)).unwrap();
         let config_id = snapshot["hosts"][0]["ssh_config"]["local_id"].clone();
@@ -529,7 +596,7 @@ mod tests {
         let cloud = crate::cloud::tests::config(&url).validate().unwrap();
         let mut a = sample();
         let mut b = Vault::default();
-        b.hosts.push(Host { id: 1, label: "laptop".into(), address: "10.0.0.9".into(), os: None, group: None, username: Some("me".into()), tags: vec![], port: None, password: None, key: None, identity: None });
+        b.hosts.push(Host { id: 1, label: "laptop".into(), address: "10.0.0.9".into(), os: None, group: None, username: Some("me".into()), tags: vec![], port: None, password: None, key: None, identity: None, settings: HostSettings::default() });
         let round = |vault: &mut Vault| {
             let saved = vault.sync_state.take();
             let outcome = {

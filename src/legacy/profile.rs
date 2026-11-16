@@ -83,6 +83,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
     let identity_secrets: HashMap<u64, (Option<String>, Option<u64>)> =
         store("ssh_identities").iter().map(|(id, v)| (*id, (secret(v.get("password")), link(v, "ssh_key")))).collect();
 
+    let configs: HashMap<u64, &Value> = store("ssh_configs").iter().map(|(id, v)| (*id, v)).collect();
     let tag_labels: HashMap<u64, String> =
         store("tags").iter().map(|(id, v)| (*id, text(v.get("label")).unwrap_or_default())).collect();
     let mut host_tags: HashMap<u64, Vec<String>> = HashMap::new();
@@ -109,6 +110,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
                 password: own.0,
                 key: own.1,
                 identity: identity.filter(|i| !hidden.contains(i)),
+                settings: host_settings(v, link(v, "ssh_config").and_then(|c| configs.get(&c).copied()), cipher),
             }
         })
         .collect();
@@ -315,6 +317,31 @@ pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<Hi
         .collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.connected_at));
     Ok(entries)
+}
+
+/// The legacy host form's settings: `backspace` on the host, the rest on its
+/// SSH config (environment variables may be stored encrypted).
+fn host_settings(host: &Value, config: Option<&Value>, cipher: &FieldCipher) -> crate::vault::HostSettings {
+    let config = config.unwrap_or(&Value::Null);
+    let env = match config.get("env_variables") {
+        Some(Value::String(text)) => serde_json::from_str::<serde_json::Value>(&decrypt_or_plain(cipher, text)).unwrap_or_default(),
+        Some(value) => to_json(value),
+        None => serde_json::Value::Null,
+    };
+    crate::vault::HostSettings {
+        ctrl_h_backspace: host.get("backspace").and_then(Value::as_str).is_some_and(|b| b != "default"),
+        agent_forwarding: matches!(config.get("agent_forwarding"), Some(Value::Bool(true))),
+        charset: config.get("charset").and_then(Value::as_str).map(|c| decrypt_or_plain(cipher, c)).filter(|c| !c.is_empty() && !c.eq_ignore_ascii_case("UTF-8")),
+        env: env
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| Some(crate::vault::EnvVar { name: v.get("name")?.as_str()?.to_owned(), value: v.get("value").and_then(serde_json::Value::as_str).unwrap_or_default().to_owned() }))
+            .filter(|v| !v.name.is_empty())
+            .collect(),
+        startup_snippet: link(config, "startup_snippet"),
+        color_scheme: config.get("color_scheme").map(to_json).filter(|c| !c.is_null()),
+    }
 }
 
 fn link(value: &Value, field: &str) -> Option<u64> {

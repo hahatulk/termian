@@ -314,18 +314,24 @@ pub struct SshOptions {
     pub import_history: bool,
     /// «Verbose (-v)» on the failed connection screen: `debug1:` lines in the log.
     pub verbose: bool,
+    /// The host's «Environment Variable» list, sent before the shell starts.
+    pub env: Vec<(String, String)>,
+    /// The host's «Agent Forwarding»: the server may use the local SSH agent.
+    pub agent_forwarding: bool,
+    /// The host's charset; `None` is UTF-8.
+    pub charset: Option<String>,
 }
 
 impl Default for SshOptions {
     fn default() -> Self {
-        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true, detect_os: false, import_history: false, verbose: false }
+        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true, detect_os: false, import_history: false, verbose: false, env: Vec::new(), agent_forwarding: false, charset: None }
     }
 }
 
 impl SshOptions {
     pub fn from_vault(vault: &crate::vault::Vault) -> Self {
         let terminal = &vault.terminal;
-        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false }
+        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false, ..Self::default() }
     }
 
     /// Key exchanges to offer: russh's order, without the hybrid
@@ -371,11 +377,16 @@ impl SshTarget {
     /// A saved host with the credentials it logs in with (its identity's, if set).
     pub fn for_host(host: &crate::vault::Host, vault: &crate::vault::Vault) -> Self {
         let (username, password, key) = vault.credentials(host);
-        Self {
+        let mut target = Self {
             password,
             key: key.and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone()))),
             ..Self::new(&host.destination(), username)
-        }
+        };
+        let settings = &host.settings;
+        target.options.env = settings.env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
+        target.options.agent_forwarding = settings.agent_forwarding;
+        target.options.charset = settings.charset.clone();
+        target
     }
 }
 
@@ -483,6 +494,8 @@ pub(crate) struct Verifier {
     pub(crate) forward_to: Option<(String, u16)>,
     /// The server's version line, recorded once a channel opens.
     server_id: Arc<std::sync::Mutex<Option<String>>>,
+    /// «Agent Forwarding»: agent channels the server opens go to `SSH_AUTH_SOCK`.
+    agent: bool,
 }
 
 fn key_label(key: &PublicKey) -> String {
@@ -521,6 +534,25 @@ impl client::Handler for Verifier {
                 let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
             }
         });
+        Ok(())
+    }
+
+    async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _: &mut client::Session) -> Result<(), Self::Error> {
+        let socket = std::env::var_os("SSH_AUTH_SOCK").filter(|_| self.agent);
+        #[cfg(unix)]
+        if let Some(socket) = socket {
+            reply.accept().await;
+            tokio::spawn(async move {
+                if let Ok(mut local) = tokio::net::UnixStream::connect(socket).await {
+                    let mut remote = channel.into_stream();
+                    let _ = tokio::io::copy_bidirectional(&mut local, &mut remote).await;
+                }
+            });
+            return Ok(());
+        }
+        // Without a local agent (or on Windows, where it is a named pipe) the request is refused.
+        let _ = socket;
+        reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
         Ok(())
     }
 
@@ -611,6 +643,13 @@ async fn run_ssh(
     let handle = Arc::new(open(&target, prompter.clone(), None, server_id.clone()).await?);
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
     let (cols, rows) = *latest_size.lock().unwrap();
+    // Servers may refuse variables they do not accept (AcceptEnv); that is not an error.
+    for (name, value) in &target.options.env {
+        let _ = channel.set_env(false, name.as_str(), value.as_str()).await;
+    }
+    if target.options.agent_forwarding {
+        let _ = channel.agent_forward(false).await;
+    }
     channel.request_pty(true, &target.options.term, cols as u32, rows as u32, 0, 0, &[]).await.map_err(|e| e.to_string())?;
     channel.request_shell(true).await.map_err(|e| e.to_string())?;
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
@@ -631,7 +670,8 @@ async fn run_ssh(
             }
         })
     });
-    let result = pump(channel, shell_input, events).await;
+    let charset = target.options.charset.as_deref().and_then(crate::serial::encoding).map(Charset::new);
+    let result = pump(channel, shell_input, events, charset).await;
     if let Some(history) = history { history.abort(); }
     drop(handle);
     result
@@ -792,7 +832,7 @@ async fn open(
     }
 
     let config = target.options.config();
-    let verifier = Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to, server_id };
+    let verifier = Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to, server_id, agent: target.options.agent_forwarding };
     let mut handle = client::connect_stream(Arc::new(config), stream, verifier).await.map_err(|error| match error {
         russh::Error::UnknownKey => "Host key verification failed.".to_string(),
         other => format!("SSH handshake failed: {other}"),
@@ -944,13 +984,18 @@ async fn pump(
     channel: russh::Channel<client::Msg>,
     mut input: UnboundedReceiver<Input>,
     events: UnboundedSender<SessionEvent>,
+    mut charset: Option<Charset>,
 ) -> Result<(), String> {
     let (mut reader, writer) = channel.split();
     loop {
         tokio::select! {
             message = reader.wait() => match message {
                 Some(ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. }) => {
-                    let _ = events.unbounded_send(SessionEvent::Output(data.to_vec()));
+                    let data = match charset.as_mut() {
+                        Some(charset) => charset.decode(&data),
+                        None => data.to_vec(),
+                    };
+                    let _ = events.unbounded_send(SessionEvent::Output(data));
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) if exit_status != 0 => {
                     return Err(format!("Remote shell exited with code {exit_status}"));
@@ -961,7 +1006,13 @@ async fn pump(
                 _ => {}
             },
             item = input.next() => match item {
-                Some(Input::Data(bytes)) => writer.data_bytes(bytes).await.map_err(|e| format!("{CONNECTION_LOST}: {e}"))?,
+                Some(Input::Data(bytes)) => {
+                    let bytes = match charset.as_ref() {
+                        Some(charset) => charset.encode(&bytes).into(),
+                        None => bytes,
+                    };
+                    writer.data_bytes(bytes).await.map_err(|e| format!("{CONNECTION_LOST}: {e}"))?
+                }
                 Some(Input::Resize(cols, rows)) => {
                     let _ = writer.window_change(cols as u32, rows as u32, 0, 0).await;
                 }
@@ -978,6 +1029,19 @@ async fn pump(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_saved_host_carries_its_environment_agent_and_charset() {
+        use crate::vault::{EnvVar, Host, HostSettings, Vault};
+        let mut host = crate::vault::tests::host(1, "db", None);
+        host.settings = HostSettings { agent_forwarding: true, charset: Some("windows-1251".into()), env: vec![EnvVar { name: "LANG".into(), value: "ru_RU.CP1251".into() }], ..HostSettings::default() };
+        let target = SshTarget::for_host(&host, &Vault::default());
+        assert_eq!(target.options.env, [("LANG".to_owned(), "ru_RU.CP1251".to_owned())]);
+        assert!(target.options.agent_forwarding);
+        assert_eq!(target.options.charset.as_deref(), Some("windows-1251"));
+        let plain = SshTarget::for_host(&Host { settings: HostSettings::default(), ..host }, &Vault::default());
+        assert_eq!((plain.options.env.len(), plain.options.agent_forwarding, plain.options.charset), (0, false, None));
+    }
 
     fn collect_until(session: &mut Session, needle: &str) -> String {
         let mut seen = Vec::new();
@@ -1469,7 +1533,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut target = target(server::start(), dir.path().join("known_hosts"));
         target.password = Some(server::PASSWORD.into());
-        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false, detect_os: false, import_history: false, verbose: false };
+        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false, ..SshOptions::default() };
         assert!(!target.options.kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert!(SshOptions::default().kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert_eq!(target.options.config().keepalive_interval, Some(Duration::from_secs(5)));

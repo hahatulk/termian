@@ -430,7 +430,9 @@ impl Shell {
 
     #[allow(clippy::too_many_arguments)]
     fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
-        target.options = session::SshOptions::from_vault(&self.vault);
+        // Terminal settings, keeping what the host itself asks for.
+        let host_options = std::mem::take(&mut target.options);
+        target.options = session::SshOptions { env: host_options.env, agent_forwarding: host_options.agent_forwarding, charset: host_options.charset, ..session::SshOptions::from_vault(&self.vault) };
         // Legacy runs the detection only for saved hosts whose system is unknown.
         let unknown = host.and_then(|id| self.vault.hosts.iter().find(|h| h.id == id)).is_some_and(|h| h.os.is_none());
         target.options.detect_os = self.vault.terminal.detect_os && unknown;
@@ -442,8 +444,14 @@ impl Shell {
         };
         let identities = termian_native::login::IdentityChoice::all(&self.vault);
         let connection = Connection { label: label.clone(), os, target, identities, saved_host: host.is_some() };
-        let settings = self.vault.terminal.clone();
-        let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log).with_startup(startup));
+        // A host's own theme and Backspace (legacy host form).
+        let saved = host.and_then(|id| self.vault.host(id));
+        let mut settings = self.vault.terminal.clone();
+        if let Some(theme) = saved.and_then(|h| h.settings.theme_name()).filter(|name| termian_native::terminal_settings::themes().iter().any(|t| t.name == *name)) {
+            settings.color_scheme = theme.to_owned();
+        }
+        let ctrl_h = saved.is_some_and(|h| h.settings.ctrl_h_backspace);
+        let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log).with_startup(startup).with_ctrl_h_backspace(ctrl_h));
         self.add_terminal(label, view, Some(history), origin, cx);
     }
 
@@ -455,6 +463,8 @@ impl Shell {
     pub fn connect_host_with(&mut self, host: HostId, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::for_host(entry, &self.vault);
+        // «Startup Command»: the host's snippet, unless a snippet is being run on it.
+        let startup = startup.or_else(|| entry.settings.startup_snippet.and_then(|id| self.vault.snippets.iter().find(|s| s.id == id)).map(|s| s.script.clone()));
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.open_ssh_for(Some(host), label, os, target, startup, window, cx);
     }

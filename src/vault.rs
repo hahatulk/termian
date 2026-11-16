@@ -34,6 +34,47 @@ pub struct Host {
     /// Identity from the Keychain: its username, password and key replace the host's own.
     #[serde(default)]
     pub identity: Option<u64>,
+    /// The legacy host form's other SSH settings.
+    #[serde(default)]
+    pub settings: HostSettings,
+}
+
+/// Legacy host settings: `backspace` on the host, the rest on its SSH config.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HostSettings {
+    /// «Backspace: Ctrl+H» (legacy `"legacy"`); otherwise DEL is sent.
+    #[serde(default)]
+    pub ctrl_h_backspace: bool,
+    #[serde(default)]
+    pub agent_forwarding: bool,
+    /// `None` is UTF-8.
+    #[serde(default)]
+    pub charset: Option<String>,
+    #[serde(default)]
+    pub env: Vec<EnvVar>,
+    /// Snippet run once the shell is ready («Startup Command»).
+    #[serde(default)]
+    pub startup_snippet: Option<u64>,
+    /// The host's terminal theme as legacy stores it (a name or an object with `name`).
+    #[serde(default)]
+    pub color_scheme: Option<serde_json::Value>,
+}
+
+impl HostSettings {
+    /// The theme name, when the host has its own.
+    pub fn theme_name(&self) -> Option<&str> {
+        match self.color_scheme.as_ref()? {
+            serde_json::Value::String(name) => Some(name.as_str()),
+            value => value.get("name")?.as_str(),
+        }
+        .filter(|n| !n.is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
 }
 
 impl Host {
@@ -888,6 +929,7 @@ pub(crate) mod tests {
             password: None,
             key: None,
             identity: None,
+            settings: HostSettings::default(),
         }
     }
 
@@ -1199,6 +1241,7 @@ pub(crate) mod tests {
 pub fn demo() -> Vault {
     let group = |id, label: &str, parent| Group { id, label: label.into(), parent };
     let host = |id, label: &str, os: &str, group, user: Option<&str>, tags: &[&str]| Host {
+        settings: HostSettings::default(),
         id,
         label: label.into(),
         address: format!("192.0.2.{id}"),

@@ -81,6 +81,8 @@ pub struct TerminalView {
     login: Option<LoginState>,
     /// The shell became ready: the connection screen hands over (legacy animation).
     connected: Option<(std::time::Instant, u64)>,
+    /// The host's «Backspace: Ctrl+H»: Backspace sends ^H instead of DEL.
+    ctrl_h_backspace: bool,
     login_focus: FocusHandle,
     /// Bumped on retry; events from the replaced session are ignored.
     generation: u64,
@@ -168,6 +170,7 @@ impl TerminalView {
             selecting: false,
             login: connection.as_ref().map(|_| LoginState::default()),
             connected: None,
+            ctrl_h_backspace: false,
             connection,
             login_focus,
             generation: 0,
@@ -292,6 +295,11 @@ impl TerminalView {
         } else {
             self.run(&script);
         }
+    }
+
+    pub fn with_ctrl_h_backspace(mut self, on: bool) -> Self {
+        self.ctrl_h_backspace = on;
+        self
     }
 
     pub fn with_startup(mut self, script: Option<String>) -> Self {
@@ -593,7 +601,10 @@ impl TerminalView {
         let arrow = matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right");
         let alt = mods.alt && (self.settings.option_is_meta || arrow || !cfg!(target_os = "macos"));
         let mods = Modifiers { control: mods.control, alt, shift: mods.shift };
-        if let Some(bytes) = key_bytes(&keystroke.key, keystroke.key_char.as_deref(), mods, self.terminal.app_cursor()) {
+        if let Some(mut bytes) = key_bytes(&keystroke.key, keystroke.key_char.as_deref(), mods, self.terminal.app_cursor()) {
+            if self.ctrl_h_backspace && bytes == [0x7f] {
+                bytes = vec![0x08];
+            }
             self.terminal.scroll(i32::MIN / 2); // typing jumps back to the prompt
             self.terminal.clear_selection();
             self.session.write(&bytes);

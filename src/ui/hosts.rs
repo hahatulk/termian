@@ -152,8 +152,10 @@ impl Shell {
         };
         // Legacy sliders push the cards aside and slide in from the right.
 
+        // Host, group and rule editors slide in by themselves (`dialog::slide_in`).
+        let animate = sliding && matches!(self.section, Section::Keychain | Section::Snippets);
         let editor = editor.map(|editor| {
-            if !sliding {
+            if !animate {
                 return editor;
             }
             div()

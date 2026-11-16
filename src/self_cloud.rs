@@ -503,7 +503,7 @@ mod tests {
     use crate::vault::Host;
 
     fn host(id: u64, label: &str) -> Host {
-        Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: None, username: None, tags: vec![], port: None, password: None, key: None, identity: None }
+        Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: None, username: None, tags: vec![], port: None, password: None, key: None, identity: None, settings: Default::default() }
     }
 
     fn vault(url: &str, hosts: &[&str]) -> Vault {
