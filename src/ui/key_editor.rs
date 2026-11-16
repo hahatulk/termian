@@ -366,7 +366,7 @@ impl Shell {
             .absolute().top_0().right_0().bottom_0().w(px(WIDTH)).occlude().flex().flex_col().bg(rgb(theme::BACKGROUND)).border_l_1().border_color(rgb(theme::TITLE_BAR)).shadow_lg()
             .child(div().h(px(64.)).px(px(15.)).flex().items_center().gap_2().border_b_1().border_color(rgb(theme::TITLE_BAR))
                 .child(div().flex_1().text_lg().text_color(rgb(theme::TEXT)).child("Generate Key"))
-                .child(dialog::close_button("keygen-close").on_click(cx.listener(|shell, _, _, cx| { shell.key_editor = None; cx.notify(); }))))
+                .child(dialog::collapse_button("keygen-close").on_click(cx.listener(|shell, _, _, cx| { shell.key_editor = None; cx.notify(); }))))
             .child(div().id("keygen-body").flex_1().overflow_y_scroll().p(px(15.)).child(content))
             .into_any_element()
     }
@@ -390,7 +390,7 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title))
-            .child(dialog::close_button("key-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("key-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.key_editor = None;
                 cx.notify();
             })));

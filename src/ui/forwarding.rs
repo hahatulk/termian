@@ -329,7 +329,7 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { "New Port Forwarding" } else { "Edit Port Forwarding" }))
-            .child(dialog::close_button("rule-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("rule-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.rules.editor = None;
                 cx.notify();
             })));

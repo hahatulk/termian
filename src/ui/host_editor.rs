@@ -396,7 +396,8 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title))
+            // Legacy shows the vault under the title; this client has only the personal one.
+            .child(div().flex_1().flex().flex_col().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title)).child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("Personal vault")))
             .when(!editor.is_new, |d| {
                 d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT)))
             })
@@ -417,7 +418,7 @@ impl Shell {
                         cx.notify();
                     })),
             )
-            .child(dialog::close_button("editor-close").on_click(cx.listener(|shell, _, _, cx| shell.close_editor(cx))));
+            .child(dialog::collapse_button("editor-close").on_click(cx.listener(|shell, _, _, cx| shell.close_editor(cx))));
 
         let address = card("Address").child(
             div()

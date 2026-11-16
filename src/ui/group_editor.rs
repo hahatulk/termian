@@ -161,7 +161,7 @@ impl Shell {
                         cx.notify();
                     })),
             )
-            .child(dialog::close_button("group-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("group-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.group_editor = None;
                 cx.notify();
             })));

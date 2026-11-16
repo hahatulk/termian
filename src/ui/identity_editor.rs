@@ -165,7 +165,7 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { "New Identity" } else { "Identity" }))
-            .child(dialog::close_button("identity-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("identity-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.identity_editor = None;
                 cx.notify();
             })));

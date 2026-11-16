@@ -54,6 +54,19 @@ pub fn close_button(id: &str) -> Stateful<Div> {
         .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(0xffffff)))
 }
 
+/// The legacy slider's «→|» button: hides the slider to the right.
+pub fn collapse_button(id: &str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .size(px(28.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .hover(|s| s.bg(rgba(0xffffff22)))
+        .child(svg().path(icon("collapse_right")).size(px(16.)).text_color(rgb(0xffffff)))
+}
+
 /// Dialog card. `error` paints the header red, as `titleColor: "error"` does.
 pub fn card(title: &str, error: bool, close: Stateful<Div>, body: Div, buttons: Vec<AnyElement>) -> Div {
     div()

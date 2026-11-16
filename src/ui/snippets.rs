@@ -576,7 +576,7 @@ impl Shell {
                 }
                 cx.notify();
             })))
-            .child(dialog::close_button("snippet-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("snippet-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.snippet_editor = None;
                 cx.notify();
             })));
@@ -947,7 +947,7 @@ impl Shell {
                 }
                 cx.notify();
             })))
-            .child(dialog::close_button("package-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("package-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.package_editor = None;
                 cx.notify();
             })));
@@ -1138,7 +1138,7 @@ impl Shell {
                 }
                 cx.notify();
             })))
-            .child(dialog::close_button("history-close").on_click(cx.listener(|shell, _, _, cx| {
+            .child(dialog::collapse_button("history-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.shell_history = None;
                 cx.notify();
             })));
