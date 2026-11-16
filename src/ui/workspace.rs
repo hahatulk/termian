@@ -622,7 +622,8 @@ impl Shell {
                                         .justify_center()
                                         .rounded_sm()
                                         .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                                        .child(gpui::svg().path(super::assets::icon("side_panel")).size(px(11.)).text_color(rgb(theme::TEXT)))
+                                        .child(gpui::svg().path(super::assets::icon("expand")).size(px(10.)).text_color(rgb(theme::TEXT)))
+                                        .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Focus mode".into())).into())
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             cx.stop_propagation();
                                             shell.set_view_mode(tab, ViewMode::Focus, Some(id), cx);
@@ -736,8 +737,8 @@ impl Shell {
                 div()
                     .flex()
                     .gap(px(10.))
-                    .child(control("focus-split-view", "workspace", false).on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Split, None, cx))))
-                    .child(control("focus-broadcast", "broadcast", workspace.broadcast).on_click(cx.listener(move |shell, _, _, cx| {
+                    .child(control("focus-split-view", "collapse", false).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Split view".into())).into()).on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Split, None, cx))))
+                    .child(control("focus-broadcast", "broadcast", workspace.broadcast).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Broadcast input".into())).into()).on_click(cx.listener(move |shell, _, _, cx| {
                         shell.tabs.activate(tab);
                         shell.toggle_broadcast(cx);
                     }))),
