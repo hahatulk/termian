@@ -155,6 +155,20 @@ fn import_legacy_shell_history(vault: &mut Vault) {
     }
 }
 
+/// Workspace templates from the legacy profile, once; a locked keychain is tried again at the next start.
+fn import_legacy_templates(vault: &mut Vault) {
+    let Some(dir) = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB").map(std::path::PathBuf::from).or_else(profile::default_indexeddb_dir) else {
+        vault.legacy_templates_imported = true;
+        return;
+    };
+    match profile::read_local_key().and_then(|key| FieldCipher::from_local_key(&key)).and_then(|cipher| profile::load_workspace_templates(&dir, &cipher)) {
+        Ok(templates) => {
+            termian_native::workspace_template::import_legacy(vault, templates);
+        }
+        Err(error) => eprintln!("[Termian] Legacy workspace templates were not imported: {error}"),
+    }
+}
+
 /// The native vault (ADR 0002), imported from the legacy profile on first run.
 /// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
 fn open_vault() -> (Vault, Option<Store>, Option<String>) {
@@ -191,6 +205,12 @@ impl Shell {
                 Ok(legacy) => vault.import_legacy_secrets(&legacy),
                 Err(error) => eprintln!("[Termian] Legacy passwords and keys were not imported: {error}"),
             }
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
+        if !demo && store.is_some() && !vault.legacy_templates_imported {
+            import_legacy_templates(&mut vault);
             if let Some(store) = &store {
                 let _ = store.save(&vault);
             }

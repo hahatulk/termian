@@ -211,6 +211,45 @@ pub fn load_shell_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<
         .collect())
 }
 
+/// Workspace templates (`workspace_templates`) in the snapshot form:
+/// `label` and the `workspaceTerminals` JSON are encrypted. Deleted
+/// records and ones whose terminals cannot be read are skipped.
+pub fn load_workspace_templates(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<serde_json::Value>, String> {
+    let stores = read_stores(indexeddb_dir)?;
+    let Some(records) = stores.get("workspace_templates") else { return Ok(Vec::new()) };
+    Ok(records
+        .iter()
+        .filter(|(_, v)| !v.get("status").and_then(Value::as_str).is_some_and(|s| s.to_uppercase().contains("DELETED")))
+        .filter_map(|(id, v)| {
+            let terminals: serde_json::Value = serde_json::from_str(&cipher.decrypt(v.get("workspaceTerminals")?.as_str()?).ok()?).ok()?;
+            let terminals = terminals.as_array().filter(|t| !t.is_empty())?.clone();
+            let mut template = serde_json::json!({
+                "local_id": id,
+                "label": v.get("label").and_then(Value::as_str).map(|l| decrypt_or_plain(cipher, l)).unwrap_or_default(),
+                "workspaceTerminals": terminals,
+            });
+            if let Some(mode) = v.get("viewMode").and_then(Value::as_str) {
+                template["viewMode"] = mode.into();
+            }
+            if let Some(layout) = v.get("workspaceLayout").map(to_json).filter(serde_json::Value::is_object) {
+                template["workspaceLayout"] = layout;
+            }
+            Some(template)
+        })
+        .collect())
+}
+
+fn to_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Undefined | Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => (*b).into(),
+        Value::Number(n) => serde_json::Number::from_f64(*n).map_or(serde_json::Value::Null, serde_json::Value::Number),
+        Value::String(s) => s.clone().into(),
+        Value::Array(items) => items.iter().map(to_json).collect(),
+        Value::Object(map) => map.iter().map(|(k, v)| (k.clone(), to_json(v))).collect::<serde_json::Map<_, _>>().into(),
+    }
+}
+
 pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<HistoryEntry>, String> {
     let stores = read_stores(indexeddb_dir)?;
     let Some(records) = stores.get("activities") else { return Ok(Vec::new()) };
@@ -584,6 +623,24 @@ mod tests {
 
         assert_eq!(fs::read(&file).unwrap(), before);
         assert_eq!(listing(&file.parent().unwrap()), files_before);
+    }
+
+    #[test]
+    fn loads_workspace_templates_in_the_snapshot_form() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = r#"[{"id":"t1","host":{"local_id":220,"id":null},"protocol":"ssh","startupSnippet":{"startupDirectory":"/srv"}},{"id":"t2","protocol":"local"}]"#;
+        write_store(dir.path(), "workspace_templates", vec![
+            (3., record(&[("label", F::Secret("prod")), ("viewMode", F::Text("splitView")), ("workspaceTerminals", F::Secret(terminals)), ("status", F::Text("TO_BE_UPDATED"))])),
+            (4., record(&[("label", F::Secret("gone")), ("workspaceTerminals", F::Secret("[]")), ("status", F::Text("TO_BE_DELETED"))])),
+            (5., record(&[("label", F::Secret("unreadable")), ("workspaceTerminals", F::Text("not encrypted"))])),
+        ]);
+        let templates = load_workspace_templates(dir.path(), &cipher()).unwrap();
+        assert_eq!(templates.len(), 1, "deleted and unreadable templates are skipped");
+        let t = &templates[0];
+        assert_eq!((t["local_id"].as_u64(), t["label"].as_str(), t["viewMode"].as_str()), (Some(3), Some("prod"), Some("splitView")));
+        assert_eq!(t["workspaceTerminals"][0]["host"]["local_id"], 220);
+        assert_eq!(t["workspaceTerminals"][0]["startupSnippet"]["startupDirectory"], "/srv");
+        assert!(t.get("status").is_none(), "storage fields are not part of the snapshot");
     }
 
     #[test]

@@ -289,6 +289,28 @@ pub fn remove(vault: &mut Vault, id: u64) {
     list_mut(vault).retain(|v| id_of(v) != Some(id));
 }
 
+/// Templates read from the legacy profile, once. A template whose id is
+/// already used here is skipped (it came by sync); terminals of hosts that
+/// are gone are left out, and a template left without any is skipped.
+pub fn import_legacy(vault: &mut Vault, legacy: Vec<Value>) -> usize {
+    vault.legacy_templates_imported = true;
+    let mut added = 0;
+    for mut value in legacy {
+        let Some(id) = id_of(&value) else { continue };
+        if list(vault).iter().any(|v| id_of(v) == Some(id)) {
+            continue;
+        }
+        let Ok(mut template) = serde_json::from_value::<WorkspaceTemplate>(value.take()) else { continue };
+        template.workspace_terminals.retain(|t| t.target(vault).is_some());
+        if template.workspace_terminals.is_empty() {
+            continue;
+        }
+        save(vault, &template);
+        added += 1;
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,6 +397,22 @@ mod tests {
         assert_eq!(run(serde_json::json!({ "script": "uptime", "startupDirectory": "" })).as_deref(), Some("uptime"));
         assert_eq!(run(serde_json::json!({})), None);
         assert_eq!(TemplateTerminal::new(Target::Local).startup(), None);
+    }
+
+    #[test]
+    fn legacy_templates_are_imported_once_without_missing_hosts() {
+        let mut v = vault();
+        v.foreign = serde_json::json!({ "workspaceTemplates": [{ "local_id": 1, "label": "synced", "workspaceTerminals": [{ "id": "a", "protocol": "local" }] }] });
+        let legacy = vec![
+            serde_json::json!({ "local_id": 1, "label": "same id", "workspaceTerminals": [{ "id": "b", "protocol": "local" }] }),
+            serde_json::json!({ "local_id": 2, "label": "prod", "workspaceTerminals": [{ "id": "c", "host": { "local_id": 1 } }, { "id": "d", "host": { "local_id": 99 } }] }),
+            serde_json::json!({ "local_id": 3, "label": "gone", "workspaceTerminals": [{ "id": "e", "host": { "local_id": 99 } }] }),
+        ];
+        assert_eq!(import_legacy(&mut v, legacy), 1);
+        assert!(v.legacy_templates_imported);
+        let list = templates(&v);
+        assert_eq!(list.iter().map(|t| t.label.as_str()).collect::<Vec<_>>(), ["synced", "prod"]);
+        assert_eq!(list[1].workspace_terminals.iter().map(|t| t.id.as_str()).collect::<Vec<_>>(), ["c"]);
     }
 
     #[test]

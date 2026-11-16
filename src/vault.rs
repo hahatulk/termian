@@ -335,6 +335,8 @@ pub struct Vault {
     pub shell_history: Vec<ShellCommand>,
     #[serde(default)]
     pub legacy_shell_history_imported: bool,
+    #[serde(default)]
+    pub legacy_templates_imported: bool,
     /// Settings → Shortcuts; device-local like legacy.
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,
