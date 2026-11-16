@@ -12,6 +12,7 @@ use termian_native::vault::HostId;
 use termian_native::split_tree::{Direction, Layout, Position, SplitTree};
 use termian_native::tabs::{TabId, TabKind};
 use termian_native::theme;
+use termian_native::workspace_template::{self as templates, OpenTerminal, Target, ViewMode, WorkspaceTemplate};
 
 use super::terminal_view::{TerminalEvent, TerminalView, TOP_INSET};
 use crate::Shell;
@@ -69,7 +70,12 @@ pub struct Pane {
     /// The Logs row of this pane's session.
     pub history: Option<u64>,
     pub origin: Origin,
+    /// The template terminal this pane was opened from.
+    pub template_terminal: Option<String>,
 }
+
+/// Width of the Focus View terminal list.
+const FOCUS_LIST: f32 = 240.;
 
 /// Height of a split pane's title row.
 const PANE_HEADER: f32 = 24.;
@@ -84,6 +90,10 @@ pub struct Workspace {
     drag: Option<Drag>,
     /// A pane closed: the focused one takes the keyboard on the next frame.
     refocus: bool,
+    /// The workspace template the tab was opened from or saved as.
+    pub template: Option<u64>,
+    /// Legacy «Focus View» (a list of the terminals and one of them) or «Split View».
+    pub view_mode: ViewMode,
 }
 
 struct Drag {
@@ -130,8 +140,8 @@ impl Shell {
         let pane = self.new_pane_id();
         self.subscribe_pane(pane, &view, cx);
         let mut panes = BTreeMap::new();
-        panes.insert(pane, Pane { title, view, history, origin });
-        self.workspaces.insert(tab, Workspace { tree: SplitTree::single(pane), panes, focused: pane, broadcast: false, drag: None, refocus: false });
+        panes.insert(pane, Pane { title, view, history, origin, template_terminal: None });
+        self.workspaces.insert(tab, Workspace { tree: SplitTree::single(pane), panes, focused: pane, broadcast: false, drag: None, refocus: false, template: None, view_mode: ViewMode::Split });
         cx.notify();
     }
 
@@ -142,7 +152,7 @@ impl Shell {
         self.subscribe_pane(pane, &view, cx);
         if let Some(workspace) = self.workspaces.get_mut(&tab) {
             workspace.tree.split(target, pane, layout, Position::End);
-            workspace.panes.insert(pane, Pane { title, view, history, origin });
+            workspace.panes.insert(pane, Pane { title, view, history, origin, template_terminal: None });
             workspace.focused = pane;
         }
         cx.notify();
@@ -367,6 +377,140 @@ impl Shell {
     }
 
     /// The panes of the active tab, each in its share of the area.
+    /// Legacy «open workspace template»: its terminals in one tab, with its
+    /// layout, titles and view mode. Hosts that are gone are skipped.
+    pub fn open_template(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(template) = templates::templates(&self.vault).into_iter().find(|t| t.id == id) else { return };
+        let mut tab = None;
+        let mut opened: Vec<(String, u64)> = Vec::new();
+        for terminal in &template.workspace_terminals {
+            let Some(target) = terminal.target(&self.vault) else { continue };
+            self.split_into = tab.and_then(|tab| Some((tab, self.workspaces.get(&tab)?.focused)));
+            let before = self.next_pane;
+            match target {
+                Target::Host(host) => self.connect_host(host, window, cx),
+                Target::Local => self.open_local_terminal(window, cx),
+            }
+            self.split_into = None;
+            if self.next_pane == before {
+                continue;
+            }
+            let pane = self.next_pane;
+            let Some(at) = self.tab_of(pane) else { continue };
+            tab = Some(at);
+            if let Some(p) = self.workspaces.get_mut(&at).and_then(|w| w.panes.get_mut(&pane)) {
+                p.template_terminal = Some(terminal.id.clone());
+                if let Some(label) = terminal.label.as_ref().filter(|l| !l.is_empty()) {
+                    p.title = label.clone();
+                }
+            }
+            opened.push((terminal.id.clone(), pane));
+        }
+        let Some(tab) = tab else { return };
+        if let Some(workspace) = self.workspaces.get_mut(&tab) {
+            if let Some(tree) = template.tree(&opened) {
+                workspace.tree = tree;
+            }
+            workspace.focused = workspace.tree.leaves()[0];
+            workspace.refocus = true;
+            workspace.template = Some(template.id);
+            workspace.view_mode = template.view_mode;
+        }
+        self.tabs.set_title(tab, &template.label);
+        self.tabs.activate(tab);
+        cx.notify();
+    }
+
+    /// Open workspaces: tabs with several panes or opened from a template.
+    pub(crate) fn workspace_tabs(&self) -> Vec<(TabId, String)> {
+        self.tabs
+            .all()
+            .iter()
+            .filter(|t| self.workspaces.get(&t.id).is_some_and(|w| w.panes.len() > 1 || w.template.is_some()))
+            .map(|t| (t.id, t.title().to_owned()))
+            .collect()
+    }
+
+    /// Legacy «Add to Workspace»: the host opens beside the focused pane.
+    pub(crate) fn add_to_workspace(&mut self, tab: TabId, host: HostId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(focused) = self.workspaces.get(&tab).map(|w| w.focused) else { return };
+        self.split_into = Some((tab, focused));
+        self.connect_host(host, window, cx);
+        self.split_into = None;
+        cx.notify();
+    }
+
+    /// The tab as a template: its saved hosts and local terminals, in order.
+    fn tab_as_template(&self, tab: TabId, id: u64, previous: Option<&WorkspaceTemplate>) -> Option<WorkspaceTemplate> {
+        let workspace = self.workspaces.get(&tab)?;
+        let panes: Vec<OpenTerminal> = workspace
+            .tree
+            .leaves()
+            .into_iter()
+            .filter_map(|leaf| {
+                let pane = workspace.panes.get(&leaf)?;
+                let target = match pane.origin {
+                    Origin::Host(host) => Target::Host(host),
+                    Origin::Local => Target::Local,
+                    _ => return None,
+                };
+                Some(OpenTerminal { pane: leaf, target, from: pane.template_terminal.clone() })
+            })
+            .collect();
+        // A tab saved for the first time gets the legacy default name.
+        let label = match previous {
+            Some(_) => self.tabs.all().iter().find(|t| t.id == tab).map(|t| t.title().to_owned()).unwrap_or_default(),
+            None => templates::DEFAULT_NAME.to_owned(),
+        };
+        WorkspaceTemplate::from_tab(id, &label, workspace.view_mode, &panes, &workspace.tree, previous)
+    }
+
+    /// Legacy workspace changes: `Some(true)` for a workspace not saved yet
+    /// («Save template»), `Some(false)` when it differs from its template
+    /// («Update template»), `None` with nothing to save.
+    pub(crate) fn template_changes(&self, tab: TabId) -> Option<bool> {
+        let workspace = self.workspaces.get(&tab)?;
+        let saved = workspace.template.and_then(|id| templates::templates(&self.vault).into_iter().find(|t| t.id == id));
+        match saved {
+            Some(saved) => self.tab_as_template(tab, saved.id, Some(&saved)).filter(|now| now.differs(&saved)).map(|_| false),
+            None => (workspace.panes.len() > 1 && self.tab_as_template(tab, 0, None).is_some()).then_some(true),
+        }
+    }
+
+    /// «Save template» / «Update template».
+    pub(crate) fn save_tab_template(&mut self, tab: TabId, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspaces.get(&tab) else { return };
+        let saved = workspace.template.and_then(|id| templates::templates(&self.vault).into_iter().find(|t| t.id == id));
+        let id = saved.as_ref().map_or_else(|| templates::next_id(&self.vault), |t| t.id);
+        let Some(template) = self.tab_as_template(tab, id, saved.as_ref()) else { return };
+        templates::save(&mut self.vault, &template);
+        // Panes keep the ids they were saved with, so a later update keeps titles and snippets.
+        let terminal_ids: Vec<String> = template.workspace_terminals.iter().map(|t| t.id.clone()).collect();
+        if let Some(workspace) = self.workspaces.get_mut(&tab) {
+            let supported: Vec<u64> = workspace.tree.leaves().into_iter().filter(|leaf| workspace.panes.get(leaf).is_some_and(|p| matches!(p.origin, Origin::Host(_) | Origin::Local))).collect();
+            for (leaf, terminal) in supported.into_iter().zip(terminal_ids) {
+                if let Some(pane) = workspace.panes.get_mut(&leaf) {
+                    pane.template_terminal = Some(terminal);
+                }
+            }
+            workspace.template = Some(id);
+        }
+        self.tabs.set_title(tab, &template.label);
+        self.save_vault();
+        cx.notify();
+    }
+
+    pub(crate) fn set_view_mode(&mut self, tab: TabId, mode: ViewMode, focus: Option<u64>, cx: &mut Context<Self>) {
+        if let Some(workspace) = self.workspaces.get_mut(&tab) {
+            workspace.view_mode = mode;
+            if let Some(pane) = focus.filter(|p| workspace.panes.contains_key(p)) {
+                workspace.focused = pane;
+            }
+            workspace.refocus = true;
+        }
+        cx.notify();
+    }
+
     pub(crate) fn render_workspace(&mut self, tab: TabId, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         if let Some(workspace) = self.workspaces.get_mut(&tab) {
             if std::mem::take(&mut workspace.refocus) {
@@ -384,10 +528,18 @@ impl Shell {
         let Some(workspace) = self.workspaces.get(&tab) else { return div().into_any_element() };
         let viewport = window.viewport_size();
         let panel = if self.side_panel.is_some() { super::side_panel::WIDTH } else { 0. };
-        let (width, height) = (f32::from(viewport.width) - panel, f32::from(viewport.height) - TOP_INSET);
         let split = workspace.panes.len() > 1;
+        // Focus View: the terminal list, then the focused terminal alone.
+        let focus = split && workspace.view_mode == ViewMode::Focus;
+        let list = if focus { FOCUS_LIST } else { 0. };
+        let (width, height) = (f32::from(viewport.width) - panel - list, f32::from(viewport.height) - TOP_INSET);
+        let rects = if focus {
+            vec![(workspace.focused, true, termian_native::split_tree::Rect { left: 0., top: 0., right: 1., bottom: 1. })]
+        } else {
+            workspace.tree.rects()
+        };
         let mut area = div().size_full().relative();
-        for (id, leaf, rect) in workspace.tree.rects() {
+        for (id, leaf, rect) in rects {
             if !leaf {
                 continue;
             }
@@ -395,7 +547,8 @@ impl Shell {
             let (left, top) = (rect.left * width, rect.top * height);
             let (w, h) = ((rect.right - rect.left) * width, (rect.bottom - rect.top) * height);
             // A split pane has a header with its title and a close cross.
-            let header = if split { PANE_HEADER } else { 0. };
+            let framed = split && !focus;
+            let header = if framed { PANE_HEADER } else { 0. };
             let host = match pane.origin {
                 Origin::Host(host) => Some(host),
                 _ => None,
@@ -403,10 +556,10 @@ impl Shell {
             let candidates = self.candidates.entry(host).or_insert_with(|| std::sync::Arc::new(Candidates::for_host(&self.vault, host))).clone();
             let enabled = self.vault.terminal.autocomplete && !split;
             pane.view.update(cx, |view, _| {
-                view.set_area(left, TOP_INSET + top + header, w, h - header);
+                view.set_area(list + left, TOP_INSET + top + header, w, h - header);
                 view.set_autocomplete(enabled, candidates);
             });
-            let focused = split && id == workspace.focused;
+            let focused = framed && id == workspace.focused;
             let border = if workspace.broadcast { theme::ERROR } else { theme::ACCENT };
             area = area.child(
                 div()
@@ -415,7 +568,7 @@ impl Shell {
                     .top(px(top))
                     .w(px(w))
                     .h(px(h))
-                    .when(split, |d| d.border_1().border_color(rgb(if focused || workspace.broadcast { border } else { theme::TITLE_BAR })))
+                    .when(framed, |d| d.border_1().border_color(rgb(if focused || workspace.broadcast { border } else { theme::TITLE_BAR })))
                     .flex()
                     .flex_col()
                     .drag_over::<TabDrag>(|style, _, _, _| style.border_2().border_color(rgb(theme::ACCENT)))
@@ -442,7 +595,7 @@ impl Shell {
                         }
                         cx.notify();
                     }))
-                    .when(split, |d| {
+                    .when(framed, |d| {
                         d.child(
                             div()
                                 .h(px(PANE_HEADER))
@@ -455,6 +608,21 @@ impl Shell {
                                 .text_xs()
                                 .text_color(rgb(if focused { theme::TEXT } else { theme::TEXT_MUTED }))
                                 .child(div().flex_1().truncate().child(pane.title.clone()))
+                                .child(
+                                    div()
+                                        .id(gpui::SharedString::from(format!("pane-focus-{id}")))
+                                        .size(px(18.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .rounded_sm()
+                                        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                                        .child(gpui::svg().path(super::assets::icon("side_panel")).size(px(11.)).text_color(rgb(theme::TEXT)))
+                                        .on_click(cx.listener(move |shell, _, _, cx| {
+                                            cx.stop_propagation();
+                                            shell.set_view_mode(tab, ViewMode::Focus, Some(id), cx);
+                                        })),
+                                )
                                 .child(
                                     div()
                                         .id(gpui::SharedString::from(format!("pane-close-{id}")))
@@ -476,7 +644,7 @@ impl Shell {
             );
         }
         // Dividers between the children of every split, draggable.
-        for (split_id, layout, rect, sizes) in workspace.tree.splits() {
+        for (split_id, layout, rect, sizes) in if focus { Vec::new() } else { workspace.tree.splits() } {
             let vertical = layout == Layout::Vertical;
             let (x, y) = (rect.left * width, rect.top * height);
             let (w, h) = ((rect.right - rect.left) * width, (rect.bottom - rect.top) * height);
@@ -499,7 +667,7 @@ impl Shell {
                 area = area.child(handle);
             }
         }
-        area.on_mouse_move(cx.listener(move |shell, event: &gpui::MouseMoveEvent, _, cx| {
+        let area = area.on_mouse_move(cx.listener(move |shell, event: &gpui::MouseMoveEvent, _, cx| {
             shell.pointer = event.position;
             let Some(workspace) = shell.workspaces.get_mut(&tab) else { return };
             let Some(drag) = &workspace.drag else { return };
@@ -517,8 +685,116 @@ impl Shell {
             if let Some(workspace) = shell.workspaces.get_mut(&tab) {
                 workspace.drag = None;
             }
-        }))
-        .into_any_element()
+        }));
+        if !focus {
+            return area.into_any_element();
+        }
+        div().size_full().flex().child(self.render_focus_list(tab, cx)).child(div().flex_1().min_w_0().h_full().child(area)).into_any_element()
+    }
+
+    /// Legacy Focus View list: «Terminals • N», the Split view and Broadcast
+    /// input buttons, a row per terminal (click shows it, × closes it).
+    fn render_focus_list(&self, tab: TabId, cx: &mut Context<Self>) -> AnyElement {
+        let Some(workspace) = self.workspaces.get(&tab) else { return div().into_any_element() };
+        let control = |id: &'static str, icon: &'static str, active: bool| {
+            div()
+                .id(id)
+                .size(px(30.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(10.))
+                .text_color(rgb(if active { theme::TEXT } else { theme::TEXT_MUTED }))
+                .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)).text_color(rgb(theme::TEXT)))
+                .child(gpui::svg().path(super::assets::icon(icon)).size(px(14.)).text_color(rgb(if active { theme::TEXT } else { theme::TEXT_MUTED })))
+        };
+        let header = div()
+            .pt(px(5.))
+            .pl(px(5.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(10.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_sm()
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child("Terminals")
+                    .child(div().text_xs().opacity(0.5).child("•"))
+                    .child(div().opacity(0.5).child(workspace.panes.len().to_string())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(10.))
+                    .child(control("focus-split-view", "workspace", false).on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Split, None, cx))))
+                    .child(control("focus-broadcast", "broadcast", workspace.broadcast).on_click(cx.listener(move |shell, _, _, cx| {
+                        shell.tabs.activate(tab);
+                        shell.toggle_broadcast(cx);
+                    }))),
+            );
+        let rows = workspace.tree.leaves().into_iter().filter_map(|id| {
+            let pane = workspace.panes.get(&id)?;
+            let selected = id == workspace.focused;
+            Some(
+                div()
+                    .id(gpui::SharedString::from(format!("focus-row-{id}")))
+                    .group("focus-row")
+                    .w_full()
+                    .p(px(5.))
+                    .pl(px(10.))
+                    .h(px(36.))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded(px(8.))
+                    .bg(rgb(if selected { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
+                    .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .text_sm()
+                    .text_color(rgb(if selected { theme::TEXT } else { theme::TEXT_MUTED }))
+                    .child(div().flex_1().min_w_0().truncate().child(pane.title.clone()))
+                    .child(
+                        div()
+                            .id(gpui::SharedString::from(format!("focus-close-{id}")))
+                            .invisible()
+                            .group_hover("focus-row", |s| s.visible())
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_sm()
+                            .hover(|s| s.bg(rgb(theme::TITLE_BAR)))
+                            .child(gpui::svg().path(super::assets::icon("close")).size(px(9.)).text_color(rgb(theme::TEXT)))
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                cx.stop_propagation();
+                                shell.close_pane(tab, id, cx);
+                            })),
+                    )
+                    .on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Focus, Some(id), cx))),
+            )
+        });
+        div()
+            .w(px(FOCUS_LIST))
+            .h_full()
+            .flex_none()
+            .p(px(5.))
+            .child(
+                div()
+                    .size_full()
+                    .p(px(10.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(15.))
+                    .rounded(px(10.))
+                    .bg(rgb(theme::TITLE_BAR))
+                    .child(header)
+                    .child(div().id("focus-rows").flex_1().overflow_y_scroll().flex().flex_col().gap(px(5.)).children(rows)),
+            )
+            .into_any_element()
     }
 
     /// Legacy terminal tab menu: Duplicate, «Split horizontally», Close.

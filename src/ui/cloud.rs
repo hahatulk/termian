@@ -243,7 +243,7 @@ pub struct CloudState {
 }
 
 /// Dark hover text for the header buttons.
-struct Tooltip(String);
+pub(crate) struct Tooltip(pub String);
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

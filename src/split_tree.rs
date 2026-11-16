@@ -65,6 +65,18 @@ impl SplitTree {
         Self { root: Node::leaf(id, 1.), next_split: SPLIT_IDS }
     }
 
+    /// A tree built elsewhere; split ids must be at least `SPLIT_IDS`.
+    pub fn from_root(root: Node) -> Self {
+        fn max_split(node: &Node) -> u64 {
+            node.children.iter().map(max_split).max().unwrap_or(0).max(if node.children.is_empty() { 0 } else { node.id })
+        }
+        let next_split = max_split(&root).max(SPLIT_IDS);
+        Self { root, next_split }
+    }
+
+    /// The first id free for a split node.
+    pub const SPLIT_IDS: u64 = SPLIT_IDS;
+
     fn split_id(&mut self) -> u64 {
         self.next_split += 1;
         self.next_split

@@ -678,7 +678,7 @@ impl Shell {
             };
             let mut list = div().id("editor-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No key".into(), true, cx));
             for key in &self.vault.keys {
-                // Keys read from the legacy profile carry no private key and cannot be used yet.
+                // A key whose private part could not be read from the legacy profile cannot be used.
                 let usable = key.private_key.is_some();
                 let note = if usable { String::new() } else { " — not available in this client".into() };
                 list = list.child(choice(Some(key.id), format!("{} ({}){note}", key.label, key.kind), usable, cx));
@@ -710,7 +710,8 @@ impl Shell {
         }
         let viewport = window.viewport_size();
         let left = menu.position.x.min(viewport.width - px(MENU_WIDTH + 8.));
-        let top = menu.position.y.min(viewport.height - px(5. * 32. + 16.));
+        let rows = 5 + self.workspace_tabs().len();
+        let top = menu.position.y.min(viewport.height - px(rows as f32 * 32. + 16.));
         let items = menu_panel("host-menu")
             .child(menu_row("host-menu-quick".into(), "Quick Connect", false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.host_menu = None;
@@ -720,6 +721,13 @@ impl Shell {
                 shell.host_menu = None;
                 shell.open_sftp_for(id, window, cx);
             })))
+            // Legacy «Add to Workspace»: one row per open workspace tab.
+            .children(self.workspace_tabs().into_iter().map(|(tab, title)| {
+                menu_row(format!("host-menu-workspace-{tab:?}").into(), &format!("Add to Workspace: {title}"), false, false).on_click(cx.listener(move |shell, _, window, cx| {
+                    shell.host_menu = None;
+                    shell.add_to_workspace(tab, id, window, cx);
+                }))
+            }))
             .child(menu_row("host-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.edit_host(id, window, cx);
             })))

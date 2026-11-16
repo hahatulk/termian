@@ -33,3 +33,4 @@ pub mod theme;
 pub mod transfer;
 pub mod updater;
 pub mod vault;
+pub mod workspace_template;

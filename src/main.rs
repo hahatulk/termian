@@ -307,6 +307,26 @@ impl Shell {
             .child(div().flex_1().truncate().child(SharedString::from(tab.title().to_owned())))
             // Legacy «Broadcast indicator» on a broadcasting tab.
             .when(self.is_broadcasting(id), |d| d.child(div().size(px(8.)).rounded_full().bg(rgb(theme::ERROR))))
+            // Legacy workspace save dot on the selected tab: «Save template» / «Update template».
+            .when_some(active.then(|| self.template_changes(id)).flatten(), |d, new| {
+                let title: SharedString = if new { "Save template" } else { "Update template" }.into();
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("save-template-{id:?}")))
+                        .group("save-template")
+                        .size(px(20.))
+                        .flex_none()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().size(px(8.)).rounded_full().bg(rgb(theme::TEXT_MUTED)).group_hover("save-template", |s| s.bg(rgb(theme::TEXT))))
+                        .tooltip(move |_, cx| cx.new(|_| ui::cloud::Tooltip(title.to_string())).into())
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            cx.stop_propagation();
+                            shell.save_tab_template(id, cx);
+                        })),
+                )
+            })
     }
 }
 
