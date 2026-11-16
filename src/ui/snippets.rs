@@ -13,7 +13,7 @@ use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{caret, field_box, menu_panel, menu_row};
 use super::hosts::{card, host_tile, section_title, tile, tool_button};
-use super::sections::{empty_state, grid, page};
+use super::sections::{empty_state, page};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
@@ -201,7 +201,7 @@ fn host_row(id: String, tile: Div, title: String, subtitle: String) -> Stateful<
 impl Shell {
     // ── Screen ──────────────────────────────────────────────────────────
 
-    pub fn render_snippets(&self, cx: &mut Context<Self>) -> Div {
+    pub fn render_snippets(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let vault = &self.vault;
         let open = self.snippet_package.and_then(|p| vault.package(p));
         let snippets = vault.snippets_in(open.map(|p| p.id), false);
@@ -220,10 +220,11 @@ impl Shell {
                 div().pt_5().flex().items_center().gap_2().text_sm().child(crumb).child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(div().text_color(rgb(theme::TEXT)).child(package.label.clone())),
             );
         } else if !vault.packages.is_empty() {
-            body = body.child(section_title("Packages")).child(grid().children(vault.packages.iter().map(|p| self.render_package_card(p, cx))));
+            body = body.child(section_title("Packages")).child(self.cards("snippets").children(self.listed("snippets", &vault.packages, |p| p.label.as_str(), |p| p.id).into_iter().map(|p| self.render_package_card(p, cx))));
         }
         if !snippets.is_empty() {
-            body = body.child(section_title("Snippets")).child(grid().children(snippets.into_iter().map(|s| self.render_snippet_card(s, cx))));
+            let snippets = self.listed("snippets", snippets, |s| if s.label.is_empty() { s.script.as_str() } else { s.label.as_str() }, |s| s.id);
+            body = body.child(section_title("Snippets")).child(self.cards("snippets").children(snippets.into_iter().map(|s| self.render_snippet_card(s, cx))));
         } else if open.is_some() {
             body = body.child(empty_state("snippets_package", "This package is empty", "Snippets you add to it appear here."));
         } else if vault.packages.is_empty() {
@@ -239,7 +240,7 @@ impl Shell {
             .items_center()
             .rounded_r_md()
             .bg(rgb(theme::INPUT))
-            .child(svg().path(icon("chevron")).size(px(8.)).text_color(rgb(theme::TEXT)))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)))
             .on_click(cx.listener(|shell, event: &ClickEvent, _, cx| {
                 let at = event.position();
                 shell.snippet_menu = Some(SnippetMenu { item: MenuItem::New, position: Point { x: at.x - px(20.), y: at.y + px(14.) }, confirm_remove: false });
@@ -252,7 +253,7 @@ impl Shell {
             window.focus(&shell.editor_focus);
             cx.notify();
         }));
-        page("snippets-scroll", vec![split, history], body)
+        page("snippets-scroll", vec![split, history], self.listing_controls("snippets", true, false, window, cx), body)
     }
 
     fn edit_pencil(id: String, hover: SharedString) -> Stateful<Div> {
@@ -799,7 +800,7 @@ impl Shell {
                     }));
                     let row = host_row(format!("targets-group-{id}"), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {}", if count == 1 { "Host" } else { "Hosts" }))
                         .hover(|s| s.bg(rgb(theme::SURFACE)))
-                        .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
+                        .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
                         .on_click(cx.listener(move |shell, _, _, cx| {
                             if let Some(editor) = &mut shell.snippet_editor {
                                 editor.picker_group = Some(id);

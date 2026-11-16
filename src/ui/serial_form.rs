@@ -162,7 +162,7 @@ impl TerminalView {
                     .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
                     .text_color(rgb(theme::TEXT))
                     .child(div().flex_1().flex().items_center().child(value.to_owned()).when(focused, |d| d.child(caret())))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
             )
             .on_click(cx.listener(move |view, _, window, cx| {
                 if let Some(form) = view.serial_form.as_mut() {
@@ -264,7 +264,7 @@ impl TerminalView {
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(theme::TEXT))
                     .child(div().flex_1().child("Advanced"))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(!form.advanced, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2))))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(!form.advanced, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2))))),
             )
             .on_click(cx.listener(|view, _, _, cx| {
                 if let Some(form) = view.serial_form.as_mut() {

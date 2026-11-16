@@ -492,7 +492,7 @@ fn username_question<V: 'static>(
                     .rounded_l_none()
                     .border_l_1()
                     .border_color(rgb(0x3d8c50))
-                    .child(svg().path(icon("chevron")).size(px(12.)).text_color(rgb(0xffffff)))
+                    .child(svg().path(icon("caret_down")).size(px(12.)).text_color(rgb(0xffffff)))
                     .when(!empty, |d| d.on_click(cx.listener(move |view, _, _, cx| ui(view, LoginUi::ToggleContinueMenu, cx)))),
             )
             .when(state.continue_menu && !empty, |d| {

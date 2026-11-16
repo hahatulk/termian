@@ -8,6 +8,7 @@ pub mod forwarding;
 pub mod keys;
 pub mod known_hosts;
 pub mod legacy;
+pub mod listing;
 pub mod log_backup;
 pub mod log_comment;
 pub mod login;

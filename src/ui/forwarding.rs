@@ -18,7 +18,7 @@ use super::dialog::{self, Key, Kind};
 use super::host_editor::{caret, card, field_box, menu_panel, menu_row};
 use super::hosts::{card as entity_card, tile, tool_button};
 use super::login_view::{self, LoginActions, LoginTarget};
-use super::sections::{empty_state, grid, page};
+use super::sections::{empty_state, page};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
@@ -68,7 +68,12 @@ fn kind_name(kind: RuleKind) -> &'static str {
 
 impl Shell {
     pub fn new_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rule = ForwardingRule::new(self.vault.next_id(), RuleKind::Local);
+        self.new_rule_of(RuleKind::Local, window, cx);
+    }
+
+    /// The New Forwarding menu: a rule of the chosen kind.
+    pub fn new_rule_of(&mut self, kind: RuleKind, window: &mut Window, cx: &mut Context<Self>) {
+        let rule = ForwardingRule::new(self.vault.next_id(), kind);
         self.rules.editor = Some(RuleEditor { rule, created_here: true, field: Field::Label, hosts_open: false, confirm_remove: false });
         window.focus(&self.editor_focus);
         cx.notify();
@@ -279,7 +284,7 @@ impl Shell {
             .id("rule-host")
             .border_dashed()
             .child(div().flex_1().text_color(rgb(if chosen.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(chosen.unwrap_or_else(|| "Hosts".into())))
-            .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.rules.editor {
                     editor.hosts_open = !editor.hosts_open;
@@ -482,19 +487,32 @@ impl Shell {
             }))
     }
 
-    pub fn render_port_forwarding(&self, cx: &mut Context<Self>) -> Div {
-        let toolbar = vec![tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING").on_click(cx.listener(|shell, _, window, cx| shell.new_rule(window, cx)))];
+    pub fn render_port_forwarding(&self, window: &Window, cx: &mut Context<Self>) -> Div {
+        // A split button, as legacy: the arrow chooses Local, Remote or Dynamic.
+        let split = div()
+            .id("new-forwarding-split")
+            .flex()
+            .items_center()
+            .gap(px(1.))
+            .child(tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_rule(window, cx))))
+            .child(super::hosts::split_arrow("new-forwarding-menu").on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
+                shell.list.menu = Some((super::listing::MenuKind::NewForwarding, event.position()));
+                cx.notify();
+            })));
+        let toolbar = vec![split];
+        let controls = self.listing_controls("portForwarding", true, false, window, cx);
         if self.vault.rules.is_empty() {
             return page(
                 "forwarding-scroll",
                 toolbar,
+                controls,
                 empty_state("port_forwarding", "Set up port forwarding", "Save port forwarding to access databases, web apps, and other services."),
             );
         }
         let body = div()
             .child(super::hosts::section_title("Port Forwarding"))
-            .child(grid().children(self.vault.rules.iter().map(|rule| self.render_rule_card(rule, cx))));
-        page("forwarding-scroll", toolbar, body)
+            .child(self.cards("portForwarding").children(self.listed("portForwarding", &self.vault.rules, |r| r.label.as_str(), |r| r.id).into_iter().map(|rule| self.render_rule_card(rule, cx))));
+        page("forwarding-scroll", toolbar, controls, body)
     }
 
     /// The slider, the rule menu and a rule's connection screen.

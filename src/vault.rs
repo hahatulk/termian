@@ -340,6 +340,9 @@ pub struct Vault {
     /// Saved marks and comments were read for history imported before they were.
     #[serde(default)]
     pub legacy_bookmarks_imported: bool,
+    /// Vaults toolbar view and sorting per section; device-local like legacy.
+    #[serde(default)]
+    pub listing: crate::listing::ListingSettings,
     /// Settings → Shortcuts; device-local like legacy.
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,

@@ -497,7 +497,7 @@ impl TerminalView {
                 .hover(|s| s.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
                 .child(
                     gpui::svg()
-                        .path(icon("chevron"))
+                        .path(icon("caret_down"))
                         .size(px(10.))
                         .text_color(rgb(termian_native::theme::TEXT))
                         .when(up, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),

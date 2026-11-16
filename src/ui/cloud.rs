@@ -854,7 +854,7 @@ impl Shell {
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(tone)).child(title))
                                 .child(div().flex_1())
                                 .child(div().text_size(px(11.)).text_color(rgb(theme::TEXT_MUTED)).child(group.direction))
-                                .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
+                                .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     if let Some(CloudDialog { body: Body::Run(run), .. }) = &mut shell.cloud.dialog {
                                         if !run.toggled.remove(&index) {

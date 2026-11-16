@@ -846,7 +846,7 @@ impl Shell {
             .text_color(rgb(if open { theme::ACCENT } else { theme::TEXT }))
             .hover(|s| s.text_color(rgb(theme::ACCENT)))
             .child("Actions")
-            .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
                 let at = event.position();
                 shell.open_menu(side, Point { x: at.x - px(MENU_WIDTH - 40.), y: at.y + px(14.) }, MenuKind::Actions, cx);
@@ -1235,7 +1235,7 @@ impl Shell {
                 div()
                     .id("edits-toggle")
                     .px_2()
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| {
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| {
                         s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))
                     }))
                     .on_click(cx.listener(|shell, _, _, cx| {

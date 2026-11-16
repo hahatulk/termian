@@ -403,7 +403,7 @@ impl Shell {
                 field_box(editor.groups_open)
                     .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                     .child(div().flex_1().text_color(rgb(if group_label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(group_label.clone().unwrap_or_else(|| "Parent Group".into())))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
             )
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.host_editor {
@@ -616,7 +616,7 @@ impl Shell {
                 field_box(editor.identities_open)
                     .child(svg().path(icon("identity")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                     .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Identity".into())))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
             )
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.host_editor {
@@ -655,7 +655,7 @@ impl Shell {
                 field_box(editor.keys_open)
                     .child(svg().path(icon("keychain")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                     .child(div().flex_1().text_color(rgb(if label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(label.unwrap_or_else(|| "Key".into())))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
             )
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.host_editor {

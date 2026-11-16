@@ -14,9 +14,9 @@ macro_rules! icons {
 
 icons!(
     "hosts", "keychain", "port_forwarding", "snippets", "known_hosts", "logs", "group", "debian", "ubuntu",
-    "linux", "terminal", "serial", "new_host", "search", "grid", "tag", "chevron", "sync", "download", "upload",
+    "linux", "terminal", "serial", "new_host", "search", "grid", "tag", "sync", "download", "upload",
     "close", "plus", "sftp", "identity", "file", "folder", "link", "arrow_left", "arrow_right", "local", "connect",
-    "check", "alert", "edit", "dots", "pf_local", "pf_remote", "pf_dynamic", "bookmark", "bookmark_filled", "snippets_package", "side_panel", "theme", "spinner_arc", "person", "cloud_sync", "cloud_upload", "cloud_download", "workspace", "broadcast", "expand", "collapse",
+    "check", "alert", "edit", "dots", "pf_local", "pf_remote", "pf_dynamic", "bookmark", "bookmark_filled", "snippets_package", "side_panel", "theme", "spinner_arc", "person", "cloud_sync", "cloud_upload", "cloud_download", "workspace", "broadcast", "expand", "collapse", "calendar", "list", "sorting", "vaults", "caret_down",
 );
 
 pub struct Assets;

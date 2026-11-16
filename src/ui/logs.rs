@@ -12,11 +12,11 @@ use termian_native::theme;
 
 use super::assets::icon;
 use super::hosts::{os_tile, tile};
-use super::sections::{empty_state, page};
+use super::sections::{bare_page, empty_state};
 use crate::Shell;
 
 const DATE: f32 = 140.;
-const USER: f32 = 180.;
+const USER: f32 = 300.;
 const HOST: f32 = 180.;
 
 /// Sorting and the one Saved cell being edited.
@@ -138,8 +138,10 @@ impl Shell {
         let saved = entry.saved;
         let bookmark = div()
             .id(SharedString::from(format!("log-saved-{id}")))
+            // A boxed bookmark, as the legacy Saved cell.
             .size(px(24.)).flex_none().flex().items_center().justify_center().rounded_md()
-            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+            .bg(rgb(theme::SURFACE_ACTIVE))
+            .hover(|s| s.bg(rgb(theme::INPUT)))
             .child(svg().path(icon(if saved || editing.is_some() { "bookmark_filled" } else { "bookmark" })).size(px(14.)).text_color(rgb(if saved || editing.is_some() { theme::ACCENT } else { theme::TEXT_MUTED })))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 cx.stop_propagation();
@@ -168,7 +170,9 @@ impl Shell {
             let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
             let text = StyledText::new(if entry.comment.is_empty() { "Add a comment".to_owned() } else { entry.comment.clone() })
                 .with_highlights(ranges.iter().cloned().map(|range| (range, HighlightStyle { color: Some(rgb(theme::ACCENT).into()), ..Default::default() })));
+            // Legacy shows «Add a comment» only while the row is hovered.
             return cell.child(div().flex_1().min_w_0().line_clamp(2).text_color(rgb(if entry.comment.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
+                .when(entry.comment.is_empty(), |d| d.invisible().group_hover(SharedString::from(format!("log-row-{id}")), |s| s.visible()))
                 .child(InteractiveText::new(SharedString::from(format!("log-comment-text-{id}")), text).on_click(ranges, move |index, _, cx| {
                     cx.stop_propagation();
                     if let Some((_, url)) = links.get(index) { cx.open_url(url); }
@@ -251,9 +255,10 @@ impl Shell {
             logs.reverse();
         }
         if logs.is_empty() {
-            return page("logs-scroll", vec![], empty_state("logs", "Session logs", "Sessions you open are recorded here, encrypted. They are kept for 60 days."));
+            return bare_page("logs-scroll", empty_state("logs", "Session logs", "Sessions you open are recorded here, encrypted. They are kept for 60 days."));
         }
-        let arrow = |up: bool| svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(up, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
+        // Legacy «sorting» bars: longest at the bottom for newest first, flipped for oldest.
+        let arrow = |up: bool| svg().path(icon("sorting")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED)).when(up, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
         let header = div()
             .h(px(40.))
             .flex()
@@ -304,11 +309,15 @@ impl Shell {
             let times = entry.disconnected_at.map(|end| times_label(entry.connected_at, end)).unwrap_or_default();
             div()
                 .id(SharedString::from(format!("log-{id}")))
+                .group(SharedString::from(format!("log-row-{id}")))
                 .min_h(px(60.))
                 .flex()
                 .items_start()
-                .rounded_md()
-                .hover(|s| s.bg(rgb(theme::SURFACE)))
+                // Legacy rows are cards separated by a background line.
+                .bg(rgb(theme::SURFACE))
+                .border_b_1()
+                .border_color(rgb(theme::BACKGROUND))
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
                 .child(
                     div()
                         .w(px(DATE))
@@ -327,7 +336,7 @@ impl Shell {
                         .py(px(10.))
                         .flex()
                         .gap(px(10.))
-                        .child(div().size(px(24.)).flex_none().rounded_full().bg(rgb(theme::SURFACE_ACTIVE)).flex().items_center().justify_center().child(svg().path(icon("identity")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))))
+                        .child(div().size(px(24.)).flex_none().rounded_full().bg(rgb(theme::SURFACE_ACTIVE)).flex().items_center().justify_center().child(svg().path(icon("person")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))))
                         .child(div().min_w_0().child(div().text_color(rgb(theme::TEXT_MUTED)).child("No account")).child(div().text_sm().truncate().text_color(rgb(theme::TEXT_MUTED)).child(device.clone()))),
                 )
                 .child(
@@ -345,7 +354,7 @@ impl Shell {
                 .child(self.render_log_saved_cell(entry, cx))
                 .on_click(cx.listener(move |shell, _, window, cx| shell.open_log(id, window, cx)))
         });
-        page("logs-scroll", vec![], div().pt_3().child(header).children(rows))
+        bare_page("logs-scroll", div().pt_3().child(header).children(rows))
     }
 }
 

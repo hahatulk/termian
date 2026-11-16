@@ -10,7 +10,7 @@ use termian_native::theme;
 use super::dialog::{self, Kind};
 use super::host_editor::{menu_panel, menu_row};
 use super::hosts::{card, section_title, tile, tool_button};
-use super::sections::{empty_state, grid, page};
+use super::sections::{empty_state, page};
 use crate::Shell;
 
 #[derive(Clone)]
@@ -28,14 +28,19 @@ pub struct KnownMenu {
 }
 
 impl Shell {
-    pub fn render_known_hosts(&self, cx: &mut Context<Self>) -> Div {
+    pub fn render_known_hosts(&self, window: &gpui::Window, cx: &mut Context<Self>) -> Div {
         let file = known_hosts::read(&known_hosts::default_path());
         let legacy = &self.vault.known_hosts;
         let body = if file.is_empty() && legacy.is_empty() {
             empty_state("known_hosts", "No known hosts", "Host keys you trust appear here after the first connection.")
         } else {
+            // File entries have no ids: their place in the file stands for one, after the legacy ones.
+            let base = legacy.iter().map(|e| e.id).max().unwrap_or(0) + 1;
+            let file: Vec<(u64, _)> = file.into_iter().enumerate().map(|(i, e)| (base + i as u64, e)).collect();
+            let file = self.listed("knownHosts", &file, |(_, e)| e.hostnames.as_str(), |(id, _)| *id);
+            let legacy = self.listed("knownHosts", legacy, |e| e.host.as_str(), |e| e.id);
             let mut cards = Vec::new();
-            for (i, entry) in file.into_iter().enumerate() {
+            for (i, entry) in file.into_iter().map(|(id, e)| (*id, e)) {
                 let item = Item::File(entry.clone());
                 let listener = cx.listener(move |shell, event: &MouseDownEvent, _, cx| {
                     shell.known_menu = Some(KnownMenu { item: item.clone(), position: event.position, confirm_remove: false });
@@ -51,10 +56,10 @@ impl Shell {
                 });
                 cards.push(card(format!("known-{}", entry.id).into(), tile("known_hosts", theme::TILE_BLUE), entry.host.clone(), String::new()).on_mouse_down(MouseButton::Right, listener));
             }
-            div().child(section_title("Known Hosts")).child(grid().children(cards))
+            div().child(section_title("Known Hosts")).child(self.cards("knownHosts").children(cards))
         };
         let import = tool_button("import-known", "download", "IMPORT").on_click(cx.listener(|shell, _, window, cx| shell.import_known_hosts(window, cx)));
-        page("known-scroll", vec![import], body)
+        page("known-scroll", vec![import], self.listing_controls("knownHosts", true, false, window, cx), body)
     }
 
     /// Legacy reads `~/.ssh/known_hosts`, and asks for a file when there is none.

@@ -191,7 +191,7 @@ impl Shell {
                 field_box(editor.parents_open)
                     .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                     .child(div().flex_1().text_color(rgb(if parent.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(parent.unwrap_or_else(|| "Parent Group".into())))
-                    .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
+                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
             )
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.group_editor {

@@ -93,6 +93,19 @@ pub(super) fn section_title(title: &str) -> Div {
     div().pt_5().pb_3().text_color(rgb(theme::TEXT)).font_weight(gpui::FontWeight::SEMIBOLD).child(title.to_owned())
 }
 
+/// The arrow half of a legacy split button.
+pub(super) fn split_arrow(id: &str) -> Stateful<Div> {
+    div()
+        .id(SharedString::from(id.to_owned()))
+        .h(px(26.))
+        .px_2()
+        .flex()
+        .items_center()
+        .rounded_r_md()
+        .bg(rgb(theme::INPUT))
+        .child(glyph("caret_down", 10., theme::TEXT))
+}
+
 pub(super) fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Div> {
     div()
         .id(SharedString::from(id.to_owned()))
@@ -114,10 +127,10 @@ impl Shell {
     pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let content = match self.section {
             Section::Hosts => self.render_hosts(window, cx).into_any_element(),
-            Section::Keychain => self.render_keychain(cx).into_any_element(),
-            Section::PortForwarding => self.render_port_forwarding(cx).into_any_element(),
-            Section::Snippets => self.render_snippets(cx).into_any_element(),
-            Section::KnownHosts => self.render_known_hosts(cx).into_any_element(),
+            Section::Keychain => self.render_keychain(window, cx).into_any_element(),
+            Section::PortForwarding => self.render_port_forwarding(window, cx).into_any_element(),
+            Section::Snippets => self.render_snippets(window, cx).into_any_element(),
+            Section::KnownHosts => self.render_known_hosts(window, cx).into_any_element(),
             Section::Logs => self.render_logs(cx).into_any_element(),
         };
         let editor = match self.section {
@@ -128,7 +141,7 @@ impl Shell {
             Section::KnownHosts => self.render_known_menu(window, cx),
             _ => None,
         };
-        div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).into_any_element()
+        div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).children(self.render_list_menu(window, cx)).into_any_element()
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -137,7 +150,8 @@ impl Shell {
                 let active = section == self.section;
                 div()
                     .id(SharedString::from(format!("section-{label}")))
-                    .h(px(36.))
+                    // Legacy rows are a little taller.
+                    .h(px(40.))
                     .px_3()
                     .flex()
                     .items_center()
@@ -260,15 +274,7 @@ impl Shell {
                     .child(tool_button("new-host", "new_host", "NEW HOST").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
                     // The split button's arrow: New Host / New Group, as in the legacy toolbar.
                     .child(
-                        div()
-                            .id("new-menu")
-                            .h(px(26.))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .rounded_r_md()
-                            .bg(rgb(theme::INPUT))
-                            .child(glyph("chevron", 8., theme::TEXT))
+                        split_arrow("new-menu")
                             .on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
                                 let at = event.position();
                                 shell.open_group_menu(None, gpui::Point { x: at.x - px(20.), y: at.y + px(14.) }, cx);
@@ -280,10 +286,9 @@ impl Shell {
             })))
             .child(tool_button("serial", "serial", "SERIAL").on_click(cx.listener(|shell, _, window, cx| shell.open_serial(window, cx))))
             .child(div().flex_1())
-            .child(glyph("grid", 16., theme::TEXT))
-            .child(glyph("tag", 16., theme::TEXT));
+            .children(self.listing_controls("hosts", false, true, window, cx));
 
-        let mut body = div().id("hosts-scroll").flex_1().overflow_y_scroll().px_5().pb_5();
+        let mut body = div().id("hosts-scroll").flex_1().overflow_y_scroll().px(px(super::sections::BODY_PADDING)).pb_5();
 
         if let Some(error) = &self.vault_error {
             body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(format!("Vault: {error}")));
@@ -293,7 +298,7 @@ impl Shell {
             let results = self.vault.search(&self.query);
             body = body.child(section_title(if results.is_empty() { "No hosts found" } else { "Hosts" }));
             return div().flex_1().h_full().flex().flex_col().child(search).child(toolbar).child(
-                body.child(div().grid().grid_cols(4).gap_3().children(results.into_iter().map(|h| self.render_host(h, cx)))),
+                body.child(self.cards("hosts").children(results.into_iter().map(|h| self.render_host(h, cx)))),
             );
         }
 
@@ -302,16 +307,17 @@ impl Shell {
             body = body.child(self.render_breadcrumbs(&path, cx));
         }
 
-        let groups = self.vault.child_groups(self.group);
+        let groups = self.listed("hosts", self.vault.child_groups(self.group), |g| g.label.as_str(), |g| g.id);
         if !groups.is_empty() {
             body = body
                 .child(section_title("Groups"))
-                .child(div().grid().grid_cols(4).gap_3().children(groups.into_iter().map(|g| self.render_group(g, cx))));
+                .child(self.cards("hosts").children(groups.into_iter().map(|g| self.render_group(g, cx))));
         }
 
-        let hosts = self.vault.hosts_under(self.group);
+        let tags = &self.list.tags;
+        let hosts = self.listed("hosts", self.vault.hosts_under(self.group).into_iter().filter(|h| termian_native::listing::has_tags(h, tags)), |h| h.display_label(), |h| h.id);
         if !hosts.is_empty() {
-            body = body.child(section_title("Hosts")).child(div().grid().grid_cols(4).gap_3().children(
+            body = body.child(section_title("Hosts")).child(self.cards("hosts").children(
                 hosts.into_iter().map(|h| self.render_host(h, cx)),
             ));
         }

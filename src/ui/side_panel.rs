@@ -291,7 +291,7 @@ impl Shell {
                     .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().text_color(rgb(theme::TEXT)).child(package.label.clone())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(format!("{count} {}", if count == 1 { "snippet" } else { "snippets" }))))
                     .child(
                         svg()
-                            .path(icon("chevron"))
+                            .path(icon("caret_down"))
                             .size(px(10.))
                             .text_color(rgb(theme::TEXT_MUTED))
                             .when(open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))),
@@ -522,7 +522,7 @@ impl Shell {
             .gap_2()
             .text_color(rgb(theme::TEXT_MUTED))
             .child(div().flex_1().child("Font"))
-            .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))))
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(panel) = &mut shell.side_panel {
                     panel.font_open = !panel.font_open;
@@ -540,7 +540,7 @@ impl Shell {
                 .bg(rgb(theme::INPUT))
                 .text_color(rgb(theme::TEXT))
                 .child(div().flex_1().child(settings.font_family.clone()))
-                .child(svg().path(icon("chevron")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
+                .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
                 .on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(panel) = &mut shell.side_panel {
                         panel.fonts_list_open = !panel.fonts_list_open;

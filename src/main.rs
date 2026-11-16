@@ -91,6 +91,9 @@ pub struct Shell {
     loaded_fonts: std::collections::HashSet<&'static str>,
     settings_window: Option<gpui::WindowHandle<ui::settings::SettingsWindow>>,
     cloud_focus: FocusHandle,
+    list: ui::listing::ListingState,
+    list_focus: FocusHandle,
+    tag_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -288,6 +291,9 @@ impl Shell {
             loaded_fonts: Default::default(),
             settings_window: None,
             cloud_focus: cx.focus_handle(),
+            list: Default::default(),
+            list_focus: cx.focus_handle(),
+            tag_focus: cx.focus_handle(),
         }
     }
 
@@ -298,7 +304,7 @@ impl Shell {
         let connecting = self.focused_view(id).is_some_and(|view| view.read(cx).is_connecting());
         let tab_text = if connecting { theme::CONNECTING_TEXT } else { theme::TEXT };
         let icon_name = match tab.kind {
-            TabKind::Vaults => "keychain",
+            TabKind::Vaults => "vaults",
             TabKind::Sftp => "sftp",
             TabKind::Session { .. } => "terminal",
             TabKind::Launcher => "plus",
