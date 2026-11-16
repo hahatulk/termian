@@ -281,6 +281,16 @@ impl TerminalView {
         self
     }
 
+    /// A startup snippet for a local shell that is already open: typed after
+    /// the shell integration line, or at once without it.
+    pub fn set_local_startup(&mut self, script: String) {
+        if self.integration.wanted {
+            self.startup = Some(script);
+        } else {
+            self.run(&script);
+        }
+    }
+
     pub fn with_startup(mut self, script: Option<String>) -> Self {
         self.startup = script;
         self

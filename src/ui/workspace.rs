@@ -387,8 +387,10 @@ impl Shell {
             let Some(target) = terminal.target(&self.vault) else { continue };
             self.split_into = tab.and_then(|tab| Some((tab, self.workspaces.get(&tab)?.focused)));
             let before = self.next_pane;
+            // Legacy runs the template's startup snippet (directory, then script).
+            let startup = terminal.startup();
             match target {
-                Target::Host(host) => self.connect_host(host, window, cx),
+                Target::Host(host) => self.connect_host_with(host, startup.clone(), window, cx),
                 Target::Local => self.open_local_terminal(window, cx),
             }
             self.split_into = None;
@@ -399,6 +401,9 @@ impl Shell {
             let Some(at) = self.tab_of(pane) else { continue };
             tab = Some(at);
             if let Some(p) = self.workspaces.get_mut(&at).and_then(|w| w.panes.get_mut(&pane)) {
+                if let (Target::Local, Some(script)) = (target, startup) {
+                    p.view.update(cx, |view, _| view.set_local_startup(script));
+                }
                 p.template_terminal = Some(terminal.id.clone());
                 if let Some(label) = terminal.label.as_ref().filter(|l| !l.is_empty()) {
                     p.title = label.clone();

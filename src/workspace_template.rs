@@ -71,6 +71,24 @@ impl TemplateTerminal {
         }
     }
 
+    /// Legacy `startupSnippet`: go to `startupDirectory`, then run
+    /// `startupScript` (or the snippet's `script`), as one line.
+    pub fn startup(&self) -> Option<String> {
+        let snippet = self.startup_snippet.as_ref()?;
+        let text = |key: &str| snippet.get(key).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+        let directory = text("startupDirectory").map(|dir| match dir.strip_prefix("~/") {
+            // `~` expands only outside quotes.
+            Some(rest) => format!("cd ~/'{}'", rest.replace('\'', r"'\''")),
+            None if dir == "~" => "cd ~".to_owned(),
+            None => format!("cd '{}'", dir.replace('\'', r"'\''")),
+        });
+        let script = text("startupScript").or_else(|| text("script")).map(str::to_owned);
+        match (directory, script) {
+            (Some(cd), Some(script)) => Some(format!("{cd} && {script}")),
+            (cd, script) => cd.or(script),
+        }
+    }
+
     fn same_target(&self, other: &Self) -> bool {
         self.protocol == other.protocol && self.host.as_ref().and_then(|h| h.local_id) == other.host.as_ref().and_then(|h| h.local_id)
     }
@@ -346,6 +364,17 @@ mod tests {
         let fewer = WorkspaceTemplate::from_tab(1, DEFAULT_NAME, ViewMode::Split, &reopened[..1], &tree, Some(&t)).unwrap();
         assert!(fewer.differs(&t));
         assert!(WorkspaceTemplate::from_tab(1, "x", ViewMode::Split, &[], &tree, None).is_none());
+    }
+
+    #[test]
+    fn startup_goes_to_the_directory_then_runs_the_script() {
+        let terminal = |snippet: Value| TemplateTerminal { startup_snippet: Some(snippet), ..TemplateTerminal::new(Target::Local) };
+        let run = |snippet| terminal(snippet).startup();
+        assert_eq!(run(serde_json::json!({ "startupDirectory": "/srv/it's", "startupScript": "make" })).as_deref(), Some(r"cd '/srv/it'\''s' && make"));
+        assert_eq!(run(serde_json::json!({ "startupDirectory": "~/app" })).as_deref(), Some("cd ~/'app'"));
+        assert_eq!(run(serde_json::json!({ "script": "uptime", "startupDirectory": "" })).as_deref(), Some("uptime"));
+        assert_eq!(run(serde_json::json!({})), None);
+        assert_eq!(TemplateTerminal::new(Target::Local).startup(), None);
     }
 
     #[test]
