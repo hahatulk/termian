@@ -736,7 +736,7 @@ impl Render for SettingsWindow {
                     cx.notify();
                 }))
         });
-        div()
+        div().font_family(theme::UI_FONT).text_size(px(14.))
             .size_full()
             .flex()
             .flex_col()

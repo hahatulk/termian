@@ -84,7 +84,7 @@ fn label(text: &str) -> Div {
     div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(text.to_owned())
 }
 
-fn toggle(on: bool) -> Div {
+pub(super) fn toggle(on: bool) -> Div {
     div()
         .w(px(36.))
         .h(px(20.))

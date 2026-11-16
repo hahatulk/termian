@@ -108,14 +108,19 @@ impl Scanner {
 /// terminal switched to while the line runs, and clears the old prompt
 /// line so the next prompt takes its place. A leading space keeps it out
 /// of fish and `ignorespace` histories; bash also deletes it from history.
-pub fn install_line() -> String {
+/// `fresh_screen`: the shell has drawn only its first prompt (a local
+/// terminal), so the screen is cleared as the line finishes and the prompt
+/// the shell draws again after it is the only one. A remote login keeps its
+/// banner and gets the second prompt below it.
+pub fn install_line(fresh_screen: bool) -> String {
     let bash = format!("history -d $(history 1 | awk '{{print $1}}') 2>/dev/null\n{BASH}");
     let part = |var: &str, script: &str| format!("test -n \"${var}\" && eval \"$(printf '%s' {} | base64 -d | gunzip)\"", packed(script));
     format!(
-        " {}; {}; {}; printf '\\033[?1049l\\r\\033[K'\r",
+        " {}; {}; {}; printf '\\033[?1049l{}'\r",
         part("FISH_VERSION", FISH),
         part("ZSH_VERSION", ZSH),
-        part("BASH_VERSION", &bash)
+        part("BASH_VERSION", &bash),
+        if fresh_screen { "\\033[H\\033[2J" } else { "\\r\\033[K" }
     )
 }
 
@@ -168,7 +173,7 @@ mod tests {
         let mut session = crate::session::local_command(command, 120, 40).unwrap();
         let mut events = session.take_events().unwrap();
         let start = Instant::now();
-        let mut steps: Vec<(u64, Vec<u8>)> = vec![(500, install_line().into_bytes()), (2500, b"echo termian-ok\r".to_vec()), (3500, b"cd / && false\r".to_vec())];
+        let mut steps: Vec<(u64, Vec<u8>)> = vec![(500, install_line(false).into_bytes()), (2500, b"echo termian-ok\r".to_vec()), (3500, b"cd / && false\r".to_vec())];
         let mut scanner = Scanner::default();
         let mut terminal = crate::terminal::Terminal::new(120, 40);
         let mut found = Vec::new();
@@ -220,7 +225,9 @@ mod tests {
 
     #[test]
     fn the_install_line_is_short() {
-        assert!(install_line().len() < 3200, "{}", install_line().len());
+        assert!(install_line(false).len() < 3200, "{}", install_line(false).len());
+        assert!(install_line(true).ends_with("printf '\\033[?1049l\\033[H\\033[2J'\r"), "a local terminal starts clean");
+        assert!(install_line(false).ends_with("printf '\\033[?1049l\\r\\033[K'\r"), "a remote banner stays");
     }
 
     #[test]

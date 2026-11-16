@@ -46,6 +46,13 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
     let empty = Store::new();
     let store = |name: &str| stores.get(name).unwrap_or(&empty);
     let text = |value: Option<&Value>| value.and_then(Value::as_str).map(|s| decrypt_or_plain(cipher, s));
+    // Secrets are always encrypted: one that does not decrypt is left out and
+    // the vault is marked incomplete, so it is not uploaded over the cloud copy.
+    let secrets_missing = std::cell::Cell::new(false);
+    let secret = |value: Option<&Value>| {
+        let field = value.and_then(Value::as_str).filter(|s| !s.is_empty())?;
+        cipher.decrypt(field).inspect_err(|_| secrets_missing.set(true)).ok().filter(|s| !s.is_empty())
+    };
 
     let groups = store("groups")
         .iter()
@@ -66,6 +73,16 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         }
     }
 
+    // Identities with `is_visible: false` are a host's own credentials, not
+    // Keychain entries.
+    let hidden: std::collections::HashSet<u64> = store("ssh_identities")
+        .iter()
+        .filter(|(_, v)| matches!(v.get("is_visible"), Some(Value::Bool(false))))
+        .map(|(id, _)| *id)
+        .collect();
+    let identity_secrets: HashMap<u64, (Option<String>, Option<u64>)> =
+        store("ssh_identities").iter().map(|(id, v)| (*id, (secret(v.get("password")), link(v, "ssh_key")))).collect();
+
     let tag_labels: HashMap<u64, String> =
         store("tags").iter().map(|(id, v)| (*id, text(v.get("label")).unwrap_or_default())).collect();
     let mut host_tags: HashMap<u64, Vec<String>> = HashMap::new();
@@ -77,44 +94,47 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
 
     let hosts = store("hosts")
         .iter()
-        .map(|(id, v)| Host {
-            id: *id,
-            label: text(v.get("label")).unwrap_or_default(),
-            address: text(v.get("address")).unwrap_or_default(),
-            os: v.get("os_name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
-            group: link(v, "group"),
-            username: link(v, "ssh_config")
-                .and_then(|config| config_identity.get(&config))
-                .and_then(|identity| usernames.get(identity))
-                .cloned(),
-            tags: host_tags.remove(id).unwrap_or_default(),
-            port: link(v, "ssh_config").and_then(|config| config_ports.get(&config)).copied(),
-            password: None,
-            key: None,
-            identity: None,
+        .map(|(id, v)| {
+            let identity = link(v, "ssh_config").and_then(|config| config_identity.get(&config)).copied();
+            let own = identity.filter(|i| hidden.contains(i)).and_then(|i| identity_secrets.get(&i)).cloned().unwrap_or_default();
+            Host {
+                id: *id,
+                label: text(v.get("label")).unwrap_or_default(),
+                address: text(v.get("address")).unwrap_or_default(),
+                os: v.get("os_name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned),
+                group: link(v, "group"),
+                username: identity.and_then(|identity| usernames.get(&identity)).cloned(),
+                tags: host_tags.remove(id).unwrap_or_default(),
+                port: link(v, "ssh_config").and_then(|config| config_ports.get(&config)).copied(),
+                password: own.0,
+                key: own.1,
+                identity: identity.filter(|i| !hidden.contains(i)),
+            }
         })
         .collect();
 
-    // Secrets (passwords, private keys, passphrases) are never decrypted here;
-    // only whether they are present.
     let keys = store("keys")
         .iter()
         .map(|(id, v)| SshKey {
             id: *id,
             label: text(v.get("label")).unwrap_or_default(),
             kind: key_kind(&text(v.get("public_key")).unwrap_or_default()),
-            ..SshKey::default()
+            private_key: secret(v.get("private_key")),
+            public_key: text(v.get("public_key")).filter(|k| !k.is_empty()),
+            passphrase: secret(v.get("passphrase")),
         })
         .collect();
     let identities = store("ssh_identities")
         .iter()
+        .filter(|(id, _)| !hidden.contains(id))
         .map(|(id, v)| Identity {
             id: *id,
             label: text(v.get("label")).filter(|l| !l.is_empty()).or_else(|| usernames.get(id).cloned()).unwrap_or_default(),
             has_password: v.get("password").and_then(Value::as_str).is_some_and(|p| !p.is_empty()),
             has_key: link(v, "ssh_key").is_some(),
             username: usernames.get(id).cloned().unwrap_or_default(),
-            ..Identity::default()
+            password: identity_secrets.get(id).and_then(|s| s.0.clone()),
+            key: link(v, "ssh_key"),
         })
         .collect();
     let snippets = store("snippets")
@@ -163,8 +183,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
-    // Secrets are never decrypted here, so this data must not be uploaded as is.
-    Ok(Vault { groups, hosts, keys, identities, snippets, packages, known_hosts, rules, secrets_missing: true, ..Vault::default() })
+    Ok(Vault { groups, hosts, keys, identities, snippets, packages, known_hosts, rules, secrets_missing: secrets_missing.get(), ..Vault::default() })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
@@ -227,6 +246,7 @@ pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<Hi
                 subtitle,
                 log,
                 saved: false,
+                comment: String::new(),
             })
         })
         .collect();
@@ -304,6 +324,7 @@ mod tests {
         Links(&'a [i32]),
         Int(i32),
         Double(f64),
+        Bool(bool),
     }
 
     fn record(fields: &[(&str, F)]) -> Vec<u8> {
@@ -315,6 +336,7 @@ mod tests {
                 F::Text(s) => e.string(s),
                 F::Int(n) => e.int(*n),
                 F::Double(n) => e.double(*n),
+                F::Bool(b) => e.tag(if *b { 9 } else { 8 }),
                 F::Secret(s) => e.string(&cipher().encrypt(s, [i as u8; 24])),
                 F::Link(n) => {
                     e.begin_object();
@@ -430,13 +452,14 @@ mod tests {
     }
 
     #[test]
-    fn loads_keychain_snippets_and_known_hosts_without_secrets() {
+    fn loads_keychain_secrets_snippets_and_known_hosts() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         write_store(root, "keys", vec![(1., record(&[
             ("label", F::Secret("kazgau")),
             ("public_key", F::Secret("ssh-ed25519 AAAA")),
             ("private_key", F::Secret("-----BEGIN OPENSSH PRIVATE KEY-----")),
+            ("passphrase", F::Secret("phrase")),
         ]))]);
         write_store(root, "ssh_identities", vec![
             (22., record(&[("label", F::Secret("kazgau")), ("password", F::Secret("pw")), ("ssh_key", F::Link(1))])),
@@ -453,15 +476,58 @@ mod tests {
 
         let vault = load_vault(root, &cipher()).unwrap();
 
-        assert_eq!(vault.keys, vec![SshKey { id: 1, label: "kazgau".into(), kind: "ED25519".into(), ..SshKey::default() }]);
+        assert_eq!(vault.keys, vec![SshKey {
+            id: 1,
+            label: "kazgau".into(),
+            kind: "ED25519".into(),
+            private_key: Some("-----BEGIN OPENSSH PRIVATE KEY-----".into()),
+            public_key: Some("ssh-ed25519 AAAA".into()),
+            passphrase: Some("phrase".into()),
+        }]);
+        assert_eq!((vault.identities[0].password.as_deref(), vault.identities[0].key), (Some("pw"), Some(1)));
         assert_eq!(vault.identities[0].subtitle(), "Auth password and key");
         assert_eq!((vault.identities[1].label.as_str(), vault.identities[1].subtitle()), ("root", "Auth key"));
         assert_eq!(vault.snippets[0].subtitle(), Some("kubectl get pods"));
         assert_eq!((vault.snippets[0].package, vault.snippets[0].targets.as_slice()), (Some(5), &[7, 8][..]));
         assert_eq!(vault.packages, vec![SnippetPackage { id: 5, label: "k8s".into() }]);
         assert_eq!(vault.known_hosts[0].host, "[10.0.0.1]:2001");
-        let debug = format!("{vault:?}");
-        assert!(!debug.contains("PRIVATE KEY") && !debug.contains("\"pw\""), "secrets leaked: {debug}");
+        assert!(!vault.secrets_missing, "every secret was read");
+    }
+
+    #[test]
+    fn hosts_use_their_identity_and_hidden_identities_become_host_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        write_store(root, "keys", vec![(1., record(&[("label", F::Secret("k")), ("private_key", F::Secret("PRIVATE"))]))]);
+        write_store(root, "hosts", vec![
+            (10., record(&[("label", F::Secret("shared")), ("ssh_config", F::Link(30))])),
+            (11., record(&[("label", F::Secret("own")), ("ssh_config", F::Link(31))])),
+        ]);
+        write_store(root, "ssh_configs", vec![(30., record(&[("identity", F::Link(20))])), (31., record(&[("identity", F::Link(21))]))]);
+        let hidden = record(&[("username", F::Secret("pt")), ("password", F::Secret("secret")), ("ssh_key", F::Link(1)), ("is_visible", F::Bool(false))]);
+        write_store(root, "ssh_identities", vec![
+            (20., record(&[("label", F::Secret("root@prod")), ("username", F::Secret("root")), ("password", F::Secret("rootpw"))])),
+            (21., hidden),
+        ]);
+
+        let vault = load_vault(root, &cipher()).unwrap();
+
+        assert_eq!(vault.identities.iter().map(|i| i.id).collect::<Vec<_>>(), [20], "a host's own credentials are not a Keychain identity");
+        let shared = vault.host(10).unwrap();
+        assert_eq!(shared.identity, Some(20));
+        assert_eq!(vault.credentials(shared), (Some("root".into()), Some("rootpw".into()), None));
+        let own = vault.host(11).unwrap();
+        assert_eq!((own.identity, own.username.as_deref(), own.password.as_deref(), own.key), (None, Some("pt"), Some("secret"), Some(1)));
+    }
+
+    #[test]
+    fn an_unreadable_secret_marks_the_vault_incomplete() {
+        let dir = tempfile::tempdir().unwrap();
+        write_store(dir.path(), "ssh_identities", vec![(22., record(&[("username", F::Text("root")), ("password", F::Text("not encrypted"))]))]);
+        let vault = load_vault(dir.path(), &cipher()).unwrap();
+        assert_eq!(vault.identities[0].password, None, "ciphertext is never used as a password");
+        assert!(vault.identities[0].has_password);
+        assert!(vault.secrets_missing);
     }
 
     #[test]
@@ -502,7 +568,7 @@ mod tests {
             destination: "127.0.0.1".into(),
             destination_port: Some(5432),
         }]);
-        assert!(vault.secrets_missing, "profile data is never sent to the cloud as is");
+        assert!(!vault.secrets_missing, "a profile without secrets has none missing");
     }
 
     #[test]

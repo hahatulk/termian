@@ -644,6 +644,7 @@ impl Shell {
             label: &remote.label,
             subtitle: format!("SFTP {}:{}", remote.target.host, remote.target.port),
             os: remote.os.as_deref(),
+            identities: &[],
         };
         // The login screen's callbacks are plain functions: one set per side.
         fn actions<const LEFT: bool>() -> LoginActions<Shell> {
@@ -690,6 +691,10 @@ impl Shell {
                     }
                     cx.notify();
                 },
+                edit_host: None,
+                verbose: None,
+                continue_save: None,
+                ui: None,
             }
         }
         let actions = if side == Side::Left { actions::<true>() } else { actions::<false>() };

@@ -44,6 +44,9 @@ pub enum Answer {
     HostKey(HostKeyDecision),
     /// `None` cancels the login.
     Text(Option<String>),
+    /// An identity picked on the Username question: its username answers it
+    /// and its password and key are used to authenticate.
+    Identity { username: String, password: Option<String>, key: Option<(String, Option<String>)> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -62,6 +65,12 @@ pub struct LoginState {
     pub error: Option<String>,
     pub changed_key: Option<HostKeyInfo>,
     pub show_logs: bool,
+    /// «Search identities» on the Username question: typed text, and
+    /// whether keys go to it instead of the username.
+    pub identity_query: String,
+    pub searching_identities: bool,
+    /// The «Continue & Save» dropdown with plain «Continue» is open.
+    pub continue_menu: bool,
 }
 
 impl Default for LoginState {
@@ -74,6 +83,9 @@ impl Default for LoginState {
             error: None,
             changed_key: None,
             show_logs: false,
+            identity_query: String::new(),
+            searching_identities: false,
+            continue_menu: false,
         }
     }
 }
@@ -105,6 +117,9 @@ impl LoginState {
     pub fn answer(&mut self, answer: Answer) -> Option<Answer> {
         self.question.take()?;
         self.input.clear();
+        self.identity_query.clear();
+        self.searching_identities = false;
+        self.continue_menu = false;
         Some(answer)
     }
 
@@ -128,12 +143,72 @@ impl LoginState {
     }
 
     /// Progress of the three-step bar (connect, host key, terminal) as 0.0..=1.0.
+    /// The Username question, which offers saved identities.
+    pub fn asks_username(&self) -> bool {
+        matches!(&self.question, Some(Question::Text { prompt, echo: true }) if prompt == "Username")
+    }
+
     pub fn progress(&self) -> f32 {
         match self.stage {
             Stage::Connecting => 0.,
             Stage::Verifying | Stage::Authenticating => 0.5,
             Stage::Ready => 1.,
         }
+    }
+}
+
+/// Clicks on the Username question that only change what is shown.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoginUi {
+    TypeUsername,
+    SearchIdentities,
+    ToggleContinueMenu,
+}
+
+impl LoginState {
+    pub fn apply_ui(&mut self, ui: LoginUi) {
+        match ui {
+            LoginUi::TypeUsername => self.searching_identities = false,
+            LoginUi::SearchIdentities => self.searching_identities = true,
+            LoginUi::ToggleContinueMenu => self.continue_menu = !self.continue_menu,
+        }
+    }
+}
+
+/// An identity offered on the Username question, as in the legacy
+/// «Search identities» list.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IdentityChoice {
+    pub label: String,
+    /// «Auth key», «Auth password», «Auth password and key».
+    pub subtitle: &'static str,
+    pub answer: Answer,
+}
+
+impl IdentityChoice {
+    /// The vault's identities that have a username; their password and the
+    /// Keychain key they use go with the answer.
+    pub fn all(vault: &crate::vault::Vault) -> Vec<Self> {
+        vault
+            .identities
+            .iter()
+            .filter(|identity| !identity.username.is_empty())
+            .map(|identity| {
+                let key = identity.key.and_then(|id| vault.key(id)).and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone())));
+                Self {
+                    label: identity.label.clone(),
+                    subtitle: identity.subtitle(),
+                    answer: Answer::Identity { username: identity.username.clone(), password: identity.password.clone(), key },
+                }
+            })
+            .collect()
+    }
+
+    /// The «Search identities» filter: label or username, any case.
+    pub fn matches(&self, query: &str) -> bool {
+        let query = query.trim().to_lowercase();
+        let Answer::Identity { username, .. } = &self.answer else { return false };
+        query.is_empty() || self.label.to_lowercase().contains(&query) || username.to_lowercase().contains(&query)
     }
 }
 
@@ -181,5 +256,19 @@ mod tests {
         state.apply(LoginEvent::Prompt { text: "Password:".into(), echo: false });
         state.fail("Permission denied".into());
         assert_eq!((state.question.clone(), state.error.as_deref()), (None, Some("Permission denied")));
+    }
+
+    #[test]
+    fn identities_answer_the_username_with_their_credentials() {
+        use crate::vault::{Identity, SshKey, Vault};
+        let mut vault = Vault::default();
+        vault.keys.push(SshKey { id: 7, label: "k".into(), private_key: Some("PRIVATE".into()), ..Default::default() });
+        vault.identities.push(Identity { id: 1, label: "root".into(), has_key: true, username: "root".into(), key: Some(7), ..Default::default() });
+        vault.identities.push(Identity { id: 2, label: "nameless".into(), has_password: true, ..Default::default() });
+        let choices = IdentityChoice::all(&vault);
+        assert_eq!(choices.len(), 1, "an identity without a username cannot answer");
+        assert_eq!(choices[0].subtitle, "Auth key");
+        assert_eq!(choices[0].answer, Answer::Identity { username: "root".into(), password: None, key: Some(("PRIVATE".into(), None)) });
+        assert!(choices[0].matches("RO") && !choices[0].matches("pt"));
     }
 }

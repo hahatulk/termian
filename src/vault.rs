@@ -25,7 +25,7 @@ pub struct Host {
     /// SSH port when it is not 22.
     #[serde(default)]
     pub port: Option<u16>,
-    /// Saved in the native vault only; never read from the legacy profile.
+    /// The host's own password (in legacy, a hidden identity).
     #[serde(default)]
     pub password: Option<String>,
     /// Key from the Keychain to log in with.
@@ -72,7 +72,7 @@ pub struct SshKey {
     pub label: String,
     /// Algorithm as shown on the card: `ED25519`, `ECDSA`, `RSA`.
     pub kind: String,
-    /// Saved in the native vault only; keys imported from legacy have none.
+    /// Decrypted from the legacy profile on import, or set in this client.
     #[serde(default)]
     pub private_key: Option<String>,
     #[serde(default)]
@@ -109,7 +109,7 @@ pub struct Identity {
     pub has_key: bool,
     #[serde(default)]
     pub username: String,
-    /// Saved in the native vault only; legacy passwords are not decrypted.
+    /// Decrypted from the legacy profile on import, or set in this client.
     #[serde(default)]
     pub password: Option<String>,
     #[serde(default)]
@@ -272,6 +272,22 @@ pub struct HistoryEntry {
     /// The Saved (bookmark) mark in Logs.
     #[serde(default)]
     pub saved: bool,
+    /// Saved-log comment. Device-local, inside the encrypted vault only.
+    #[serde(default)]
+    pub comment: String,
+}
+
+/// The legacy Saved-comment limit, measured in UTF-16 code units.
+pub const LOG_COMMENT_LIMIT: usize = 2000;
+
+/// Bounds a comment without splitting a Unicode scalar at the limit.
+pub fn bounded_log_comment(comment: &str) -> &str {
+    let mut units = 0;
+    let end = comment.char_indices().find_map(|(offset, ch)| {
+        units += ch.len_utf16();
+        (units > LOG_COMMENT_LIMIT).then_some(offset)
+    }).unwrap_or(comment.len());
+    &comment[..end]
 }
 
 /// How many connections are remembered.
@@ -381,6 +397,33 @@ impl Vault {
         id
     }
 
+    /// Passwords and keys from the legacy profile for a vault imported before
+    /// they were read. Records match by id and name; a value already set
+    /// here is kept.
+    pub fn import_legacy_secrets(&mut self, legacy: &Vault) {
+        for key in &mut self.keys {
+            if let Some(from) = legacy.keys.iter().find(|k| k.id == key.id && k.label == key.label) {
+                key.private_key = key.private_key.take().or_else(|| from.private_key.clone());
+                key.public_key = key.public_key.take().or_else(|| from.public_key.clone());
+                key.passphrase = key.passphrase.take().or_else(|| from.passphrase.clone());
+            }
+        }
+        for identity in &mut self.identities {
+            if let Some(from) = legacy.identities.iter().find(|i| i.id == identity.id && i.label == identity.label) {
+                identity.password = identity.password.take().or_else(|| from.password.clone());
+                identity.key = identity.key.or(from.key);
+            }
+        }
+        for host in &mut self.hosts {
+            if let Some(from) = legacy.hosts.iter().find(|h| h.id == host.id && h.label == host.label) {
+                host.password = host.password.take().or_else(|| from.password.clone());
+                host.key = host.key.or(from.key);
+                host.identity = host.identity.or(from.identity);
+            }
+        }
+        self.secrets_missing = legacy.secrets_missing;
+    }
+
     /// Adds connections read from the legacy profile, once: the same start
     /// time and name are not added twice, the newest 100 stay (Saved ones
     /// always), newest first.
@@ -421,6 +464,27 @@ impl Vault {
         self.legacy_shell_history_imported = true;
     }
 
+    /// Existing history from a shell, oldest first. Execution times are not
+    /// known; keep live records ahead of it and never count a reconnect as a
+    /// new execution. The legacy-profile migration has its own separate flag.
+    pub fn merge_shell_history(&mut self, commands: &[String], host: Option<HostId>) -> bool {
+        use std::collections::{HashMap, HashSet};
+        let mut counts = HashMap::<&str, i64>::new();
+        for command in commands {
+            let script = command.trim();
+            if !script.is_empty() { *counts.entry(script).or_default() += 1; }
+        }
+        let mut seen: HashSet<String> = self.shell_history.iter().filter(|c| c.host == host).map(|c| c.script.clone()).collect();
+        let before = self.shell_history.len();
+        for command in commands.iter().rev() {
+            if self.shell_history.len() >= SHELL_HISTORY_LIMIT { break; }
+            let script = command.trim();
+            if script.is_empty() || !seen.insert(script.to_owned()) { continue; }
+            self.shell_history.push(ShellCommand { script: script.to_owned(), completed_at: 0, rating: counts[script], host });
+        }
+        self.shell_history.len() != before
+    }
+
     /// A command the shell integration saw finish: on top, a repeat moving
     /// up with a higher rating instead of being listed twice.
     pub fn record_command(&mut self, script: &str, host: Option<HostId>, completed_at: i64) {
@@ -438,6 +502,26 @@ impl Vault {
 
     pub fn history_entry_mut(&mut self, id: u64) -> Option<&mut HistoryEntry> {
         self.history.iter_mut().find(|e| e.id == id)
+    }
+
+    /// Saving a comment also bookmarks the log; an empty comment is allowed.
+    /// Returns whether the encrypted vault needs saving.
+    pub fn save_log_comment(&mut self, id: u64, comment: &str) -> bool {
+        let Some(entry) = self.history_entry_mut(id).filter(|e| e.log.is_some()) else { return false };
+        let comment = bounded_log_comment(comment).trim().to_owned();
+        if entry.saved && entry.comment == comment { return false; }
+        entry.saved = true;
+        entry.comment = comment;
+        true
+    }
+
+    /// Removing the Saved mark discards its comment too, as in legacy.
+    pub fn remove_log_bookmark(&mut self, id: u64) -> bool {
+        let Some(entry) = self.history_entry_mut(id) else { return false };
+        let changed = entry.saved || !entry.comment.is_empty();
+        entry.saved = false;
+        entry.comment.clear();
+        changed
     }
 
     /// Sessions with a log, for the Logs screen: newest first, or Saved first.
@@ -707,6 +791,36 @@ impl Vault {
 pub(crate) mod tests {
     use super::*;
 
+    #[test]
+    fn legacy_secrets_fill_a_vault_imported_without_them() {
+        let mut vault = Vault {
+            hosts: vec![Host { username: Some("root".into()), ..host(10, "prod", None) }, host(11, "renamed", None), Host { password: Some("mine".into()), ..host(12, "own", None) }],
+            keys: vec![SshKey { id: 1, label: "k".into(), ..SshKey::default() }],
+            identities: vec![Identity { id: 20, label: "root".into(), has_password: true, username: "root".into(), ..Identity::default() }],
+            secrets_missing: true,
+            ..Vault::default()
+        };
+        let legacy = Vault {
+            hosts: vec![
+                Host { identity: Some(20), username: Some("root".into()), ..host(10, "prod", None) },
+                Host { password: Some("x".into()), ..host(11, "old name", None) },
+                Host { password: Some("theirs".into()), key: Some(1), ..host(12, "own", None) },
+            ],
+            keys: vec![SshKey { id: 1, label: "k".into(), private_key: Some("PRIVATE".into()), passphrase: Some("p".into()), ..SshKey::default() }],
+            identities: vec![Identity { id: 20, label: "root".into(), has_password: true, username: "root".into(), password: Some("pw".into()), ..Identity::default() }],
+            ..Vault::default()
+        };
+
+        vault.import_legacy_secrets(&legacy);
+
+        assert_eq!(vault.credentials(vault.host(10).unwrap()), (Some("root".into()), Some("pw".into()), None));
+        assert_eq!(vault.host(11).unwrap().password, None, "a host changed since the import is left alone");
+        let own = vault.host(12).unwrap();
+        assert_eq!((own.password.as_deref(), own.key), (Some("mine"), Some(1)), "values set in this client are kept");
+        assert_eq!(vault.key(1).unwrap().private_key.as_deref(), Some("PRIVATE"));
+        assert!(!vault.secrets_missing);
+    }
+
     pub fn host(id: HostId, label: &str, group: Option<GroupId>) -> Host {
         Host {
             id,
@@ -786,7 +900,8 @@ pub(crate) mod tests {
     fn logs_list_sessions_with_a_log_and_saved_ones_survive_the_limit() {
         let mut v = vault();
         let log = |n: &str| Some(LogRef { name: n.into(), key: "k".into() });
-        let old = v.record_connection(HistoryEntry { host: Some(10), connected_at: 1, log: log("a"), saved: true, ..HistoryEntry::default() });
+        let old = v.record_connection(HistoryEntry { host: Some(10), connected_at: 1, log: log("a"), ..HistoryEntry::default() });
+        assert!(v.save_log_comment(old, "Keep this recording"));
         v.record_connection(HistoryEntry { host: Some(11), connected_at: 2, log: log("b"), ..HistoryEntry::default() });
         v.record_connection(HistoryEntry { host: Some(12), connected_at: 3, ..HistoryEntry::default() });
         let names = |v: &Vault, saved_first| v.logs(saved_first).iter().map(|e| e.log.as_ref().unwrap().name.clone()).collect::<Vec<_>>();
@@ -799,6 +914,44 @@ pub(crate) mod tests {
         assert!(v.history.iter().any(|e| e.id == old), "the saved entry is kept");
         v.history_entry_mut(old).unwrap().disconnected_at = Some(9);
         assert_eq!(v.history.iter().find(|e| e.id == old).unwrap().disconnected_at, Some(9));
+    }
+
+    #[test]
+    fn commenting_saves_a_log_and_removing_the_bookmark_clears_its_comment() {
+        let mut v = vault();
+        let id = v.record_connection(HistoryEntry { log: Some(LogRef { name: "a".into(), key: "k".into() }), ..HistoryEntry::default() });
+        assert!(v.save_log_comment(id, "  Выпуск\nпроверен ✅  "));
+        let entry = v.logs(true)[0];
+        assert!(entry.saved);
+        assert_eq!(entry.comment, "Выпуск\nпроверен ✅");
+        assert!(!v.save_log_comment(id, "Выпуск\nпроверен ✅"));
+        assert!(v.save_log_comment(id, ""));
+        assert!(v.logs(false)[0].saved, "clearing text alone keeps the bookmark");
+        v.save_log_comment(id, "note");
+        assert!(v.remove_log_bookmark(id));
+        assert!(!v.logs(false)[0].saved);
+        assert_eq!(v.logs(false)[0].comment, "");
+        assert!(!v.remove_log_bookmark(id));
+        assert!(!v.save_log_comment(999, "missing"));
+        let without_log = v.record_connection(HistoryEntry::default());
+        assert!(!v.save_log_comment(without_log, "not a log"));
+    }
+
+    #[test]
+    fn log_comments_are_bounded_and_old_vault_entries_still_load() {
+        let old: HistoryEntry = serde_json::from_value(serde_json::json!({
+            "id": 1, "host": null, "connected_at": 123, "saved": true,
+            "log": {"name": "old", "key": "k"}
+        })).unwrap();
+        assert_eq!(old.comment, "");
+        let mut v = Vault { history: vec![old], ..Vault::default() };
+        let text = format!("{}✅x", "я".repeat(1999));
+        assert!(v.save_log_comment(1, &text));
+        assert_eq!(v.logs(false)[0].comment, format!("{}✅", "я".repeat(1999)));
+        v.save_log_comment(1, &format!("{}😀", "a".repeat(1999)));
+        assert_eq!(v.logs(false)[0].comment, "a".repeat(1999), "never split a UTF-16 surrogate pair at the legacy 2000-unit limit");
+        let round_trip: Vault = serde_json::from_slice(&serde_json::to_vec(&v).unwrap()).unwrap();
+        assert_eq!(round_trip, v);
     }
 
     #[test]
@@ -909,6 +1062,37 @@ pub(crate) mod tests {
         assert_eq!(snippet("get pods", "kubectl get pods").subtitle(), Some("kubectl get pods"));
         assert_eq!(snippet("", "\n  uptime\n  w\n").display_label(), "uptime");
         assert_eq!(snippet("", "uptime").subtitle(), None);
+    }
+
+    #[test]
+    fn extracted_history_deduplicates_by_host_without_inflating_repeats() {
+        let mut v = Vault::default();
+        v.record_command("live", Some(7), 30);
+        let batch: Vec<String> = [" old ", "live", "new", "old", " "].into_iter().map(str::to_owned).collect();
+        assert!(v.merge_shell_history(&batch, Some(7)));
+        assert_eq!(v.shell_history.iter().map(|c| (c.script.as_str(), c.rating, c.completed_at)).collect::<Vec<_>>(),
+            [("live", 1, 30), ("old", 2, 0), ("new", 1, 0)]);
+        let previous = v.shell_history.clone();
+        assert!(!v.merge_shell_history(&batch, Some(7)));
+        assert_eq!(v.shell_history, previous);
+        assert!(!v.legacy_shell_history_imported);
+        assert!(v.merge_shell_history(&["old".into()], Some(8)));
+        assert_eq!(v.shell_history.last().unwrap().host, Some(8));
+        assert!(v.merge_shell_history(&["old".into()], None));
+        assert_eq!(v.shell_history.last().unwrap().host, None);
+    }
+
+    #[test]
+    fn extracted_history_keeps_newest_batch_entries_within_the_limit() {
+        let mut v = Vault::default();
+        v.record_command("live", None, 30);
+        let batch: Vec<_> = (0..2100).map(|i| format!("command-{i}")).collect();
+        assert!(v.merge_shell_history(&batch, None));
+        assert_eq!(v.shell_history.len(), 2000);
+        assert_eq!(v.shell_history[0].script, "live");
+        assert_eq!(v.shell_history[1].script, "command-2099");
+        assert_eq!(v.shell_history.last().unwrap().script, "command-101");
+        assert!(!v.merge_shell_history(&batch, None));
     }
 
     #[test]

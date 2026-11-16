@@ -32,3 +32,11 @@ pub const ERROR: u32 = 0xf25e61;
 pub const DIALOG_HEADER: u32 = 0x282b3d;
 /// Bundle: `--dark-grey-5`, rows inside dialogs.
 pub const DIALOG_ROW: u32 = 0x3e4257;
+
+/// Bundle: interface font of the legacy UI (`CircularXX`, assets/fonts).
+pub const UI_FONT: &str = "CircularXX";
+
+/// Sampled: background of a terminal tab while it connects.
+pub const CONNECTING: u32 = 0x1f3b2f;
+/// Sampled: title and cross of a terminal tab while it connects.
+pub const CONNECTING_TEXT: u32 = 0x3dbd6e;

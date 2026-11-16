@@ -424,8 +424,8 @@ impl Shell {
             .children(footer);
         let confirm = editor.confirm_remove.then(|| self.remove_rule_dialog(id, cx));
         Some(match confirm {
-            Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
-            None => slider.into_any_element(),
+            Some(confirm) => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).child(confirm).into_any_element(),
+            None => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).into_any_element(),
         })
     }
 
@@ -506,6 +506,7 @@ impl Shell {
                     label: host.map(|h| h.display_label()).unwrap_or(""),
                     subtitle: format!("SSH {}", host.map(|h| h.destination()).unwrap_or_default()),
                     os: host.and_then(|h| h.os.as_deref()),
+                    identities: &[],
                 };
                 let actions = LoginActions {
                     answer: |shell: &mut Shell, answer, _, cx| {
@@ -551,6 +552,10 @@ impl Shell {
                         }
                         cx.notify();
                     },
+                    edit_host: None,
+                    verbose: None,
+                    continue_save: None,
+                    ui: None,
                 };
                 let screen = login_view::render(target, login, &self.forward_focus, window, &actions, cx);
                 return Some(div().id("forward-login").absolute().inset_0().occlude().child(screen).into_any_element());

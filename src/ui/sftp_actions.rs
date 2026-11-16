@@ -125,6 +125,7 @@ struct DragPreview(String);
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
+            .font_family(theme::UI_FONT)
             .px_3()
             .py_1()
             .rounded_md()

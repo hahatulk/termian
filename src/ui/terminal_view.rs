@@ -23,6 +23,10 @@ pub struct Connection {
     pub label: String,
     pub os: Option<String>,
     pub target: SshTarget,
+    /// Offered on the Username question.
+    pub identities: Vec<termian_native::login::IdentityChoice>,
+    /// A saved host: «Continue & Save» can keep the typed username in it.
+    pub saved_host: bool,
 }
 
 /// Requests from the tab to the window.
@@ -30,6 +34,10 @@ pub enum TerminalEvent {
     Close,
     /// The session ended (the tab may stay open).
     Ended,
+    /// «Edit host» on the failed connection screen.
+    EditHost,
+    /// «Continue & Save»: the typed username goes into the saved host.
+    SaveUsername(String),
     /// «Detect OS» found the host's system.
     Os(String),
     /// A serial port opened (its label); the window records the session.
@@ -38,6 +46,8 @@ pub enum TerminalEvent {
     Input(Vec<u8>),
     /// Shell integration saw a command finish.
     Command(String),
+    /// Existing shell history extracted outside the terminal stream.
+    History(Vec<String>),
 }
 
 /// Shell integration of one session: installed once the output is quiet,
@@ -122,6 +132,11 @@ type Faces = ((SharedString, f32), (SharedString, f32));
 const FALLBACK_FONT: &str = "Menlo";
 
 impl TerminalView {
+    /// The login screen is up and has not failed: the tab is shown green.
+    pub fn is_connecting(&self) -> bool {
+        self.login.as_ref().is_some_and(|login| login.error.is_none())
+    }
+
     /// A local shell; it gets the shell integration once it is quiet.
     pub fn new(session: Session, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut view = Self::build(session, None, settings, window, cx);
@@ -190,6 +205,9 @@ impl TerminalView {
         }
         self.terminal.apply(settings);
         self.settings = settings.clone();
+        if let Some(connection) = self.connection.as_mut() {
+            connection.target.options.import_history = settings.shell_history_import;
+        }
         cx.notify();
     }
 
@@ -376,6 +394,11 @@ impl TerminalView {
                 self.terminal.feed(format!("\r\n\x1b[33m[{reason}. Reconnecting…]\x1b[0m\r\n").as_bytes());
                 self.reconnect = Some(session::Backoff::default());
                 self.schedule_reconnect(window, cx);
+            }
+            SessionEvent::History(commands) => {
+                if self.settings.shell_history_import && !self.closed {
+                    cx.emit(TerminalEvent::History(commands));
+                }
             }
             SessionEvent::Os(os) => {
                 if let Some(connection) = self.connection.as_mut() {
@@ -661,7 +684,9 @@ impl TerminalView {
         if let Some(log) = &self.log {
             log.append(ENTER_ALT);
         }
-        let line = termian_native::shell_integration::install_line();
+        // A local shell has drawn only its prompt: the line clears the screen
+        // so that prompt is not shown twice.
+        let line = termian_native::shell_integration::install_line(self.connection.is_none());
         self.session.write(&paste_bytes(line.trim_end_matches('\r'), self.terminal.bracketed_paste()));
         self.session.write(b"\r");
         if let Some(script) = self.startup.take() {
@@ -890,6 +915,35 @@ impl TerminalView {
         cx.emit(TerminalEvent::Close);
     }
 
+    fn login_continue_save(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(username) = self.login.as_ref().map(|l| l.input.trim().to_owned()).filter(|u| !u.is_empty()) {
+            cx.emit(TerminalEvent::SaveUsername(username));
+        }
+        self.login_submit(window, cx);
+    }
+
+    fn login_ui(&mut self, ui: termian_native::login::LoginUi, cx: &mut Context<Self>) {
+        if let Some(login) = self.login.as_mut() {
+            login.apply_ui(ui);
+        }
+        cx.notify();
+    }
+
+    fn login_edit_host(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(TerminalEvent::EditHost);
+    }
+
+    /// «Verbose (-v)»: starts over with `debug1:` lines and the log open.
+    fn login_verbose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(connection) = self.connection.as_mut() {
+            connection.target.options.verbose = true;
+        }
+        if let Some(login) = self.login.as_mut() {
+            login.show_logs = true;
+        }
+        self.login_retry(window, cx);
+    }
+
     fn login_retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.clone() else { return };
         self.reconnect = None;
@@ -954,6 +1008,7 @@ impl Render for TerminalView {
                 label: &connection.label,
                 subtitle: format!("SSH {}:{}", connection.target.host, connection.target.port),
                 os: connection.os.as_deref(),
+                identities: &connection.identities,
             };
             let actions = LoginActions {
                 answer: Self::login_answer,
@@ -962,6 +1017,10 @@ impl Render for TerminalView {
                 toggle_logs: Self::login_toggle_logs,
                 key: Self::login_key,
                 submit: Self::login_submit,
+                edit_host: Some(Self::login_edit_host),
+                verbose: Some(Self::login_verbose),
+                continue_save: connection.saved_host.then_some(Self::login_continue_save as fn(&mut Self, &mut Window, &mut Context<Self>)),
+                ui: Some(Self::login_ui),
             };
             return login_view::render(target, login, &self.login_focus, window, &actions, cx).into_any_element();
         }

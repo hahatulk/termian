@@ -10,7 +10,7 @@ use termian_native::autocomplete::Candidates;
 use termian_native::session::SshTarget;
 use termian_native::vault::HostId;
 use termian_native::split_tree::{Direction, Layout, Position, SplitTree};
-use termian_native::tabs::TabId;
+use termian_native::tabs::{TabId, TabKind};
 use termian_native::theme;
 
 use super::terminal_view::{TerminalEvent, TerminalView, TOP_INSET};
@@ -167,6 +167,35 @@ impl Shell {
                     view.update(cx, |view, _| view.set_log(log));
                 }
                 TerminalEvent::Os(os) => shell.host_os_detected(history, os),
+                TerminalEvent::SaveUsername(username) => {
+                    let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
+                        Origin::Host(host) => Some(host),
+                        _ => None,
+                    });
+                    if let Some(host) = host.and_then(|id| shell.vault.hosts.iter_mut().find(|h| h.id == id)) {
+                        host.username = Some(username.clone());
+                        shell.save_vault();
+                    }
+                }
+                TerminalEvent::EditHost => {
+                    let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
+                        Origin::Host(host) => Some(host),
+                        _ => None,
+                    });
+                    // As in legacy: back to Vaults with the host's editor open.
+                    if let (Some(host), Some(main)) = (host, shell.main_window) {
+                        cx.defer(move |cx| {
+                            let _ = main.update(cx, |shell, window, cx| {
+                                if let Some(vaults) = shell.tabs.all().iter().find(|t| t.kind == TabKind::Vaults).map(|t| t.id) {
+                                    shell.tabs.activate(vaults);
+                                }
+                                shell.section = super::hosts::Section::Hosts;
+                                shell.edit_host(host, window, cx);
+                                cx.notify();
+                            });
+                        });
+                    }
+                }
                 TerminalEvent::Input(bytes) => shell.broadcast_input(tab, pane, bytes, cx),
                 TerminalEvent::Command(command) => {
                     let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
@@ -175,6 +204,16 @@ impl Shell {
                     });
                     shell.vault.record_command(command, host, crate::now());
                     shell.save_vault();
+                }
+                TerminalEvent::History(commands) => {
+                    let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
+                        Origin::Host(host) => Some(host),
+                        _ => None,
+                    });
+                    if shell.vault.merge_shell_history(commands, host) {
+                        shell.save_vault();
+                        cx.notify();
+                    }
                 }
                 TerminalEvent::Ended | TerminalEvent::Close => {
                     if shell.session_ended(history) {
@@ -223,7 +262,12 @@ impl Shell {
                 self.session_ended(pane.history);
             }
         }
+        let was_active = self.tabs.active().id == tab;
         self.tabs.close(tab);
+        // Back on Vaults after a disconnect, the Hosts list is shown.
+        if was_active && self.tabs.active().kind == TabKind::Vaults {
+            self.section = super::hosts::Section::Hosts;
+        }
     }
 
     /// Opens a pane's connection again: in a new tab (Duplicate) or beside

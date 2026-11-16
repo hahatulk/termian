@@ -6782,6 +6782,7 @@ dependencies = [
  "minisign-verify",
  "objc",
  "portable-pty",
+ "rand 0.10.3",
  "raw-window-handle",
  "regex",
  "rusqlite",

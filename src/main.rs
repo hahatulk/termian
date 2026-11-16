@@ -184,6 +184,17 @@ impl Shell {
                 let _ = store.save(&vault);
             }
         }
+        if !demo && store.is_some() && vault.secrets_missing {
+            // Imported before legacy passwords and keys were read; a locked
+            // keychain is tried again at the next start.
+            match load_legacy_vault() {
+                Ok(legacy) => vault.import_legacy_secrets(&legacy),
+                Err(error) => eprintln!("[Termian] Legacy passwords and keys were not imported: {error}"),
+            }
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
         if !demo && store.is_some() && !vault.legacy_history_imported {
             import_legacy_history(&mut vault, &logs_dir);
             if let Some(store) = &store {
@@ -244,6 +255,9 @@ impl Shell {
     fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = tab.id;
         let active = id == self.tabs.active().id;
+        // Legacy paints a tab green while its connection is being set up.
+        let connecting = self.focused_view(id).is_some_and(|view| view.read(cx).is_connecting());
+        let tab_text = if connecting { theme::CONNECTING_TEXT } else { theme::TEXT };
         let icon_name = match tab.kind {
             TabKind::Vaults => "keychain",
             TabKind::Sftp => "sftp",
@@ -253,7 +267,7 @@ impl Shell {
         let leading = if tab.closable() {
             div()
                 .id(SharedString::from(format!("close-{id:?}")))
-                .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(theme::TEXT)))
+                .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(tab_text)))
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     cx.stop_propagation();
                     shell.close_terminal_tab(id);
@@ -272,8 +286,8 @@ impl Shell {
             .gap_2()
             .rounded_md()
             .text_sm()
-            .text_color(rgb(theme::TEXT))
-            .bg(rgb(if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
+            .text_color(rgb(tab_text))
+            .bg(rgb(if connecting { theme::CONNECTING } else if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
                 if let Some(view) = shell.focused_view(id) {
@@ -358,7 +372,8 @@ impl Shell {
             Some(host) => ui::workspace::Origin::Host(host),
             None => ui::workspace::Origin::Ssh { label: label.clone(), os: os.clone(), target: Box::new(target.clone()) },
         };
-        let connection = Connection { label: label.clone(), os, target };
+        let identities = termian_native::login::IdentityChoice::all(&self.vault);
+        let connection = Connection { label: label.clone(), os, target, identities, saved_host: host.is_some() };
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::ssh(connection, &settings, window, cx).with_log(log).with_startup(startup));
         self.add_terminal(label, view, Some(history), origin, cx);
@@ -430,7 +445,7 @@ impl Shell {
 
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = &self.vault.terminal;
-        match session::local_shell(terminal.local_shell.as_deref(), terminal.emulation(), 80, 24) {
+        match session::local_shell(terminal.local_shell.as_deref(), terminal.emulation(), 80, 24, terminal.shell_history_import) {
             Ok(session) => self.open_terminal("Local".into(), session, window, cx),
             Err(error) => self.vault_error = Some(format!("Could not start a local shell: {error}")),
         }
@@ -456,6 +471,8 @@ impl Render for Shell {
             .relative()
             .flex()
             .flex_col()
+            .font_family(theme::UI_FONT)
+            .text_size(px(14.))
             .bg(rgb(theme::BACKGROUND))
             .child(
                 div()
@@ -503,6 +520,14 @@ impl Render for Shell {
 
 fn main() {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
+        let fonts = [
+            include_bytes!("../assets/fonts/CircularXX-Book.ttf").as_slice(),
+            include_bytes!("../assets/fonts/CircularXX-Medium.ttf").as_slice(),
+            include_bytes!("../assets/fonts/CircularXX-Bold.ttf").as_slice(),
+        ];
+        if let Err(error) = cx.text_system().add_fonts(fonts.into_iter().map(std::borrow::Cow::Borrowed).collect()) {
+            eprintln!("[Termian] Interface font could not be loaded: {error}");
+        }
         let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
         let main = cx.open_window(
             WindowOptions {

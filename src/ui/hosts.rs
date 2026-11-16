@@ -146,7 +146,7 @@ impl Shell {
                     .text_color(rgb(theme::TEXT))
                     .when(active, |s| s.bg(rgb(theme::SURFACE_ACTIVE)))
                     .hover(|s| s.bg(rgb(theme::SURFACE)))
-                    .child(glyph(icon_name, 16., theme::TEXT))
+                    .child(glyph(icon_name, 14., theme::TEXT))
                     .child(label)
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.section = section;

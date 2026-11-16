@@ -30,6 +30,8 @@ pub enum SessionEvent {
     Closed(Option<String>),
     /// «Detect OS» found the host's system (`debian`, `ubuntu`, ...).
     Os(String),
+    /// Existing shell history, oldest first; never terminal output.
+    History(Vec<String>),
 }
 
 enum Input {
@@ -88,7 +90,7 @@ pub fn replay(data: Vec<u8>) -> Session {
 
 /// Starts the user's login shell, or `shell` («Local Terminal Path»), with
 /// `term` as `TERM`.
-pub fn local_shell(shell: Option<&str>, term: &str, columns: u16, rows: u16) -> Result<Session, String> {
+pub fn local_shell(shell: Option<&str>, term: &str, columns: u16, rows: u16, import_history: bool) -> Result<Session, String> {
     let mut command = match shell.filter(|s| !s.trim().is_empty()) {
         Some(shell) => {
             let mut command = portable_pty::CommandBuilder::new(shell.trim());
@@ -103,10 +105,18 @@ pub fn local_shell(shell: Option<&str>, term: &str, columns: u16, rows: u16) -> 
         None => portable_pty::CommandBuilder::new_default_prog(),
     };
     command.env("TERM", term);
-    local_command(command, columns, rows)
+    #[cfg(unix)]
+    let history_shell = import_history.then(|| shell.filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_owned()).unwrap_or_else(|| command.get_shell()));
+    #[cfg(not(unix))]
+    let history_shell = { let _ = import_history; None };
+    local_command_with_history(command, columns, rows, history_shell)
 }
 
 pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: u16) -> Result<Session, String> {
+    local_command_with_history(command, columns, rows, None)
+}
+
+fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u16, rows: u16, history_shell: Option<String>) -> Result<Session, String> {
     use portable_pty::{native_pty_system, PtySize};
     let size = |cols: u16, rows: u16| PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
     let pair = native_pty_system().openpty(size(columns, rows)).map_err(|e| e.to_string())?;
@@ -119,6 +129,14 @@ pub fn local_command(command: portable_pty::CommandBuilder, columns: u16, rows: 
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let mut writer = pair.master.take_writer().map_err(|e| e.to_string())?;
     let (_, input_rx, events_tx, session) = channels();
+    if let Some(path) = history_shell {
+        let events = events_tx.clone();
+        std::thread::spawn(move || {
+            if let Some(commands) = crate::shell_history::local(&path) {
+                let _ = events.unbounded_send(SessionEvent::History(commands));
+            }
+        });
+    }
 
     std::thread::spawn(move || {
         let mut buffer = [0u8; 8192];
@@ -292,18 +310,22 @@ pub struct SshOptions {
     pub pqc_kex: bool,
     /// «Detect OS»: find the system of a saved host that has none yet.
     pub detect_os: bool,
+    /// «Import shell history»: read existing bash/zsh/fish history after login.
+    pub import_history: bool,
+    /// «Verbose (-v)» on the failed connection screen: `debug1:` lines in the log.
+    pub verbose: bool,
 }
 
 impl Default for SshOptions {
     fn default() -> Self {
-        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true, detect_os: false }
+        Self { term: "xterm-256color".into(), keepalive: 0, pqc_kex: true, detect_os: false, import_history: false, verbose: false }
     }
 }
 
 impl SshOptions {
     pub fn from_vault(vault: &crate::vault::Vault) -> Self {
         let terminal = &vault.terminal;
-        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false }
+        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false }
     }
 
     /// Key exchanges to offer: russh's order, without the hybrid
@@ -398,6 +420,11 @@ pub(crate) trait Prompter: Send {
     fn ask<'a>(&'a mut self, prompt: &'a str, echo: bool) -> BoxFuture<'a, Option<String>>;
     fn host_key(&mut self, info: HostKeyInfo) -> BoxFuture<'_, HostKeyDecision>;
 
+    /// Credentials of an identity picked on the Username question, once.
+    fn take_identity(&mut self) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
+        None
+    }
+
     fn log(&mut self, line: String) {
         self.event(LoginEvent::Log(line));
     }
@@ -409,6 +436,8 @@ pub(crate) type SharedPrompter = Arc<Mutex<dyn Prompter>>;
 pub(crate) struct EventPrompter<F: FnMut(LoginEvent) + Send> {
     pub emit: F,
     pub answers: UnboundedReceiver<Answer>,
+    /// Password and key of an identity picked for the username.
+    pub picked: Option<(Option<String>, Option<(String, Option<String>)>)>,
 }
 
 impl<F: FnMut(LoginEvent) + Send> Prompter for EventPrompter<F> {
@@ -421,9 +450,17 @@ impl<F: FnMut(LoginEvent) + Send> Prompter for EventPrompter<F> {
             (self.emit)(LoginEvent::Prompt { text: prompt.trim().to_owned(), echo });
             match self.answers.next().await {
                 Some(Answer::Text(text)) => text,
+                Some(Answer::Identity { username, password, key }) => {
+                    self.picked = Some((password, key));
+                    Some(username)
+                }
                 _ => None,
             }
         })
+    }
+
+    fn take_identity(&mut self) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
+        self.picked.take()
     }
 
     fn host_key(&mut self, info: HostKeyInfo) -> BoxFuture<'_, HostKeyDecision> {
@@ -568,6 +605,7 @@ async fn run_ssh(
             let _ = emit_events.unbounded_send(SessionEvent::Login(event));
         },
         answers,
+        picked: None,
     }));
     let server_id = Arc::<std::sync::Mutex<Option<String>>>::default();
     let handle = Arc::new(open(&target, prompter.clone(), None, server_id.clone()).await?);
@@ -585,7 +623,16 @@ async fn run_ssh(
             }
         });
     }
+    let history = target.options.import_history.then(|| {
+        let (handle, events) = (handle.clone(), events.clone());
+        tokio::spawn(async move {
+            if let Some(commands) = read_shell_history(&handle).await {
+                let _ = events.unbounded_send(SessionEvent::History(commands));
+            }
+        })
+    });
     let result = pump(channel, shell_input, events).await;
+    if let Some(history) = history { history.abort(); }
     drop(handle);
     result
 }
@@ -664,22 +711,38 @@ fn detect_script(shell: &str) -> &'static str {
     }
 }
 
-/// Runs `command` on its own channel and returns what it printed.
+/// Runs `command` on its own channel. Failed, oversized or timed-out replies
+/// are discarded, not forwarded into the terminal or session log.
 async fn exec(handle: &Handle<Verifier>, command: &str) -> Option<String> {
-    let mut channel = handle.channel_open_session().await.ok()?;
-    channel.exec(true, command).await.ok()?;
-    let mut output = Vec::new();
-    let collect = async {
+    let deadline = tokio::time::Instant::now() + crate::shell_history::TIMEOUT;
+    let mut channel = tokio::time::timeout_at(deadline, handle.channel_open_session()).await.ok()?.ok()?;
+    let result = tokio::time::timeout_at(deadline, async {
+        channel.exec(true, command).await.ok()?;
+        let mut output = Vec::new();
+        let mut success = false;
         while let Some(message) = channel.wait().await {
             match message {
-                ChannelMsg::Data { data } => output.extend_from_slice(&data),
-                ChannelMsg::Eof | ChannelMsg::Close => break,
+                ChannelMsg::Data { data } => {
+                    if output.len() + data.len() > crate::shell_history::MAX_OUTPUT { return None; }
+                    output.extend_from_slice(&data);
+                }
+                ChannelMsg::ExitStatus { exit_status } => success = exit_status == 0,
+                ChannelMsg::ExitSignal { .. } => return None,
+                ChannelMsg::Close => break,
                 _ => {}
             }
         }
-    };
-    tokio::time::timeout(Duration::from_secs(10), collect).await.ok()?;
-    Some(String::from_utf8_lossy(&output).into_owned())
+        success.then(|| String::from_utf8(output).ok()).flatten()
+    }).await.ok().flatten();
+    let _ = tokio::time::timeout(Duration::from_secs(1), channel.close()).await;
+    result
+}
+
+async fn read_shell_history(handle: &Handle<Verifier>) -> Option<Vec<String>> {
+    let path = exec(handle, "echo $SHELL").await?;
+    let shell = crate::shell_history::Shell::from_path(&path)?;
+    let command = shell.remote_command(&path)?;
+    Some(shell.parse(&exec(handle, &command).await?))
 }
 
 /// Legacy `getOS`: the version line first, then the script for the login shell.
@@ -712,6 +775,11 @@ async fn open(
         let mut io = io.lock().await;
         io.event(LoginEvent::Stage(Stage::Connecting));
         io.log(format!("Connecting to {address}"));
+        if target.options.verbose {
+            io.log(format!("debug1: Connecting to host {} port {} using russh", target.host, target.port));
+            io.log(format!("debug1: Post-quantum key exchange {}", if target.options.pqc_kex { "offered first" } else { "off" }));
+            io.log(format!("debug1: Identity files: {}", target.identity_files.len() + usize::from(target.key.is_some())));
+        }
     }
     let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((target.host.as_str(), target.port)))
         .await
@@ -719,6 +787,9 @@ async fn open(
         .map_err(|error| format!("ssh: connect to host {address}: {error}"))?;
     let _ = stream.set_nodelay(true);
     io.lock().await.log("TCP connection established".into());
+    if target.options.verbose {
+        io.lock().await.log(format!("debug1: Connection established to {address}, starting the SSH handshake"));
+    }
 
     let config = target.options.config();
     let verifier = Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to, server_id };
@@ -736,7 +807,9 @@ async fn open(
         io.event(LoginEvent::Stage(Stage::Authenticating));
         io.log(format!("Authenticating as '{username}'"));
     }
-    authenticate(&mut handle, &username, target, &io).await?;
+    // An identity picked for the username brings its own credentials.
+    let picked = io.lock().await.take_identity().map(|(password, key)| SshTarget { password, key, ..target.clone() });
+    authenticate(&mut handle, &username, picked.as_ref().unwrap_or(target), &io).await?;
     io.lock().await.log("Authentication succeeded".into());
     Ok(handle)
 }
@@ -942,6 +1015,7 @@ pub(crate) mod tests {
                             break;
                         }
                     }
+                    Some(SessionEvent::History(_)) => {}
                     None => continue,
                 }
             }
@@ -1203,6 +1277,7 @@ pub(crate) mod tests {
             async fn exec_request(&mut self, channel: ChannelId, data: &[u8], session: &mut ServerSession) -> Result<(), Self::Error> {
                 let reply: &[u8] = match data {
                     b"echo $SHELL" => b"/bin/bash\n",
+                    script if script.starts_with(b"env BASH_ENV=/dev/null '/bin/bash' ") => b"__TERMIAN_HISTORY_BEGIN__\n  1 __TERMIAN_HISTORY__ fixture-history-command\n__TERMIAN_HISTORY_END__\n",
                     script if script.starts_with(b"HISTFILE=;") => b"PRETTY_NAME=\"Ubuntu 24.04 LTS\" NAME=\"Ubuntu\" VERSION_ID=\"24.04\"\n",
                     _ => b"",
                 };
@@ -1322,12 +1397,79 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_shell_imports_fixture_history_only_when_enabled_without_executing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().to_str().unwrap().replace('\'', "'\\''");
+            let path = dir.path().join("bash");
+            std::fs::write(&path, format!("#!/bin/sh\nexport HOME='{home}'\nif [ \"$1\" = -l ]; then\n  printf 'fixture-prompt\\n'\n  while IFS= read -r line; do printf 'echo:%s\\n' \"$line\"; done\nelse\n  touch \"$HOME/import-read\"\n  exec /bin/bash \"$@\"\nfi\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let script = format!("touch '{home}/must-not-exist'");
+            let history = dir.path().join(".bash_history");
+            std::fs::write(&history, format!("{script}\n")).unwrap();
+            let mut session = local_shell(path.to_str(), "xterm", 80, 24, enabled).unwrap();
+            let mut commands = Vec::new();
+            let mut output = String::new();
+            futures::executor::block_on(async {
+                for _ in 0..20 {
+                    match tokio_timeout(session.events.as_mut().unwrap()).await {
+                        Some(SessionEvent::History(batch)) => commands = batch,
+                        Some(SessionEvent::Output(bytes)) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                        _ => {}
+                    }
+                    if enabled && !commands.is_empty() && output.contains("fixture-prompt") { break; }
+                }
+            });
+            assert!(output.contains("fixture-prompt"));
+            assert!(!output.contains("must-not-exist"));
+            assert_eq!(commands, if enabled { vec![script.clone()] } else { vec![] });
+            assert_eq!(dir.path().join("import-read").exists(), enabled);
+            assert!(!dir.path().join("must-not-exist").exists());
+            assert_eq!(std::fs::read_to_string(history).unwrap(), format!("{script}\n"));
+            session.write(b"still-alive\n");
+            assert!(collect_until(&mut session, "echo:still-alive").contains("echo:still-alive"));
+        }
+    }
+
+    #[test]
+    fn ssh_imports_history_separately_from_terminal_output_only_when_enabled() {
+        for enabled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut target = target(server::start(), dir.path().join("known_hosts"));
+            target.password = Some(server::PASSWORD.into());
+            target.options.import_history = enabled;
+            let mut session = ssh(target, 80, 24);
+            collect_until(&mut session, "<hostkey");
+            session.answer(Answer::HostKey(HostKeyDecision::Once));
+            let mut output = String::new();
+            let mut commands = Vec::new();
+            futures::executor::block_on(async {
+                for _ in 0..20 {
+                    match tokio_timeout(session.events.as_mut().unwrap()).await {
+                        Some(SessionEvent::History(batch)) => commands = batch,
+                        Some(SessionEvent::Output(bytes)) => output.push_str(&String::from_utf8_lossy(&bytes)),
+                        _ => {}
+                    }
+                    if enabled && !commands.is_empty() && output.contains("welcome") { break; }
+                }
+            });
+            assert!(output.contains("welcome"));
+            assert!(!output.contains("fixture-history-command"));
+            assert_eq!(commands, if enabled { vec!["fixture-history-command".to_owned()] } else { vec![] });
+            session.write(b"still-alive");
+            assert!(collect_until(&mut session, "echo:still-alive").contains("echo:still-alive"));
+        }
+    }
+
     #[test]
     fn terminal_settings_reach_the_connection() {
         let dir = tempfile::tempdir().unwrap();
         let mut target = target(server::start(), dir.path().join("known_hosts"));
         target.password = Some(server::PASSWORD.into());
-        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false, detect_os: false };
+        target.options = SshOptions { term: "xterm-16color".into(), keepalive: 5, pqc_kex: false, detect_os: false, import_history: false, verbose: false };
         assert!(!target.options.kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert!(SshOptions::default().kex().contains(&russh::kex::MLKEM768X25519_SHA256));
         assert_eq!(target.options.config().keepalive_interval, Some(Duration::from_secs(5)));
@@ -1353,6 +1495,20 @@ pub(crate) mod tests {
         assert_eq!(detect_script("/usr/bin/fish"), DETECT_OS_FISH_SCRIPT);
         assert_eq!(detect_script("/bin/bash"), DETECT_OS_SCRIPT);
         assert_eq!(detect_script("bad command \"echo\""), DETECT_ROUTEROS_SCRIPT);
+    }
+
+    #[test]
+    fn an_identity_picked_for_the_username_supplies_its_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.username = None;
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        collect_until(&mut session, "<prompt Username");
+        session.answer(Answer::Identity { username: "root".into(), password: Some(server::PASSWORD.into()), key: None });
+        let output = collect_until(&mut session, "welcome");
+        assert!(!output.contains("<prompt"), "no password question after picking an identity: {output:?}");
     }
 
     #[test]
@@ -1424,6 +1580,28 @@ pub(crate) mod tests {
         assert!(output.contains("<prompt Passphrase for the Keychain key"), "{output:?}");
         session.answer(Answer::Text(Some(crate::keys::tests::PASSPHRASE.into())));
         assert!(collect_until(&mut session, "echo=false>").contains("password"));
+    }
+
+    #[test]
+    fn generated_encrypted_key_prompts_only_when_passphrase_was_not_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = crate::keys::generate(crate::keys::KeyAlgorithm::Ed25519, "generated passphrase").unwrap();
+        for saved in [false, true] {
+            let mut target = target_for(server::start(), dir.path().join(format!("known-{saved}")));
+            target.key = Some((key.private_key.clone(), saved.then(|| "generated passphrase".into())));
+            target.password = Some(server::PASSWORD.into());
+            let mut session = ssh(target, 80, 24);
+            collect_until(&mut session, "<hostkey");
+            session.answer(Answer::HostKey(HostKeyDecision::Once));
+            if !saved {
+                let output = collect_until(&mut session, "echo=false>");
+                assert!(output.contains("<prompt Passphrase for the Keychain key"), "{output:?}");
+                session.answer(Answer::Text(Some("generated passphrase".into())));
+            }
+            let output = collect_until(&mut session, "welcome");
+            assert!(!output.contains("generated passphrase"), "passphrase must not leak");
+            if saved { assert!(!output.contains("<prompt"), "{output:?}"); }
+        }
     }
 
     #[test]

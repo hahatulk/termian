@@ -14,7 +14,7 @@ use crate::vault::Vault;
 
 /// Legacy-profile data has no passwords or keys; sending it would erase them in the cloud.
 pub const SECRETS_MISSING: &str =
-    "Данные прочитаны из профиля старого клиента без паролей и ключей. Сначала нажмите «Получить», чтобы взять данные из облака.";
+    "Не все пароли и ключи из профиля старого клиента удалось прочитать. Сначала нажмите «Получить», чтобы взять данные из облака.";
 pub const NOT_CONFIGURED: &str = "Сначала настройте своё облако";
 const BACKUPS_KEPT: usize = 10;
 

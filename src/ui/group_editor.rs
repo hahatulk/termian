@@ -264,8 +264,8 @@ impl Shell {
             .child(div().flex_1().p(px(15.)).flex().flex_col().gap(px(15.)).child(general))
             .children(menu);
         Some(match confirm {
-            Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
-            None => slider.into_any_element(),
+            Some(confirm) => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).child(confirm).into_any_element(),
+            None => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).into_any_element(),
         })
     }
 

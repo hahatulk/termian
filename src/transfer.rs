@@ -3,6 +3,7 @@
 //! settled first ([`Resolver`]), then each item is copied as one transfer
 //! that reports [`Progress`] and waits for a [`Control`] when a file fails.
 
+use std::io::SeekFrom;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,8 @@ use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use russh_sftp::client::fs::Metadata;
 use russh_sftp::client::SftpSession;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use russh_sftp::protocol::OpenFlags;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
 use crate::files::{format_size, join, list_local, Entry};
 
@@ -245,8 +247,12 @@ pub(crate) enum Fs {
     Remote(Arc<SftpSession>),
 }
 
-type Reader = Box<dyn AsyncRead + Unpin + Send>;
-type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+trait ReadSeek: AsyncRead + AsyncSeek + Unpin + Send {}
+impl<T: AsyncRead + AsyncSeek + Unpin + Send> ReadSeek for T {}
+trait WriteSeek: AsyncWrite + AsyncSeek + Unpin + Send {}
+impl<T: AsyncWrite + AsyncSeek + Unpin + Send> WriteSeek for T {}
+type Reader = Box<dyn ReadSeek>;
+type Writer = Box<dyn WriteSeek>;
 
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
@@ -310,6 +316,14 @@ impl Fs {
         match self {
             Fs::Local => Ok(Box::new(tokio::fs::File::create(path).await.map_err(|e| at(path, e))?)),
             Fs::Remote(sftp) => Ok(Box::new(sftp.create(path).await.map_err(|e| at(path, e))?)),
+        }
+    }
+
+    /// Opens an existing partial file without truncating it.
+    async fn open_write(&self, path: &str) -> Result<Writer, String> {
+        match self {
+            Fs::Local => Ok(Box::new(tokio::fs::OpenOptions::new().write(true).open(path).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp) => Ok(Box::new(sftp.open_with_flags(path, OpenFlags::WRITE).await.map_err(|e| at(path, e))?)),
         }
     }
 
@@ -435,6 +449,30 @@ async fn scan(fs: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part>, String> {
     Ok(parts)
 }
 
+/// Do not append to a partial that no longer matches the source.
+async fn resume_offset(source: &Fs, target: &Fs, from: &str, to: &str, expected: u64) -> Result<u64, String> {
+    let source_size = source.size(from).await?.0;
+    let offset = target.size(to).await?.0;
+    if source_size != expected || offset > source_size {
+        return Err(format!("{to}: source or partial file size changed"));
+    }
+    let mut original = source.open(from).await?;
+    let mut partial = target.open(to).await?;
+    let mut left = offset;
+    let mut a = vec![0; CHUNK];
+    let mut b = vec![0; CHUNK];
+    while left > 0 {
+        let n = left.min(CHUNK as u64) as usize;
+        original.read_exact(&mut a[..n]).await.map_err(|e| at(from, e))?;
+        partial.read_exact(&mut b[..n]).await.map_err(|e| at(to, e))?;
+        if a[..n] != b[..n] {
+            return Err(format!("{to}: partial file does not match source"));
+        }
+        left -= n as u64;
+    }
+    Ok(offset)
+}
+
 enum Stop {
     Cancelled,
     Error(String),
@@ -468,11 +506,23 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
         matches!(self.controls.try_recv(), Ok(Control::Cancel) | Err(TryRecvError::Closed))
     }
 
-    async fn copy_file(&mut self, from: &str, to: &str, mode: Option<u32>) -> Result<(), Stop> {
+    async fn copy_file(&mut self, from: &str, to: &str, size: u64, mode: Option<u32>, started: &mut bool) -> Result<(), Stop> {
+        let offset = if *started {
+            resume_offset(self.source, self.target, from, to, size).await.map_err(Stop::Error)?
+        } else { 0 };
         let mut reader = self.source.open(from).await.map_err(Stop::Error)?;
-        let mut writer = self.target.create(to).await.map_err(Stop::Error)?;
+        reader.seek(SeekFrom::Start(offset)).await.map_err(|e| Stop::Error(at(from, e)))?;
+        let mut writer = if *started {
+            self.target.open_write(to).await.map_err(Stop::Error)?
+        } else {
+            let writer = self.target.create(to).await.map_err(Stop::Error)?;
+            *started = true;
+            writer
+        };
+        writer.seek(SeekFrom::Start(offset)).await.map_err(|e| Stop::Error(at(to, e)))?;
         let mut buffer = vec![0; CHUNK];
-        let mut copied = 0;
+        let mut copied = offset;
+        self.progress.bytes_done += offset;
         let result = async {
             loop {
                 if self.cancelled() {
@@ -491,7 +541,7 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
         }
         .await;
         if result.is_err() {
-            // A retried file starts over, so its bytes are counted again.
+            // The next attempt will recount the validated partial file.
             self.progress.bytes_done -= copied;
         }
         result?;
@@ -542,8 +592,9 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
     for part in parts {
         let path = |root: &str| if part.relative.is_empty() { root.to_owned() } else { join(root, &part.relative) };
         let (from, to) = (path(&from_root), path(&to_root));
+        let mut started = false;
         loop {
-            let result = if part.is_dir { target.make_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.mode).await };
+            let result = if part.is_dir { target.make_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.size, part.mode, &mut started).await };
             let error = match result {
                 Ok(()) => break,
                 Err(Stop::Cancelled) => return emit(TransferEvent::Cancelled),
@@ -574,6 +625,90 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resume_validates_partial_contents_and_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        tokio::fs::write(&source, b"abcdefgh").await.unwrap();
+        tokio::fs::write(&target, b"abcd").await.unwrap();
+        let (source, target) = (source.to_str().unwrap(), target.to_str().unwrap());
+        assert_eq!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.unwrap(), 4);
+        tokio::fs::write(target, b"abXd").await.unwrap();
+        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+        tokio::fs::write(target, b"abcdefghi").await.unwrap();
+        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+        tokio::fs::write(source, b"changed").await.unwrap();
+        tokio::fs::write(target, b"ch").await.unwrap();
+        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn retry_continues_only_its_own_partial_and_counts_bytes_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source");
+        let target = dir.path().join("target");
+        tokio::fs::write(&source, b"abcdefgh").await.unwrap();
+        tokio::fs::write(&target, b"old contents").await.unwrap();
+        let (source, target) = (source.to_str().unwrap(), target.to_str().unwrap());
+        let (control, mut controls) = futures::channel::mpsc::unbounded();
+        control.unbounded_send(Control::Cancel).unwrap();
+        let now = Instant::now();
+        let mut run = Run { source: &Fs::Local, target: &Fs::Local, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
+        let mut started = false;
+        assert!(matches!(run.copy_file(source, target, 8, None, &mut started).await, Err(Stop::Cancelled)));
+        assert!(started);
+        assert_eq!(tokio::fs::read(target).await.unwrap(), b"");
+        tokio::fs::write(target, b"abcd").await.unwrap();
+        control.unbounded_send(Control::Cancel).unwrap();
+        assert!(matches!(run.copy_file(source, target, 8, None, &mut started).await, Err(Stop::Cancelled)));
+        assert_eq!(run.progress.bytes_done, 0);
+        assert!(run.copy_file(source, target, 8, None, &mut started).await.is_ok());
+        assert_eq!(tokio::fs::read(target).await.unwrap(), b"abcdefgh");
+        assert_eq!(run.progress.bytes_done, 8);
+    }
+
+    #[tokio::test]
+    async fn resumes_upload_and_download_over_sftp() {
+        use crate::login::{Answer, HostKeyDecision};
+        use crate::session::{connect, EventPrompter, SshOptions, SshTarget};
+        use crate::session::tests::server;
+        use tokio::sync::Mutex;
+
+        let (served, local, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let port = server::start_with_sftp(served.path().to_path_buf());
+        let target = SshTarget { host: "127.0.0.1".into(), port, username: Some("root".into()), known_hosts: state.path().join("known_hosts"), identity_files: vec![], password: Some(server::PASSWORD.into()), key: None, options: SshOptions::default() };
+        let (answers, rx) = futures::channel::mpsc::unbounded();
+        answers.unbounded_send(Answer::HostKey(HostKeyDecision::Once)).unwrap();
+        let prompter = Arc::new(Mutex::new(EventPrompter { emit: |_| {}, answers: rx, picked: None }));
+        let handle = connect(&target, prompter).await.unwrap();
+        let channel = handle.channel_open_session().await.unwrap();
+        channel.request_subsystem(true, "sftp").await.unwrap();
+        let remote = Fs::Remote(Arc::new(SftpSession::new(channel.into_stream()).await.unwrap()));
+        let local_fs = Fs::Local;
+        let (control, mut controls) = futures::channel::mpsc::unbounded();
+        let now = Instant::now();
+        for upload in [true, false] {
+            let local_path = local.path().join(if upload { "source" } else { "partial" });
+            let remote_path = if upload { "/partial" } else { "/source" };
+            let served_path = served.path().join(remote_path.trim_start_matches('/'));
+            let (source_path, partial_path) = if upload { (&local_path, &served_path) } else { (&served_path, &local_path) };
+            tokio::fs::write(source_path, b"abcdefgh").await.unwrap();
+            tokio::fs::write(partial_path, b"abcd").await.unwrap();
+            let (source, target, from, to) = if upload {
+                (&local_fs, &remote, local_path.to_str().unwrap(), remote_path)
+            } else {
+                (&remote, &local_fs, remote_path, local_path.to_str().unwrap())
+            };
+            let mut run = Run { source, target, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
+            let mut started = true;
+            assert!(run.copy_file(from, to, 8, None, &mut started).await.is_ok());
+            assert_eq!(tokio::fs::read(partial_path).await.unwrap(), b"abcdefgh");
+            assert_eq!(run.progress.bytes_done, 8);
+        }
+        drop(control);
+    }
 
     fn items(names: &[(&str, bool)]) -> Vec<Item> {
         names.iter().map(|(name, is_dir)| Item { name: (*name).into(), is_dir: *is_dir }).collect()

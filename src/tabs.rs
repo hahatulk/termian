@@ -108,7 +108,10 @@ impl Tabs {
         self.tabs.remove(index);
         if self.active == id {
             // A closable tab always sits after the pinned ones, so index >= 1.
-            self.active = self.tabs[index - 1].id;
+            // As in legacy, the last session closing leads back to Vaults (Hosts),
+            // never to SFTP.
+            let previous = &self.tabs[index - 1];
+            self.active = if previous.closable() { previous.id } else { self.tabs[0].id };
         }
     }
 }
@@ -168,6 +171,17 @@ mod tests {
             tabs.close(id);
         }
         assert_eq!(tabs.all().len(), 2);
+    }
+
+    #[test]
+    fn closing_the_first_session_returns_to_vaults_not_sftp() {
+        let mut tabs = Tabs::default();
+        let first = tabs.open(session("a"));
+        let second = tabs.open(session("b"));
+        tabs.close(second);
+        assert_eq!(tabs.active().id, first, "a session to the left stays next");
+        tabs.close(first);
+        assert_eq!(tabs.active().title(), "Vaults");
     }
 
     #[test]

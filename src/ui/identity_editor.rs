@@ -37,6 +37,7 @@ impl Shell {
                 shell.keychain_menu = None;
                 shell.new_key(window, cx);
             })))
+            .child(menu_row("keychain-menu-generate".into(), "Generate Key", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_generated_key(window, cx))))
             .child(menu_row("keychain-menu-identity".into(), "New Identity", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_identity(window, cx))));
         // Window coordinates; the Vaults content starts below the tab strip, beside the sidebar.
         Some(

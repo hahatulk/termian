@@ -28,6 +28,8 @@ const GROUP: u32 = 0x292d38;
 const UPLOAD_TONE: u32 = 0xf0bc6b;
 const DOWNLOAD_TONE: u32 = 0x6ac9fd;
 const ERROR_TONE: u32 = 0xec706f;
+/// Legacy title-bar badge text (`#131626`).
+const BADGE_TEXT: u32 = 0x131626;
 
 const CONFLICT_ERROR: &str = "Одни и те же записи изменены и на устройстве, и в облаке. Выберите, чью версию оставить.";
 const HELP: &str = "Токен и пароли сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.";
@@ -245,7 +247,7 @@ struct Tooltip(String);
 
 impl Render for Tooltip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().px_2().py_1().rounded_md().bg(rgb(0x000000)).text_xs().text_color(rgb(0xffffff)).child(self.0.clone())
+        div().font_family(theme::UI_FONT).px_2().py_1().rounded_md().bg(rgb(0x000000)).text_xs().text_color(rgb(0xffffff)).child(self.0.clone())
     }
 }
 
@@ -614,8 +616,9 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(9.))
-                .text_color(rgb(0x000000))
+                .text_size(px(10.))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(BADGE_TEXT))
                 .when(count > 0, |d| d.child(if count > 99 { "99+".to_owned() } else { count.to_string() }))
         };
         let anchor = |id: &str, name: &str, title: String| {
@@ -628,14 +631,14 @@ impl Shell {
                 .justify_center()
                 .rounded_md()
                 .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                .child(svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT)))
+                .child(svg().path(icon(name)).size(px(18.)).text_color(rgb(theme::TEXT)))
                 .tooltip(move |_, cx| cx.new(|_| Tooltip(title.clone())).into())
         };
         let (up, up_tone) = header.indicator(true);
         let (down, down_tone) = header.indicator(false);
-        let sync_icon = svg().path(icon("sync")).size(px(16.)).text_color(rgb(theme::TEXT));
+        let sync_icon = svg().path(icon("cloud_sync")).size(px(18.)).text_color(rgb(theme::TEXT));
         vec![
-            anchor("cloud-sync", "sync", header.sync_title(clock))
+            anchor("cloud-sync", "cloud_sync", header.sync_title(clock))
                 .when(header.syncing(), |d| {
                     d.child(
                         div().absolute().inset_0().flex().items_center().justify_center().bg(rgb(theme::TITLE_BAR)).child(sync_icon.with_animation(
@@ -646,15 +649,15 @@ impl Shell {
                     )
                 })
                 .children(header.sync_badge().map(|(mark, tone)| {
-                    div().absolute().top(px(-2.)).right(px(-2.)).size(px(13.)).rounded_full().bg(rgb(tone)).flex().items_center().justify_center().text_size(px(9.)).text_color(rgb(0x000000)).child(mark)
+                    div().absolute().top(px(-2.)).right(px(-2.)).size(px(13.)).rounded_full().bg(rgb(tone)).flex().items_center().justify_center().text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(rgb(BADGE_TEXT)).child(mark)
                 }))
                 .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Sync), window, cx)))
                 .into_any_element(),
-            anchor("cloud-upload", "upload", format!("Отправить изменения — {up} локальных изменений"))
+            anchor("cloud-upload", "cloud_upload", format!("Отправить изменения — {up} локальных изменений"))
                 .child(dot(up, up_tone))
                 .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Upload), window, cx)))
                 .into_any_element(),
-            anchor("cloud-download", "download", format!("Получить изменения — {down} изменений на сервере"))
+            anchor("cloud-download", "cloud_download", format!("Получить изменения — {down} изменений на сервере"))
                 .child(dot(down, down_tone))
                 .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Download), window, cx)))
                 .into_any_element(),

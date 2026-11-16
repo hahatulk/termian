@@ -151,6 +151,7 @@ async fn run(
             let _ = emit_events.unbounded_send(RemoteEvent::Login(event));
         },
         answers,
+        picked: None,
     }));
     let handle = connect(&target, prompter.clone()).await?;
     let channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;

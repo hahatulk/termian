@@ -598,14 +598,11 @@ impl Shell {
                 .child(header)
                 .child(div().id("editor-body").flex_1().overflow_y_scroll().p(px(15.)).flex().flex_col().gap(px(15.)).child(address).child(general).child(ssh))
                 .child(footer)
-                .children(menu)
-                .into_any_element(),
+                .children(menu),
         )
-        .map(|slider| match confirm {
-            // The confirmation covers the whole window, above the slider.
-            Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
-            None => slider,
-        })
+        // The confirmation covers the whole window, above the slider; one
+        // wrapper either way so opening it does not replay the slide.
+        .map(|slider| div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).children(confirm).into_any_element())
     }
 
     /// "Identity": credentials saved in the Keychain, or the host's own.

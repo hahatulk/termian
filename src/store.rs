@@ -117,6 +117,25 @@ mod tests {
     }
 
     #[test]
+    fn saved_log_comments_stay_in_the_encrypted_device_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let mut vault = Vault::default();
+        let id = vault.record_connection(crate::vault::HistoryEntry {
+            log: Some(crate::vault::LogRef { name: "local-log".into(), key: "k".into() }),
+            ..Default::default()
+        });
+        vault.save_log_comment(id, "private-comment-не-публиковать");
+        store.save(&vault).unwrap();
+        let loaded = store.load().unwrap().unwrap();
+        assert_eq!(loaded.logs(true)[0].comment, "private-comment-не-публиковать");
+        assert!(loaded.logs(true)[0].saved);
+        let raw = std::fs::read(store.path()).unwrap();
+        assert!(!raw.windows(b"private-comment".len()).any(|w| w == b"private-comment"));
+        assert!(!crate::portable::export(&loaded, "2026-11-14").to_string().contains("private-comment"), "comments are not part of the sync snapshot");
+    }
+
+    #[test]
     fn a_wrong_key_or_damage_is_an_error_not_an_empty_vault() {
         let dir = tempfile::tempdir().unwrap();
         store(dir.path()).save(&Vault::default()).unwrap();

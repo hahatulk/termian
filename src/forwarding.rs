@@ -82,6 +82,7 @@ async fn run(target: SshTarget, spec: Spec, answers: UnboundedReceiver<Answer>, 
             let _ = emit.unbounded_send(ForwardEvent::Login(event));
         },
         answers,
+        picked: None,
     }));
     let forward_to = (spec.kind == RuleKind::Remote).then(|| (spec.destination.clone(), spec.destination_port));
     let handle = Arc::new(connect_forwarding(&target, prompter.clone(), forward_to).await?);
