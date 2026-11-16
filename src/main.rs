@@ -155,6 +155,19 @@ fn import_legacy_shell_history(vault: &mut Vault) {
     }
 }
 
+/// Saved marks and comments for connections imported before they were read,
+/// once; a locked keychain is tried again at the next start.
+fn import_legacy_bookmarks(vault: &mut Vault) {
+    let Some(dir) = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB").map(std::path::PathBuf::from).or_else(profile::default_indexeddb_dir) else {
+        vault.legacy_bookmarks_imported = true;
+        return;
+    };
+    match profile::read_local_key().and_then(|key| FieldCipher::from_local_key(&key)).and_then(|cipher| profile::load_history(&dir, &cipher)) {
+        Ok(history) => vault.import_legacy_bookmarks(&history),
+        Err(error) => eprintln!("[Termian] Legacy Saved logs were not imported: {error}"),
+    }
+}
+
 /// Workspace templates from the legacy profile, once; a locked keychain is tried again at the next start.
 fn import_legacy_templates(vault: &mut Vault) {
     let Some(dir) = std::env::var_os("TERMIAN_LEGACY_INDEXEDDB").map(std::path::PathBuf::from).or_else(profile::default_indexeddb_dir) else {
@@ -217,6 +230,12 @@ impl Shell {
         }
         if !demo && store.is_some() && !vault.legacy_history_imported {
             import_legacy_history(&mut vault, &logs_dir);
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
+        if !demo && store.is_some() && vault.legacy_history_imported && !vault.legacy_bookmarks_imported {
+            import_legacy_bookmarks(&mut vault);
             if let Some(store) = &store {
                 let _ = store.save(&vault);
             }

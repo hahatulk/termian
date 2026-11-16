@@ -337,6 +337,9 @@ pub struct Vault {
     pub legacy_shell_history_imported: bool,
     #[serde(default)]
     pub legacy_templates_imported: bool,
+    /// Saved marks and comments were read for history imported before they were.
+    #[serde(default)]
+    pub legacy_bookmarks_imported: bool,
     /// Settings → Shortcuts; device-local like legacy.
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,
@@ -424,6 +427,20 @@ impl Vault {
             }
         }
         self.secrets_missing = legacy.secrets_missing;
+    }
+
+    /// Legacy Saved marks and comments for connections imported before they
+    /// were read: matched by start time and name; a comment written here is kept.
+    pub fn import_legacy_bookmarks(&mut self, legacy: &[HistoryEntry]) {
+        self.legacy_bookmarks_imported = true;
+        for from in legacy.iter().filter(|e| e.saved) {
+            if let Some(entry) = self.history.iter_mut().find(|e| e.connected_at == from.connected_at && e.label == from.label) {
+                entry.saved = true;
+                if entry.comment.is_empty() {
+                    entry.comment = from.comment.clone();
+                }
+            }
+        }
     }
 
     /// Adds connections read from the legacy profile, once: the same start
@@ -792,6 +809,21 @@ impl Vault {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_bookmarks_mark_connections_imported_earlier() {
+        let entry = |id, at, label: &str| HistoryEntry { id, connected_at: at, label: label.into(), ..HistoryEntry::default() };
+        let mut v = Vault { history: vec![entry(1, 100, "a"), HistoryEntry { comment: "mine".into(), ..entry(2, 200, "b") }, entry(3, 300, "c")], ..Vault::default() };
+        let legacy = [
+            HistoryEntry { saved: true, comment: "theirs".into(), ..entry(0, 100, "a") },
+            HistoryEntry { saved: true, comment: "theirs".into(), ..entry(0, 200, "b") },
+            HistoryEntry { saved: true, ..entry(0, 300, "renamed") },
+        ];
+        v.import_legacy_bookmarks(&legacy);
+        assert!(v.legacy_bookmarks_imported);
+        let got: Vec<_> = v.history.iter().map(|e| (e.saved, e.comment.as_str())).collect();
+        assert_eq!(got, [(true, "theirs"), (true, "mine"), (false, "")]);
+    }
 
     #[test]
     fn legacy_secrets_fill_a_vault_imported_without_them() {

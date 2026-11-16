@@ -253,10 +253,34 @@ fn to_json(value: &Value) -> serde_json::Value {
 pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<HistoryEntry>, String> {
     let stores = read_stores(indexeddb_dir)?;
     let Some(records) = stores.get("activities") else { return Ok(Vec::new()) };
+    let deleted = |v: &Value| v.get("status").and_then(Value::as_str).is_some_and(|s| s.to_uppercase().contains("DELETED"));
+    // Saved marks (`bookmarks`) point at a connection by its local id, or at
+    // its log (`logSet.history_connection` is the connection's `id`).
+    let log_connection: HashMap<String, String> = stores
+        .get("logSet")
+        .into_iter()
+        .flatten()
+        .filter_map(|(_, v)| Some((v.get("id")?.as_str()?.to_owned(), v.get("history_connection")?.as_str()?.to_owned())))
+        .collect();
+    let local_of: HashMap<String, u64> = records.iter().filter_map(|(id, v)| Some((v.get("id")?.as_str()?.to_owned(), *id))).collect();
+    let bookmarks: HashMap<u64, String> = stores
+        .get("bookmarks")
+        .into_iter()
+        .flatten()
+        .filter(|(_, v)| !deleted(v))
+        .filter_map(|(_, v)| {
+            let connection = v.get("history_local_id").and_then(Value::as_f64).map(|n| n as u64).or_else(|| {
+                let log = v.get("log_id")?.as_str()?;
+                local_of.get(log_connection.get(log)?).copied()
+            })?;
+            let comment = v.get("bookmark_comment").and_then(Value::as_str).map(|c| decrypt_or_plain(cipher, c)).unwrap_or_default();
+            Some((connection, crate::vault::bounded_log_comment(comment.trim()).to_owned()))
+        })
+        .collect();
     let mut entries: Vec<HistoryEntry> = records
         .iter()
-        .filter(|(_, v)| !v.get("status").and_then(Value::as_str).is_some_and(|s| s.to_uppercase().contains("DELETED")))
-        .filter_map(|(_, v)| {
+        .filter(|(_, v)| !deleted(v))
+        .filter_map(|(local_id, v)| {
             let command: serde_json::Value = serde_json::from_str(&cipher.decrypt(v.get("command")?.as_str()?).ok()?).ok()?;
             let field = |name: &str| command.get(name).and_then(serde_json::Value::as_str).unwrap_or("").to_owned();
             let kind = field("connection_type");
@@ -284,8 +308,8 @@ pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<Hi
                 label,
                 subtitle,
                 log,
-                saved: false,
-                comment: String::new(),
+                saved: bookmarks.contains_key(local_id),
+                comment: bookmarks.get(local_id).cloned().unwrap_or_default(),
             })
         })
         .collect();
@@ -641,6 +665,29 @@ mod tests {
         assert_eq!(t["workspaceTerminals"][0]["host"]["local_id"], 220);
         assert_eq!(t["workspaceTerminals"][0]["startupSnippet"]["startupDirectory"], "/srv");
         assert!(t.get("status").is_none(), "storage fields are not part of the snapshot");
+    }
+
+    #[test]
+    fn saved_marks_and_comments_come_with_the_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let command = |title: &str| format!(r#"{{"connection_type":"ssh","host":"10.0.0.1","title":"{title}","user_name":"root"}}"#);
+        write_store(root, "activities", vec![
+            (1., record(&[("id", F::Text("a1")), ("command", F::Secret(&command("one"))), ("connected_at", F::Double(1_794_000_000_000.))])),
+            (2., record(&[("id", F::Text("a2")), ("command", F::Secret(&command("two"))), ("connected_at", F::Double(1_794_100_000_000.))])),
+            (3., record(&[("id", F::Text("a3")), ("command", F::Secret(&command("three"))), ("connected_at", F::Double(1_794_200_000_000.))])),
+        ]);
+        write_store(root, "logSet", vec![(10., record(&[("id", F::Text("log-2")), ("history_connection", F::Text("a2"))]))]);
+        write_store(root, "bookmarks", vec![
+            (1., record(&[("history_local_id", F::Int(1)), ("bookmark_comment", F::Text("deploy  "))])),
+            (2., record(&[("log_id", F::Text("log-2"))])),
+            (3., record(&[("history_local_id", F::Int(3)), ("bookmark_comment", F::Text("old")), ("status", F::Text("TO_BE_DELETED"))])),
+        ]);
+        let history = load_history(root, &cipher()).unwrap();
+        let by = |label: &str| history.iter().find(|e| e.label == label).unwrap();
+        assert_eq!((by("one").saved, by("one").comment.as_str()), (true, "deploy"));
+        assert_eq!((by("two").saved, by("two").comment.as_str()), (true, ""), "a bookmark found through its log");
+        assert!(!by("three").saved, "a removed bookmark is not Saved");
     }
 
     #[test]
