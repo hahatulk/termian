@@ -579,6 +579,23 @@ impl Vault {
         ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).chain(self.packages.iter().map(|p| p.id)).max().unwrap_or(0) + 1
     }
 
+    /// When each saved host was last connected (legacy `hostInteractions`).
+    pub fn last_connections(&self) -> std::collections::HashMap<HostId, i64> {
+        let mut last = std::collections::HashMap::new();
+        for entry in &self.history {
+            if let Some(host) = entry.host {
+                let at = last.entry(host).or_insert(entry.connected_at);
+                *at = (*at).max(entry.connected_at);
+            }
+        }
+        last
+    }
+
+    /// The host connected most recently, outlined in the legacy Hosts grid.
+    pub fn last_connected_host(&self) -> Option<HostId> {
+        self.last_connections().into_iter().max_by_key(|(id, at)| (*at, *id)).map(|(id, _)| id)
+    }
+
     pub fn host(&self, id: HostId) -> Option<&Host> {
         self.hosts.iter().find(|h| h.id == id)
     }

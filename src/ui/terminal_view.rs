@@ -79,6 +79,8 @@ pub struct TerminalView {
     /// SSH tabs show the connection screen until the shell is ready.
     connection: Option<Connection>,
     login: Option<LoginState>,
+    /// The shell became ready: the connection screen hands over (legacy animation).
+    connected: Option<(std::time::Instant, u64)>,
     login_focus: FocusHandle,
     /// Bumped on retry; events from the replaced session are ignored.
     generation: u64,
@@ -165,6 +167,7 @@ impl TerminalView {
             cell_width: None,
             selecting: false,
             login: connection.as_ref().map(|_| LoginState::default()),
+            connected: None,
             connection,
             login_focus,
             generation: 0,
@@ -332,7 +335,21 @@ impl TerminalView {
     fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
-                self.login = None;
+                // A first connection or a reconnect from the connection screen hands over with the legacy animation.
+                if self.login.take().is_some() {
+                    let key = self.generation;
+                    self.connected = Some((std::time::Instant::now(), key));
+                    cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(login_view::CONNECTED_TOTAL).await;
+                        let _ = this.update(cx, |view, cx| {
+                            if view.connected.is_some_and(|(_, k)| k == key) {
+                                view.connected = None;
+                                cx.notify();
+                            }
+                        });
+                    })
+                    .detach();
+                }
                 self.closed = false;
                 self.was_ready = true;
                 if self.reconnect.take().is_some() {
@@ -1121,6 +1138,10 @@ impl Render for TerminalView {
             .children(cursor)
             .children(self.render_autocomplete(snapshot.cursor.filter(|_| !self.closed && focused), cell_width, line_height, cx))
             .children(self.render_search(window, cx))
+            .children(self.connected.and_then(|(_, key)| {
+                let connection = self.connection.as_ref()?;
+                Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), key))
+            }))
             .into_any_element()
     }
 }

@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use gpui::{
-    div, percentage, prelude::*, px, rgb, svg, Animation, AnimationExt, Context, Div, FocusHandle, KeyDownEvent, SharedString, Stateful,
+    div, percentage, prelude::*, px, rgb, svg, Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, KeyDownEvent, SharedString, Stateful,
     Transformation, Window,
 };
 use termian_native::login::{Answer, HostKeyDecision, IdentityChoice, LoginState, LoginUi, Question, Stage};
@@ -195,6 +195,45 @@ fn progress_bar(state: &LoginState) -> Div {
             ));
     }
     bar
+}
+
+/// Green of the legacy bar once the shell is ready.
+const CONNECTED: u32 = 0x4cae63;
+/// The legacy hand-over to the terminal: the bar fills green, then the
+/// screen fades away over the shell.
+pub const CONNECTED_FILL: Duration = Duration::from_millis(300);
+pub const CONNECTED_TOTAL: Duration = Duration::from_millis(550);
+
+/// The connection screen as the shell becomes ready, laid over the terminal.
+pub fn render_connected(label: &str, subtitle: String, os: Option<&str>, key: u64) -> AnyElement {
+    let track = WIDTH - STEP;
+    let fill = CONNECTED_FILL.as_secs_f32() / CONNECTED_TOTAL.as_secs_f32();
+    let header = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_3()
+        .child(os_tile(os).size(px(40.)))
+        .child(div().flex_1().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child(label.to_owned())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
+        .child(button("connected-logs", "Show logs", false));
+    let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
+    let bar = div()
+        .relative()
+        .w(px(WIDTH))
+        .h(px(STEP))
+        .child(line().w(px(track)).bg(rgb(theme::SURFACE_ACTIVE)))
+        .child(line().bg(rgb(CONNECTED)).with_animation(SharedString::from(format!("connected-fill-{key}")), Animation::new(CONNECTED_TOTAL), move |d, t| d.w(px((t / fill).min(1.) * track))))
+        .child(div().absolute().top_0().left_0().child(step("connect", CONNECTED, false)))
+        .child(div().absolute().top_0().left(px(track)).child(step("terminal", CONNECTED, false)));
+    div()
+        .absolute()
+        .inset_0()
+        .flex()
+        .justify_center()
+        .bg(rgb(theme::TITLE_BAR))
+        .child(div().w(px(WIDTH)).pt(px(110.)).flex().flex_col().child(header).child(div().w_full().pt_5().child(bar)))
+        .with_animation(SharedString::from(format!("connected-out-{key}")), Animation::new(CONNECTED_TOTAL), move |d, t| d.opacity(if t < fill { 1. } else { 1. - (t - fill) / (1. - fill) }))
+        .into_any_element()
 }
 
 pub fn render<V: 'static>(

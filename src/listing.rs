@@ -38,17 +38,19 @@ impl SortOrder {
         }
     }
 
-    /// Sorts by label, or by creation: records have no creation date here,
-    /// so ids, which grow as records are added, stand for it.
-    pub fn sort<T>(self, items: &mut [T], label: impl Fn(&T) -> &str, id: impl Fn(&T) -> u64) {
+    /// Sorts by label, or by age. `age` grows with newer items: records have
+    /// no creation date here, so ids (which grow as records are added) stand
+    /// for it, and hosts put their last connection first, as legacy
+    /// `hostInteractions` does.
+    pub fn sort<T, K: Ord>(self, items: &mut [T], label: impl Fn(&T) -> &str, age: impl Fn(&T) -> K) {
         match self {
-            SortOrder::AZ => items.sort_by_cached_key(|i| (label(i).to_lowercase(), id(i))),
+            SortOrder::AZ => items.sort_by_cached_key(|i| label(i).to_lowercase()),
             SortOrder::ZA => {
-                items.sort_by_cached_key(|i| (label(i).to_lowercase(), id(i)));
+                items.sort_by_cached_key(|i| label(i).to_lowercase());
                 items.reverse();
             }
-            SortOrder::Newest => items.sort_by_key(|i| std::cmp::Reverse(id(i))),
-            SortOrder::Oldest => items.sort_by_key(|i| id(i)),
+            SortOrder::Newest => items.sort_by_cached_key(|i| std::cmp::Reverse(age(i))),
+            SortOrder::Oldest => items.sort_by_cached_key(|i| age(i)),
         }
     }
 }
@@ -94,6 +96,11 @@ mod tests {
         assert_eq!(names(SortOrder::Newest), ["gamma", "beta", "Alpha"]);
         assert_eq!(names(SortOrder::Oldest), ["Alpha", "beta", "gamma"]);
         assert_eq!(Listing::default(), Listing { view: ViewMode::Grid, sort: SortOrder::Newest });
+
+        // Hosts: the last connection first, then the newest never used.
+        let mut hosts = vec![(1, None), (2, Some(50)), (3, None), (4, Some(90))];
+        SortOrder::Newest.sort(&mut hosts, |_| "", |h: &(u64, Option<i64>)| (h.1, h.0));
+        assert_eq!(hosts.iter().map(|h| h.0).collect::<Vec<_>>(), [4, 2, 3, 1]);
     }
 
     #[test]

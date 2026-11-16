@@ -77,17 +77,20 @@ impl Shell {
         cx.notify();
     }
 
-    /// Cards laid out as the section's view: four columns or one.
+    /// Cards laid out as the section's view: as many columns as fit (legacy
+    /// cards are at least about 220 px wide), or one.
     pub(crate) fn cards(&self, key: &str) -> Div {
+        const MIN_CARD: f32 = 220.;
+        const GAP: f32 = 12.;
         let columns = match self.listing(key).view {
-            ViewMode::Grid => 4,
+            ViewMode::Grid => (((self.cards_width.get() + GAP) / (MIN_CARD + GAP)).floor() as u16).clamp(1, 8),
             ViewMode::List => 1,
         };
         div().grid().grid_cols(columns).gap_3()
     }
 
     /// Items in the section's order, without those the search leaves out.
-    pub(crate) fn listed<'a, T>(&self, key: &str, items: impl IntoIterator<Item = &'a T>, label: impl Fn(&T) -> &str, id: impl Fn(&T) -> u64) -> Vec<&'a T>
+    pub(crate) fn listed<'a, T, K: Ord>(&self, key: &str, items: impl IntoIterator<Item = &'a T>, label: impl Fn(&T) -> &str, id: impl Fn(&T) -> K) -> Vec<&'a T>
     where
         T: 'a,
     {

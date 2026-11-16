@@ -92,6 +92,8 @@ pub struct Shell {
     settings_window: Option<gpui::WindowHandle<ui::settings::SettingsWindow>>,
     cloud_focus: FocusHandle,
     list: ui::listing::ListingState,
+    /// Width of the Vaults cards area at the last frame, for the column count.
+    cards_width: std::cell::Cell<f32>,
     list_focus: FocusHandle,
     tag_focus: FocusHandle,
 }
@@ -292,6 +294,7 @@ impl Shell {
             settings_window: None,
             cloud_focus: cx.focus_handle(),
             list: Default::default(),
+            cards_width: std::cell::Cell::new(1200.),
             list_focus: cx.focus_handle(),
             tag_focus: cx.focus_handle(),
         }

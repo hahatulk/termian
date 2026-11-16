@@ -1,6 +1,8 @@
 //! Vaults tab: navigation sidebar and the Hosts screen.
 
-use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
+use std::time::Duration;
+
+use gpui::{div, prelude::*, px, rgb, svg, Animation, AnimationExt, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::session;
 use termian_native::theme;
 use termian_native::vault::{Group, GroupId, Host};
@@ -17,6 +19,9 @@ pub enum Section {
     KnownHosts,
     Logs,
 }
+
+/// Width of the legacy sliders.
+const SLIDER: f32 = 420.;
 
 const SECTIONS: [(Section, &str, &str); 6] = [
     (Section::Hosts, "Hosts", "hosts"),
@@ -125,6 +130,10 @@ pub(super) fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Di
 
 impl Shell {
     pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let sliding = self.slider_open();
+        // Sidebar, body padding and an open slider leave this much for cards.
+        let width = f32::from(window.viewport_size().width) - 185. - 2. * super::sections::BODY_PADDING - if sliding { SLIDER } else { 0. };
+        self.cards_width.set(width);
         let content = match self.section {
             Section::Hosts => self.render_hosts(window, cx).into_any_element(),
             Section::Keychain => self.render_keychain(window, cx).into_any_element(),
@@ -141,7 +150,34 @@ impl Shell {
             Section::KnownHosts => self.render_known_menu(window, cx),
             _ => None,
         };
+        // Legacy sliders push the cards aside and slide in from the right.
+
+        let editor = editor.map(|editor| {
+            if !sliding {
+                return editor;
+            }
+            div()
+                .absolute()
+                .inset_0()
+                .child(editor)
+                .with_animation("slider-in", Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_out_quint()), |d, t| {
+                    d.left(px(SLIDER * (1. - t))).right(px(-SLIDER * (1. - t)))
+                })
+                .into_any_element()
+        });
+        let content = div().flex_1().h_full().min_w_0().flex().when(sliding, |d| d.pr(px(SLIDER))).child(content);
         div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).children(self.render_list_menu(window, cx)).into_any_element()
+    }
+
+    /// A slider (editor or panel) is open on the right of the Vaults.
+    fn slider_open(&self) -> bool {
+        match self.section {
+            Section::Hosts => self.host_editor.is_some() || self.group_editor.is_some(),
+            Section::Keychain => self.key_editor.is_some() || self.identity_editor.is_some(),
+            Section::PortForwarding => self.rules.editor.is_some(),
+            Section::Snippets => self.snippet_editor.is_some() || self.package_editor.is_some() || self.shell_history.is_some(),
+            _ => false,
+        }
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
@@ -315,9 +351,16 @@ impl Shell {
         }
 
         let tags = &self.list.tags;
-        let hosts = self.listed("hosts", self.vault.hosts_under(self.group).into_iter().filter(|h| termian_native::listing::has_tags(h, tags)), |h| h.display_label(), |h| h.id);
-        if !hosts.is_empty() {
-            body = body.child(section_title("Hosts")).child(self.cards("hosts").children(
+        let last = self.vault.last_connections();
+        let hosts = self.listed("hosts", self.vault.hosts_under(self.group).into_iter().filter(|h| termian_native::listing::has_tags(h, tags)), |h| h.display_label(), |h| (last.get(&h.id).copied(), h.id));
+        // Legacy shows a host being created as the first card, outlined.
+        let draft = self.host_editor.as_ref().filter(|e| e.is_new && e.host.group == self.group).map(|e| {
+            let address = e.host.address.trim();
+            let title = if address.is_empty() { "Enter IP or Hostname...".to_owned() } else { address.to_owned() };
+            card("host-draft".into(), tile("new_host", theme::TILE_BLUE), title, "ssh".into()).border_1().border_color(rgb(theme::ACCENT))
+        });
+        if !hosts.is_empty() || draft.is_some() {
+            body = body.child(section_title("Hosts")).child(self.cards("hosts").children(draft).children(
                 hosts.into_iter().map(|h| self.render_host(h, cx)),
             ));
         }
@@ -345,7 +388,10 @@ impl Shell {
                 cx.stop_propagation();
                 shell.edit_host(id, window, cx);
             }));
+        // Legacy outlines the host connected last.
+        let last = self.vault.last_connected_host() == Some(id);
         card(format!("host-{id}").into(), host_tile(host), host.display_label().to_owned(), host.subtitle())
+            .when(last, |d| d.border_1().border_color(rgb(theme::ACCENT)))
             .group(group)
             .child(edit)
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
