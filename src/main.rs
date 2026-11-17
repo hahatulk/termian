@@ -240,6 +240,21 @@ impl Shell {
                 let _ = store.save(&vault);
             }
         }
+        if !demo && store.is_some() && vault.legacy_hidden_identities_folded && !vault.legacy_unused_hidden_identities_dropped {
+            // Hosts' own legacy credentials left in the Keychain with no host using them.
+            match load_legacy_vault() {
+                Ok(legacy) => {
+                    for label in vault.drop_unused_hidden_identities(&legacy) {
+                        eprintln!("[Termian] Removed unused host credentials from the Keychain: {label}");
+                    }
+                }
+                Err(error) if error == "legacy profile not found" => vault.legacy_unused_hidden_identities_dropped = true,
+                Err(error) => eprintln!("[Termian] Unused host credentials were not removed: {error}"),
+            }
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
         if !demo && store.is_some() && !vault.legacy_templates_imported {
             import_legacy_templates(&mut vault);
             if let Some(store) = &store {

@@ -387,6 +387,12 @@ pub struct Vault {
     /// Hosts' own credentials imported as Keychain identities were folded back.
     #[serde(default)]
     pub legacy_hidden_identities_folded: bool,
+    /// Hidden legacy identities no host uses were removed from the Keychain.
+    #[serde(default)]
+    pub legacy_unused_hidden_identities_dropped: bool,
+    /// Read from the legacy profile only: ids of its hosts' own (hidden) identities.
+    #[serde(skip)]
+    pub hidden_identity_ids: Vec<u64>,
     /// Vaults toolbar view and sorting per section; device-local like legacy.
     #[serde(default)]
     pub listing: crate::listing::ListingSettings,
@@ -505,6 +511,18 @@ impl Vault {
         }
         let hosts = &self.hosts;
         self.identities.retain(|i| !folded.contains(&i.id) || hosts.iter().any(|h| h.identity == Some(i.id)));
+    }
+
+    /// Removes hosts' own legacy credentials that the old import showed as
+    /// Keychain identities and that no host uses any more; returns their labels.
+    /// Identities made here are never hidden in legacy, so they stay.
+    pub fn drop_unused_hidden_identities(&mut self, legacy: &Vault) -> Vec<String> {
+        self.legacy_unused_hidden_identities_dropped = true;
+        let hosts = &self.hosts;
+        let unused = |i: &Identity| legacy.hidden_identity_ids.contains(&i.id) && !hosts.iter().any(|h| h.identity == Some(i.id));
+        let dropped = self.identities.iter().filter(|i| unused(i)).map(|i| i.label.clone()).collect();
+        self.identities.retain(|i| !unused(i));
+        dropped
     }
 
     /// Legacy Saved marks and comments for connections imported before they
@@ -949,6 +967,20 @@ pub(crate) mod tests {
         assert_eq!(vault.hosts[2].identity, Some(22), "a host that no longer matches is left alone");
         // 23 was made here (not in legacy) and nothing links it, yet it is the user's own.
         assert_eq!(vault.identities.iter().map(|i| i.id).collect::<Vec<_>>(), [20, 22, 23]);
+    }
+
+    #[test]
+    fn unused_hidden_legacy_identities_are_dropped_and_others_stay() {
+        let identity = |id, label: &str| Identity { id, label: label.into(), ..Identity::default() };
+        let mut vault = Vault {
+            hosts: vec![Host { identity: Some(31), ..host(10, "web", None) }],
+            identities: vec![identity(30, "orphan"), identity(31, "used"), identity(32, "visible"), identity(33, "mine")],
+            ..Vault::default()
+        };
+        let legacy = Vault { hidden_identity_ids: vec![30, 31], identities: vec![identity(32, "visible")], ..Vault::default() };
+        assert_eq!(vault.drop_unused_hidden_identities(&legacy), ["orphan"]);
+        assert!(vault.legacy_unused_hidden_identities_dropped);
+        assert_eq!(vault.identities.iter().map(|i| i.id).collect::<Vec<_>>(), [31, 32, 33]);
     }
 
     #[test]

@@ -193,7 +193,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
-    Ok(Vault { groups, hosts, keys, identities, snippets, packages, known_hosts, rules, secrets_missing: secrets_missing.get(), ..Vault::default() })
+    Ok(Vault { groups, hosts, keys, identities, snippets, packages, known_hosts, rules, secrets_missing: secrets_missing.get(), hidden_identity_ids: hidden.iter().copied().collect(), ..Vault::default() })
 }
 
 /// References between records look like `{ local_id: 39, id: undefined }`.
@@ -613,6 +613,7 @@ mod tests {
         let vault = load_vault(root, &cipher()).unwrap();
 
         assert_eq!(vault.identities.iter().map(|i| i.id).collect::<Vec<_>>(), [20], "a host's own credentials are not a Keychain identity");
+        assert_eq!(vault.hidden_identity_ids, [21]);
         let shared = vault.host(10).unwrap();
         assert_eq!(shared.identity, Some(20));
         assert_eq!(vault.credentials(shared), (Some("root".into()), Some("rootpw".into()), None));
