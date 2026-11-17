@@ -97,6 +97,7 @@ pub(super) enum Field {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Menu {
     Autocomplete,
+    Logs,
     Emulation,
     Font,
     Shell,
@@ -582,17 +583,7 @@ impl SettingsWindow {
 
     fn render_logs(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let enabled = !self.shell.read(cx).vault.logs_disabled;
-        let choice = |id: &'static str, label: &'static str, value: bool| {
-            div()
-                .id(id)
-                .px(px(10.))
-                .py(px(4.))
-                .rounded(px(6.))
-                .text_size(px(14.))
-                .when(value == enabled, |d| d.bg(rgb(0x353950)).text_color(rgb(theme::TEXT)))
-                .when(value != enabled, |d| d.text_color(rgb(MUTED)).cursor_pointer().hover(|s| s.bg(rgba(0xffffff14))))
-                .child(label)
-        };
+        let open = self.menu == Some(Menu::Logs);
         let mut card = vec![
             div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Logs retention policies").into_any_element(),
             div().mt(px(10.)).text_size(px(14.)).text_color(rgb(MUTED)).child("Control how logs are stored in your vaults.").into_any_element(),
@@ -602,24 +593,47 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Personal"))
                 .child(
                     div()
                         .flex()
-                        .gap(px(4.))
-                        .child(choice("settings-logs-enabled", "Enabled", true).on_click(cx.listener(|settings, _, _, cx| {
-                            settings.disable_logs = false;
-                            settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(true, cx));
-                        })))
-                        .child(choice("settings-logs-disabled", "Disabled", false).on_click(cx.listener(move |settings, _, _, cx| {
-                            if enabled {
-                                settings.disable_logs = true;
-                                cx.notify();
-                            }
-                        }))),
+                        .items_center()
+                        .gap(px(10.))
+                        .text_size(px(14.))
+                        .text_color(rgb(theme::TEXT))
+                        .child(gpui::svg().path(super::assets::icon("vaults")).size(px(16.)).text_color(rgb(theme::TEXT)))
+                        .child("Personal"),
+                )
+                .child(
+                    super::settings_terminal::picker("settings-logs", if enabled { "Enabled" } else { "Disabled" }, open)
+                        .text_size(px(14.))
+                        .on_click(cx.listener(|settings, _, _, cx| {
+                            settings.menu = if settings.menu == Some(Menu::Logs) { None } else { Some(Menu::Logs) };
+                            cx.notify();
+                        })),
                 )
                 .into_any_element(),
         ];
+        if open {
+            card.push(
+                super::settings_terminal::menu_list(vec![
+                    super::settings_terminal::menu_item("settings-logs-enabled".into(), "Enabled", enabled)
+                        .on_click(cx.listener(|settings, _, _, cx| {
+                            settings.menu = None;
+                            settings.disable_logs = false;
+                            settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(true, cx));
+                        }))
+                        .into_any_element(),
+                    super::settings_terminal::menu_item("settings-logs-disabled".into(), "Disabled", !enabled)
+                        .on_click(cx.listener(move |settings, _, _, cx| {
+                            settings.menu = None;
+                            settings.disable_logs = enabled;
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                ])
+                .into_any_element(),
+            );
+        }
         if self.disable_logs {
             card.push(
                 div()

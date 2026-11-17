@@ -103,7 +103,7 @@ fn switch(id: &str, text: &str, on: bool) -> Stateful<Div> {
 }
 
 /// A value with a drop-down arrow, like the legacy `FiltersButton`.
-fn picker(id: &str, value: &str, open: bool) -> Stateful<Div> {
+pub(super) fn picker(id: &str, value: &str, open: bool) -> Stateful<Div> {
     div()
         .id(SharedString::from(id.to_owned()))
         .flex()
@@ -123,11 +123,11 @@ fn arrow(open: bool) -> impl IntoElement {
     if open { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret }
 }
 
-fn menu_list(children: Vec<AnyElement>) -> Div {
+pub(super) fn menu_list(children: Vec<AnyElement>) -> Div {
     div().mt(px(6.)).p(px(5.)).rounded(px(15.)).border_1().border_color(rgba(0xffffff1a)).bg(rgb(0x2f3348)).max_h(px(260.)).overflow_hidden().children(children)
 }
 
-fn menu_item(id: SharedString, text: &str, selected: bool) -> Stateful<Div> {
+pub(super) fn menu_item(id: SharedString, text: &str, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
         .px(px(10.))
