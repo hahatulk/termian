@@ -40,3 +40,36 @@ pub const UI_FONT: &str = "CircularXX";
 pub const CONNECTING: u32 = 0x1f3b2f;
 /// Sampled: title and cross of a terminal tab while it connects.
 pub const CONNECTING_TEXT: u32 = 0x3dbd6e;
+
+/// Window colours on a terminal tab: legacy paints the tab bar, tabs and side
+/// panel from the terminal theme instead of the app's own colours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chrome {
+    pub bar: u32,
+    pub tab: u32,
+    pub tab_active: u32,
+    pub panel: u32,
+    pub text: u32,
+    pub muted: u32,
+}
+
+impl Chrome {
+    /// Tabs and panel are the terminal background lightened, text stays the app's.
+    pub fn from_terminal(background: u32) -> Self {
+        let tint = |amount: u8| crate::terminal::blend(0xffffff, background, amount);
+        Self { bar: background, tab: tint(16), tab_active: tint(36), panel: tint(10), text: TEXT, muted: TEXT_MUTED }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chrome_lightens_the_terminal_background_and_keeps_app_text() {
+        let chrome = Chrome::from_terminal(0x000000);
+        assert_eq!((chrome.bar, chrome.text), (0x000000, TEXT));
+        assert!(chrome.panel < chrome.tab && chrome.tab < chrome.tab_active);
+        assert_eq!(chrome.tab, 0x101010);
+    }
+}

@@ -52,7 +52,7 @@ impl Default for Look {
 }
 
 /// `color` at `alpha` over `under`.
-fn blend(color: u32, under: u32, alpha: u8) -> u32 {
+pub fn blend(color: u32, under: u32, alpha: u8) -> u32 {
     let mix = |shift: u32| {
         let (c, u) = ((color >> shift) & 0xff, (under >> shift) & 0xff);
         ((c * alpha as u32 + u * (255 - alpha as u32)) / 255) << shift

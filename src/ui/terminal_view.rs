@@ -500,6 +500,12 @@ impl TerminalView {
         cx.notify();
     }
 
+    /// The terminal theme's background and text, for tinting the window around it.
+    pub fn colors(&self) -> (u32, u32) {
+        let look = self.terminal.look();
+        (look.background, look.foreground)
+    }
+
     pub fn step_search(&mut self, previous: bool, cx: &mut Context<Self>) {
         if let Some(query) = self.search.clone() {
             self.search_found = self.terminal.find(&query, previous, false);

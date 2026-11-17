@@ -328,19 +328,29 @@ impl Shell {
         }
     }
 
-    fn render_tab(&self, tab: &Tab, cx: &mut Context<Self>) -> Stateful<Div> {
+    /// On a terminal tab, the window takes its colours from the terminal theme, as in legacy.
+    pub(crate) fn chrome(&self, cx: &App) -> Option<theme::Chrome> {
+        if !matches!(self.tabs.active().kind, TabKind::Session { .. }) {
+            return None;
+        }
+        let (background, _) = self.focused_view(self.tabs.active().id)?.read(cx).colors();
+        Some(theme::Chrome::from_terminal(background))
+    }
+
+    fn render_tab(&self, tab: &Tab, chrome: Option<theme::Chrome>, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = tab.id;
         let active = id == self.tabs.active().id;
         // Legacy paints a tab green while its connection is being set up.
         let connecting = self.focused_view(id).is_some_and(|view| view.read(cx).is_connecting());
-        let tab_text = if connecting { theme::CONNECTING_TEXT } else { theme::TEXT };
+        let tab_text = if connecting { theme::CONNECTING_TEXT } else { chrome.map_or(theme::TEXT, |c| c.text) };
         let icon_name = match tab.kind {
             TabKind::Vaults => "vaults",
             TabKind::Sftp => "sftp",
             TabKind::Session { .. } => "terminal",
-            TabKind::Launcher => "plus",
+            TabKind::Launcher => "new_tab",
         };
-        let leading = if tab.closable() {
+        // Legacy: only the active tab offers ✕; the others show what they are.
+        let leading = if tab.closable() && active {
             div()
                 .id(SharedString::from(format!("close-{id:?}")))
                 .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(tab_text)))
@@ -350,7 +360,7 @@ impl Shell {
                     cx.notify();
                 }))
         } else {
-            div().id(SharedString::from(format!("icon-{id:?}"))).child(svg().path(icon(icon_name)).size(px(14.)).text_color(rgb(theme::TEXT)))
+            div().id(SharedString::from(format!("icon-{id:?}"))).child(svg().path(icon(icon_name)).size(px(14.)).text_color(rgb(tab_text)))
         };
         div()
             .id(SharedString::from(format!("tab-{id:?}")))
@@ -363,7 +373,13 @@ impl Shell {
             .rounded_md()
             .text_sm()
             .text_color(rgb(tab_text))
-            .bg(rgb(if connecting { theme::CONNECTING } else if active { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
+            .bg(rgb(match (connecting, active, chrome) {
+                (true, _, _) => theme::CONNECTING,
+                (_, true, Some(c)) => c.tab_active,
+                (_, false, Some(c)) => c.tab,
+                (_, true, None) => theme::SURFACE_ACTIVE,
+                (_, false, None) => theme::SURFACE,
+            }))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
                 if let Some(view) = shell.focused_view(id) {
@@ -560,7 +576,8 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, cx)).collect();
+        let chrome = self.chrome(cx);
+        let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, chrome, cx)).collect();
         let toolbar = self.render_cloud_buttons(cx);
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
@@ -589,7 +606,7 @@ impl Render for Shell {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .bg(rgb(theme::TITLE_BAR))
+                    .bg(rgb(chrome.map_or(theme::TITLE_BAR, |c| c.bar)))
                     .children(tabs)
                     .child(
                         div()

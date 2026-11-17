@@ -246,6 +246,79 @@ pub fn themes() -> &'static [Theme] {
 }
 
 /// By lower-case name, falling back to Termius Dark like `safeGetColorScheme`.
+/// Legacy `themeUsages`: how many Termius users picked each theme (`None` shows «new»).
+const THEME_USAGES: &[(&str, Option<u32>)] = &[
+    ("kanagawa wave", Some(18227)),
+    ("kanagawa dragon", Some(13922)),
+    ("kanagawa lotus", Some(2207)),
+    ("hacker blue", Some(14864)),
+    ("hacker green", Some(10954)),
+    ("hacker red", Some(1091)),
+    ("1984 dark", Some(5313)),
+    ("1984 light", Some(1110)),
+    ("atom one dark", Some(8133)),
+    ("atom one light", Some(1459)),
+    ("aubergine", Some(1192)),
+    ("aura", Some(7835)),
+    ("ayu dark", Some(7099)),
+    ("ayu light", Some(1186)),
+    ("basic", Some(8146)),
+    ("catppuccin latte", Some(1356)),
+    ("catppuccin mocha", Some(5654)),
+    ("cobalt2", Some(8437)),
+    ("cyberpunk scarlet", Some(5351)),
+    ("cyberpunk", Some(4033)),
+    ("dia de muertos", Some(750)),
+    ("diwali", Some(2052)),
+    ("dracula", Some(17825)),
+    ("everforest dark", Some(7695)),
+    ("everforest light", Some(2385)),
+    ("grass", Some(1104)),
+    ("gruvbox dark", Some(3093)),
+    ("gruvbox light", Some(861)),
+    ("halloween", Some(2131)),
+    ("homebrew", Some(24537)),
+    ("light owl", Some(3693)),
+    ("man page", Some(983)),
+    ("manhattan", Some(3500)),
+    ("material dark", Some(4305)),
+    ("material light", Some(862)),
+    ("monokai", Some(26157)),
+    ("movember", Some(960)),
+    ("night owl", Some(27786)),
+    ("nord dark", Some(11862)),
+    ("nord light", Some(1727)),
+    ("novel", Some(2199)),
+    ("ocean", Some(1343)),
+    ("octocat dark", Some(9075)),
+    ("octocat light", Some(1110)),
+    ("peach fresh", Some(538)),
+    ("plastic world", Some(248)),
+    ("pro", Some(31611)),
+    ("red sands", Some(661)),
+    ("romania day", Some(672)),
+    ("romania night", Some(2734)),
+    ("rosé pine dawn", Some(1246)),
+    ("rosé pine moon", Some(2923)),
+    ("rosé pine", Some(4564)),
+    ("silver aerogel", Some(295)),
+    ("solarized dark", Some(4987)),
+    ("solarized light", Some(1780)),
+    ("termius dark", None),
+    ("termius light", Some(34561)),
+    ("tokyo day", Some(1126)),
+    ("tokyo night", Some(10528)),
+    ("winter day", Some(1263)),
+    ("winter night", Some(4666)),
+    ("flexoki dark", None),
+    ("flexoki light", None),
+];
+
+/// The legacy usage count of a theme, or `None` for «new».
+pub fn theme_usage(name: &str) -> Option<u32> {
+    THEME_USAGES.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).and_then(|(_, count)| *count)
+}
+
 pub fn theme(name: &str) -> &'static Theme {
     let all = themes();
     all.iter().find(|t| t.name.eq_ignore_ascii_case(name)).unwrap_or(&all[0])
@@ -404,6 +477,13 @@ pub fn font_files(face: &FontFace) -> Vec<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn theme_usages_follow_legacy_and_unknown_themes_are_new() {
+        assert_eq!(theme_usage("Night Owl"), Some(27786));
+        assert_eq!(theme_usage("Flexoki Dark"), None);
+        assert_eq!(theme_usage("Termius Dark"), None, "legacy shows «new» for a null count too");
+    }
+
     use super::*;
 
     #[test]

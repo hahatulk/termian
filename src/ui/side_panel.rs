@@ -210,7 +210,7 @@ impl Shell {
                 .flex()
                 .flex_col()
                 .gap(px(12.))
-                .bg(rgb(theme::SIDEBAR))
+                .bg(rgb(self.chrome(cx).map_or(theme::SIDEBAR, |c| c.panel)))
                 .border_l_1()
                 .border_color(rgb(theme::TITLE_BAR))
                 .text_sm()
@@ -627,9 +627,10 @@ impl Shell {
             .flex()
             .items_center()
             .gap_2()
-            .text_color(rgb(theme::TEXT_MUTED))
+            .text_color(rgb(theme::TEXT))
             .child(div().flex_1().child("Font"))
-            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))))
+            // Legacy «Font ›»; the arrow turns down while the font settings are open.
+            .child(svg().path(icon("arrow_right")).size(px(8.)).text_color(rgb(theme::TEXT)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::FRAC_PI_2)))))
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(panel) = &mut shell.side_panel {
                     panel.font_open = !panel.font_open;
@@ -679,29 +680,49 @@ impl Shell {
         let rows = terminal_settings::themes().iter().enumerate().map(|(i, t)| {
             let active = t.name == current;
             let name = t.name.to_lowercase();
+            // Legacy preview: text lines drawn in the theme's colours.
+            let bar = |w: f32, color: u32| div().w(px(w)).h(px(3.)).rounded(px(1.5)).bg(rgb(color));
+            let line = |bars: Vec<Div>| div().flex().gap(px(3.)).children(bars);
             let swatch = div()
-                .w(px(44.))
-                .h(px(28.))
+                .w(px(50.))
+                .h(px(34.))
                 .flex_none()
-                .rounded_sm()
-                .bg(rgb(t.background))
+                .p(px(6.))
                 .flex()
-                .items_center()
+                .flex_col()
                 .justify_center()
-                .gap(px(2.))
-                .children([1usize, 2, 3, 4].map(|c| div().size(px(5.)).rounded_full().bg(rgb(t.palette[c]))));
+                .gap(px(4.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(gpui::rgba(0xffffff33))
+                .bg(rgb(t.background))
+                .child(line(vec![bar(36., t.foreground)]))
+                .child(line(vec![bar(18., t.foreground), bar(9., t.palette[7]), bar(4., t.foreground)]))
+                .child(line(vec![bar(10., t.palette[2]), bar(8., t.foreground), bar(6., t.foreground), bar(2., t.cursor)]));
+            let usage = match terminal_settings::theme_usage(&t.name) {
+                Some(count) => div().flex().items_center().gap(px(4.)).child(svg().path(icon("users")).size(px(11.)).text_color(rgb(theme::TEXT_MUTED))).child(count.to_string()),
+                None => div().child("new"),
+            };
             div()
                 .id(SharedString::from(format!("panel-theme-{i}")))
-                .p_1()
+                .flex_none()
+                .p(px(5.))
                 .flex()
                 .items_center()
-                .gap_2()
-                .rounded_md()
-                .border_1()
-                .border_color(rgb(if active { theme::ACCENT } else { theme::SIDEBAR }))
-                .hover(|s| s.bg(rgb(theme::SURFACE)))
+                .gap(px(10.))
+                .rounded(px(6.))
+                .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                .when(!active, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
                 .child(swatch)
-                .child(div().truncate().text_color(rgb(theme::TEXT)).child(t.name.clone()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(div().truncate().text_color(rgb(if active { theme::TEXT } else { theme::TEXT_MUTED })).child(t.name.clone()))
+                        .child(usage.text_xs().text_color(rgb(theme::TEXT_MUTED))),
+                )
                 .on_click(cx.listener(move |shell, _, window, cx| {
                     window.focus(&shell.panel_focus);
                     let name = name.clone();
@@ -718,6 +739,6 @@ impl Shell {
             .children(font)
             .child(div().h(px(1.)).bg(rgb(theme::SURFACE_ACTIVE)))
             .child(div().text_color(rgb(theme::TEXT_MUTED)).child("Themes"))
-            .child(div().id("panel-themes").flex_1().overflow_y_scroll().flex().flex_col().gap(px(4.)).children(rows))
+            .child(div().id("panel-themes").flex_1().overflow_y_scroll().flex().flex_col().gap(px(2.)).children(rows))
     }
 }
