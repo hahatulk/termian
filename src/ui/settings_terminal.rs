@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, App, Context, Div, FontWeight, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, App, Context, Div, FontWeight, SharedString, Stateful};
 use termian_native::terminal_settings::{self as ts, TerminalSettings, EMULATION_TYPES, FONT_FAMILIES, HIGHLIGHT_GROUPS, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use termian_native::theme;
 
@@ -114,7 +114,13 @@ fn picker(id: &str, value: &str, open: bool) -> Stateful<Div> {
         .text_color(rgb(theme::TEXT))
         .cursor_pointer()
         .child(value.to_owned())
-        .child(div().text_size(px(9.)).text_color(rgb(MUTED)).child(if open { "▲" } else { "▼" }))
+        .child(arrow(open))
+}
+
+/// The legacy drop-down arrow: a caret that turns up while the menu is open.
+fn arrow(open: bool) -> impl IntoElement {
+    let caret = svg().path(super::assets::icon("caret_down")).w(px(11.)).h(px(7.)).text_color(rgb(theme::TEXT));
+    if open { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret }
 }
 
 fn menu_list(children: Vec<AnyElement>) -> Div {
@@ -261,19 +267,36 @@ impl SettingsWindow {
                         .child(div().px(px(5.)).rounded(px(4.)).border_1().border_color(rgb(MUTED)).text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(rgb(MUTED)).child("BETA")),
                 )
                 .child(
-                    switch("term-autocomplete", if t.autocomplete { "Enabled" } else { "Disabled" }, t.autocomplete)
-                        .on_click(cx.listener({
-                            let on = t.autocomplete;
-                            move |settings, _, _, cx| settings.change(cx, move |t| t.autocomplete = !on)
-                        })),
+                    picker("term-autocomplete", if t.autocomplete { "Enabled" } else { "Disabled" }, self.menu == Some(Menu::Autocomplete))
+                        .on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Autocomplete, cx))),
                 )
                 .into_any_element(),
+        ];
+        if self.menu == Some(Menu::Autocomplete) {
+            general.push(
+                menu_list(
+                    [("Enabled", true), ("Disabled", false)]
+                        .into_iter()
+                        .map(|(text, on)| {
+                            menu_item(SharedString::from(format!("term-autocomplete-{text}")), text, on == t.autocomplete)
+                                .on_click(cx.listener(move |settings, _, _, cx| {
+                                    settings.menu = None;
+                                    settings.change(cx, move |t| t.autocomplete = on);
+                                }))
+                                .into_any_element()
+                        })
+                        .collect(),
+                )
+                .into_any_element(),
+            );
+        }
+        general.extend([
             self.switch_row("term-autoreconnect", "Autoreconnect", t.autoreconnect, |t, v| t.autoreconnect = v, cx),
             self.switch_row("term-history", "Import shell history", t.shell_history_import, |t, v| t.shell_history_import = v, cx),
             self.switch_row("term-integration", "Shell integration (record commands)", t.shell_integration, |t, v| t.shell_integration = v, cx),
             self.switch_row("term-copy", "Select text to copy & Right click to paste", t.copy_on_select, |t, v| t.copy_on_select = v, cx),
             self.switch_row("term-bell", "Bell sound", t.bell_sound, |t, v| t.bell_sound = v, cx),
-        ];
+        ]);
         if cfg!(target_os = "macos") {
             general.push(self.switch_row("term-meta", "Use Option as Meta key", t.option_is_meta, |t, v| t.option_is_meta = v, cx));
         }
@@ -312,12 +335,23 @@ impl SettingsWindow {
 
         // Font and Text Size
         let font_open = self.menu == Some(Menu::Font);
+        // As in legacy: the family in a full-width field, no label.
         let mut font = vec![div()
+            .id("term-font")
+            .h(px(32.))
+            .px(px(12.))
             .flex()
             .items_center()
             .justify_between()
-            .child(label("Font"))
-            .child(picker("term-font", &t.font_family, font_open).on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Font, cx))))
+            .rounded(px(4.))
+            .border_1()
+            .border_color(rgba(0xffffff33))
+            .cursor_pointer()
+            .text_size(px(13.))
+            .text_color(rgb(theme::TEXT))
+            .child(t.font_family.clone())
+            .child(arrow(font_open))
+            .on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Font, cx)))
             .into_any_element()];
         if font_open {
             let mut items: Vec<AnyElement> = vec![self.text_field(Field::Font, "term-font-custom", String::new(), None, None, cx).into_any_element()];
@@ -497,7 +531,7 @@ impl SettingsWindow {
                 .border_color(rgb(0x4a4e66))
                 .cursor_pointer()
                 .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).truncate().child(selected_shell.clone()))
-                .child(div().text_size(px(9.)).text_color(rgb(MUTED)).child(if shell_open { "▲" } else { "▼" }))
+                .child(arrow(shell_open))
                 .on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Shell, cx)))
                 .into_any_element(),
         ];

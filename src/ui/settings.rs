@@ -96,6 +96,7 @@ pub(super) enum Field {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Menu {
+    Autocomplete,
     Emulation,
     Font,
     Shell,
