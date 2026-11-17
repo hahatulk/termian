@@ -26,7 +26,7 @@ pub struct Launcher {
 }
 
 #[cfg(target_os = "macos")]
-pub const PALETTE_SHORTCUT: &str = "⌘K";
+pub const PALETTE_SHORTCUT: &str = "⌘+K";
 #[cfg(not(target_os = "macos"))]
 pub const PALETTE_SHORTCUT: &str = "Ctrl+K";
 
@@ -130,22 +130,25 @@ impl Shell {
         cx.notify();
     }
 
-    fn launcher_row(&self, id: HostId, selected: bool, cx: &mut Context<Self>) -> Option<gpui::Stateful<Div>> {
+    fn launcher_row(&self, id: HostId, selected: bool, striped: bool, cx: &mut Context<Self>) -> Option<gpui::Stateful<Div>> {
         let host = self.vault.host(id)?;
         Some(
             div()
                 .id(SharedString::from(format!("recent-{id}")))
-                .h(px(48.))
-                .px_2()
+                // Legacy: compact rows with a small tile, every other one striped.
+                .h(px(38.))
+                .px(px(10.))
                 .flex()
                 .items_center()
-                .gap_3()
-                .rounded_lg()
-                .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                .gap(px(10.))
+                .rounded(px(8.))
+                .text_sm()
+                .when(selected, |d| d.bg(rgb(0x41455c)))
+                .when(!selected && striped, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
                 .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
-                .child(host_tile(host).size(px(32.)).rounded_md())
+                .child(host_tile(host).size(px(20.)).rounded(px(5.)))
                 .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(host.display_label().to_owned()))
-                .child(div().flex_none().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(self.vault.host_location(host)))
+                .child(div().flex_none().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(self.vault.host_location(host)))
                 .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
                     if event.click_count() >= 2 {
                         shell.launch(vec![id], window, cx);
@@ -324,7 +327,8 @@ impl Shell {
                     )
             } else {
                 let any = !self.launcher.selected.is_empty();
-                let restore = dialog::button("recent-restore", "Restore", Kind::Accent, !any)
+                // Greyed like legacy until a connection is selected.
+                let restore = dialog::button("recent-restore", "Restore", if any { Kind::Accent } else { Kind::Regular }, !any)
                     .h(px(30.))
                     .px_3()
                     .when(any, |d| {
@@ -342,7 +346,7 @@ impl Shell {
                 let workspaces = (!saved.is_empty()).then(|| section("Workspace templates", Vec::new()).children(saved.iter().map(|t| self.template_row(t, cx))));
                 let recent = (!recent.is_empty()).then(|| {
                     section("Recent connections", vec![create, restore])
-                        .children(recent.into_iter().filter_map(|id| self.launcher_row(id, self.launcher.selected.contains(&id), cx)))
+                        .children(recent.into_iter().enumerate().filter_map(|(i, id)| self.launcher_row(id, self.launcher.selected.contains(&id), i % 2 == 1, cx)))
                 });
                 div().w_full().flex().flex_col().gap(px(20.)).children(workspaces).children(recent)
             }
