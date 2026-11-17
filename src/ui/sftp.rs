@@ -744,7 +744,7 @@ impl Shell {
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(theme::TEXT))
-                            .child("HOST…")
+                            .child("DISCONNECT")
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 let panel = shell.sftp.side_mut(side);
                                 panel.host = true;
@@ -852,12 +852,20 @@ impl Shell {
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(rgb(theme::TEXT))
             .children(COLUMNS.map(|(column, label, width)| {
-                let marker = (panel.sort == column).then(|| if panel.descending { " ˅" } else { " ˄" }).unwrap_or("");
+                // Legacy: a caret beside the sorted column, pointing down when descending.
+                let marker = (panel.sort == column).then(|| {
+                    let caret = svg().path(icon("caret_down")).w(px(9.)).h(px(6.)).text_color(rgb(theme::TEXT));
+                    if panel.descending { caret } else { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) }
+                });
                 div()
                     .id(SharedString::from(format!("sort-{key}-{label}")))
                     .when(width == 0., |d| d.flex_1())
                     .when(width > 0., |d| d.w(px(width)).flex_none())
-                    .child(format!("{label}{marker}"))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(label)
+                    .children(marker)
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if let Some(panel) = shell.sftp.panel_mut(side) {
                             panel.sort_by(column);
@@ -914,7 +922,11 @@ impl Shell {
     }
 
     fn render_crumbs(&self, side: Side, path: &str, cx: &mut Context<Self>) -> Vec<Stateful<Div>> {
-        let all = crumbs(path);
+        let mut all = crumbs(path);
+        // As in legacy, "/" shows only at the root itself.
+        if all.len() > 1 {
+            all.remove(0);
+        }
         // Long paths keep the last three folders, like the legacy breadcrumb.
         let skip = all.len().saturating_sub(3);
         let mut out = Vec::new();
@@ -922,6 +934,9 @@ impl Shell {
             out.push(div().id(SharedString::from(format!("crumb-more-{}", side.key()))).px_1().text_color(rgb(theme::TEXT)).child("…"));
         }
         for (i, (label, target)) in all.into_iter().enumerate().skip(skip) {
+            if i > skip || skip > 0 {
+                out.push(div().id(SharedString::from(format!("crumb-sep-{}-{i}", side.key()))).flex_none().child(svg().path(icon("arrow_right")).size(px(8.)).text_color(rgb(theme::TEXT_MUTED))));
+            }
             out.push(
                 div()
                     .id(SharedString::from(format!("crumb-{}-{i}", side.key())))
