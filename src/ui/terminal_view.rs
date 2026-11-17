@@ -493,7 +493,14 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn step_search(&mut self, previous: bool, cx: &mut Context<Self>) {
+    /// Opens «Search terminal» (⌘F, or the side panel's search row).
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search.get_or_insert_with(String::new);
+        window.focus(&self.search_focus);
+        cx.notify();
+    }
+
+    pub fn step_search(&mut self, previous: bool, cx: &mut Context<Self>) {
         if let Some(query) = self.search.clone() {
             self.search_found = self.terminal.find(&query, previous, false);
             cx.notify();
@@ -1126,11 +1133,7 @@ impl Render for TerminalView {
                 view.terminal.clear_buffer();
                 cx.notify();
             }))
-            .on_action(cx.listener(|view, _: &OpenTerminalSearch, window, cx| {
-                view.search.get_or_insert_with(String::new);
-                window.focus(&view.search_focus);
-                cx.notify();
-            }))
+            .on_action(cx.listener(|view, _: &OpenTerminalSearch, window, cx| view.open_search(window, cx)))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))

@@ -1,7 +1,8 @@
 //! The terminal side panel («Show Terminal Side-panel»), as in legacy:
 //! a Snippets tab (search, packages that expand, click shows the whole
 //! script, double click runs; right click: Run, Edit, Run in all tabs, Paste,
-//! Copy, View more) and a History tab (Shell History with PASTE and SAVE).
+//! Copy, View more) and a History tab (Shell History with PASTE and SAVE),
+//! after the Terminal tab (Search terminal and Autocomplete).
 
 use std::collections::HashSet;
 
@@ -21,6 +22,7 @@ pub const WIDTH: f32 = 340.;
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
+    Terminal,
     Snippets,
     History,
     Theme,
@@ -38,6 +40,7 @@ pub struct SidePanel {
     saved: Vec<usize>,
     font_open: bool,
     fonts_list_open: bool,
+    autocomplete_open: bool,
 }
 
 /// Snippets and packages matching the search, as legacy filters them:
@@ -167,10 +170,10 @@ impl Shell {
         let panel = self.side_panel.as_ref()?;
         let tab = |id: &str, name: &str, which: Tab, cx: &mut Context<Self>| {
             let active = panel.tab == which;
+            // Legacy: small icon buttons in a row on the left.
             div()
                 .id(SharedString::from(id.to_owned()))
-                .flex_1()
-                .h(px(30.))
+                .size(px(30.))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -187,8 +190,9 @@ impl Shell {
                     cx.notify();
                 }))
         };
-        let tabs = div().flex().gap_1().p_1().rounded_lg().bg(rgb(theme::SURFACE)).child(tab("panel-tab-snippets", "snippets", Tab::Snippets, cx)).child(tab("panel-tab-history", "logs", Tab::History, cx)).child(tab("panel-tab-theme", "theme", Tab::Theme, cx));
+        let tabs = div().flex().gap(px(6.)).child(tab("panel-tab-terminal", "navigate", Tab::Terminal, cx)).child(tab("panel-tab-snippets", "snippets", Tab::Snippets, cx)).child(tab("panel-tab-history", "logs", Tab::History, cx)).child(tab("panel-tab-theme", "theme", Tab::Theme, cx));
         let body = match panel.tab {
+            Tab::Terminal => self.render_panel_terminal(panel, cx),
             Tab::Snippets => self.render_panel_snippets(panel, &self.panel_focus, window, cx),
             Tab::History => self.render_panel_history(panel, cx),
             Tab::Theme => self.render_panel_theme(panel, cx),
@@ -497,6 +501,109 @@ impl Shell {
 
     /// Theme: «Font» (family and Text Size) and «Themes»; both change
     /// Settings → Terminal and every open terminal, as the legacy global theme does.
+    /// Legacy «Terminal» tab: Search terminal (opens the terminal's search bar,
+    /// ↑/↓ step through matches) and the Autocomplete setting.
+    fn render_panel_terminal(&self, panel: &SidePanel, cx: &mut Context<Self>) -> Div {
+        let step = |id: &str, previous: bool, cx: &mut Context<Self>| {
+            let caret = svg().path(icon("caret_down")).w(px(9.)).h(px(6.)).text_color(rgb(theme::TEXT_MUTED));
+            div()
+                .id(SharedString::from(id.to_owned()))
+                .size(px(20.))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_sm()
+                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .child(if previous { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret })
+                .on_click(cx.listener(move |shell, _, window, cx| {
+                    if let Some(view) = shell.active_terminal() {
+                        view.update(cx, |view, cx| {
+                            view.open_search(window, cx);
+                            view.step_search(previous, cx);
+                        });
+                    }
+                }))
+        };
+        let search = div()
+            .id("panel-terminal-search")
+            .h(px(32.))
+            .px_2()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded(px(5.))
+            .bg(rgb(theme::INPUT))
+            .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(div().flex_1().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(format!("Search terminal - {}", if cfg!(target_os = "macos") { "⌘ + F" } else { "Ctrl + F" })))
+            .on_click(cx.listener(|shell, _, window, cx| {
+                if let Some(view) = shell.active_terminal() {
+                    view.update(cx, |view, cx| view.open_search(window, cx));
+                }
+            }))
+            .child(step("panel-terminal-search-prev", true, cx))
+            .child(step("panel-terminal-search-next", false, cx));
+        let on = self.vault.terminal.autocomplete;
+        let open = panel.autocomplete_open;
+        let caret = svg().path(icon("caret_down")).w(px(9.)).h(px(6.)).text_color(rgb(theme::TEXT));
+        let autocomplete = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .text_color(rgb(theme::TEXT))
+                    .child("Autocomplete")
+                    .child(div().px(px(4.)).rounded(px(3.)).border_1().border_color(rgb(theme::TEXT_MUTED)).text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT_MUTED)).child("BETA")),
+            )
+            .child(
+                div()
+                    .id("panel-autocomplete")
+                    .flex()
+                    .items_center()
+                    .gap(px(5.))
+                    .cursor_pointer()
+                    .text_color(rgb(theme::TEXT))
+                    .child(if on { "Enabled" } else { "Disabled" })
+                    .child(if open { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret })
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        if let Some(panel) = &mut shell.side_panel {
+                            panel.autocomplete_open = !panel.autocomplete_open;
+                        }
+                        cx.notify();
+                    })),
+            );
+        let choices = open.then(|| {
+            super::settings_terminal::menu_list(
+                [("Enabled", true), ("Disabled", false)]
+                    .into_iter()
+                    .map(|(text, value)| {
+                        super::settings_terminal::menu_item(format!("panel-autocomplete-{text}").into(), text, value == on)
+                            .on_click(cx.listener(move |shell, _, _, cx| {
+                                if let Some(panel) = &mut shell.side_panel {
+                                    panel.autocomplete_open = false;
+                                }
+                                shell.update_terminal(|t| t.autocomplete = value, cx);
+                            }))
+                            .into_any_element()
+                    })
+                    .collect(),
+            )
+            .flex()
+            .flex_col()
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(12.))
+            .child(search)
+            .child(div().h(px(1.)).w_full().bg(rgb(theme::TITLE_BAR)))
+            .child(autocomplete)
+            .children(choices)
+    }
+
     fn render_panel_theme(&self, panel: &SidePanel, cx: &mut Context<Self>) -> Div {
         let settings = &self.vault.terminal;
         let size = settings.font_size;

@@ -130,6 +130,7 @@ pub(super) fn menu_list(children: Vec<AnyElement>) -> Div {
 pub(super) fn menu_item(id: SharedString, text: &str, selected: bool) -> Stateful<Div> {
     div()
         .id(id)
+        .w_full()
         .px(px(10.))
         .py(px(6.))
         .rounded(px(10.))
@@ -139,7 +140,7 @@ pub(super) fn menu_item(id: SharedString, text: &str, selected: bool) -> Statefu
         .text_color(rgb(theme::TEXT))
         .cursor_pointer()
         .hover(|s| s.bg(rgba(0xffffff14)))
-        .child(text.to_owned())
+        .child(div().flex_1().child(text.to_owned()))
         .when(selected, |d| d.child(div().text_color(rgb(MUTED)).child("✓")))
 }
 

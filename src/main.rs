@@ -552,7 +552,7 @@ impl Shell {
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = &self.vault.terminal;
         match session::local_shell(terminal.local_shell.as_deref(), terminal.emulation(), 80, 24, terminal.shell_history_import) {
-            Ok(session) => self.open_terminal("Local".into(), session, window, cx),
+            Ok(session) => self.open_terminal("Local Terminal".into(), session, window, cx),
             Err(error) => self.vault_error = Some(format!("Could not start a local shell: {error}")),
         }
     }
