@@ -465,11 +465,24 @@ impl SettingsWindow {
         let apps = self.shell.read(cx).sftp.actions.associations.list();
         if apps.is_empty() {
             return vec![section(vec![div()
-                .py(px(30.))
+                .pb(px(30.))
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap(px(8.))
+                .child(
+                    div()
+                        .mb(px(30.))
+                        .size(px(54.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(16.))
+                        .border_1()
+                        .border_color(gpui::rgba(0xffffff14))
+                        .bg(rgb(theme::SURFACE_ACTIVE))
+                        .child(gpui::svg().path(super::assets::icon("folder")).size(px(24.)).text_color(rgb(theme::TEXT))),
+                )
                 .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("No file type associations yet"))
                 .child(div().max_w(px(310.)).text_center().text_size(px(14.)).text_color(rgb(MUTED)).child("Apps you choose using the “Open with…” option to open files via SFTP will appear here."))
                 .into_any_element()])
