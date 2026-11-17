@@ -351,7 +351,7 @@ impl SettingsWindow {
 
         let account = section(vec![
             section_title("Локальная учётная запись").into_any_element(),
-            div().mt(px(8.)).text_size(px(14.)).text_color(rgb(theme::ACCENT)).child("Локальный пользователь").into_any_element(),
+            div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Локальный пользователь").into_any_element(),
             body_text("Профиль постоянно активен. Вход в аккаунт Termius не требуется.").into_any_element(),
             body_text("Выход, смена аккаунта и удаление учётной записи отключены. Синхронизация работает через ваше облако.").into_any_element(),
         ]);
