@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use futures::StreamExt;
 use gpui::{div, img, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, KeyDownEvent, MouseButton, SharedString, Stateful, Window};
 use termian_native::forwarding::{ForwardEvent, Forwarding, Spec};
+use termian_native::forwarding_wizard::{self as wizard, Step};
 use termian_native::login::{Answer, HostKeyDecision, LoginEvent, LoginState};
 use termian_native::session::SshTarget;
 use termian_native::theme;
@@ -38,6 +39,8 @@ pub struct RuleEditor {
     field: Field,
     hosts_open: bool,
     confirm_remove: bool,
+    /// The Port Forwarding Wizard step; `None` shows the form.
+    wizard: Option<Step>,
 }
 
 pub enum RuleStatus {
@@ -67,14 +70,18 @@ fn kind_name(kind: RuleKind) -> &'static str {
 }
 
 impl Shell {
+    /// The NEW FORWARDING button: a Local rule in the wizard, as in legacy.
     pub fn new_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_rule_of(RuleKind::Local, window, cx);
+        if let Some(editor) = &mut self.rules.editor {
+            editor.wizard = Some(Step::Kind);
+        }
     }
 
     /// The New Forwarding menu: a rule of the chosen kind.
     pub fn new_rule_of(&mut self, kind: RuleKind, window: &mut Window, cx: &mut Context<Self>) {
         let rule = ForwardingRule::new(self.vault.next_id(), kind);
-        self.rules.editor = Some(RuleEditor { rule, created_here: true, field: Field::Label, hosts_open: false, confirm_remove: false });
+        self.rules.editor = Some(RuleEditor { rule, created_here: true, field: Field::Label, hosts_open: false, confirm_remove: false, wizard: None });
         window.focus(&self.editor_focus);
         cx.notify();
     }
@@ -82,15 +89,52 @@ impl Shell {
     fn edit_rule(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(rule) = self.vault.rule(id).cloned() else { return };
         self.rules.menu = None;
-        self.rules.editor = Some(RuleEditor { rule, created_here: false, field: Field::Label, hosts_open: false, confirm_remove: false });
+        self.rules.editor = Some(RuleEditor { rule, created_here: false, field: Field::Label, hosts_open: false, confirm_remove: false, wizard: None });
         window.focus(&self.editor_focus);
         cx.notify();
     }
 
+    /// The form saves as you type; the wizard only on Done.
     fn save_rule_draft(&mut self) {
         let Some(editor) = &self.rules.editor else { return };
+        if editor.wizard.is_some() {
+            return;
+        }
         self.vault.save_rule(editor.rule.clone());
         self.save_vault();
+    }
+
+    fn set_rule_kind(&mut self, kind: RuleKind, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.rules.editor {
+            let default_label = ForwardingRule::new(0, editor.rule.kind).label;
+            if editor.rule.label == default_label {
+                editor.rule.label = ForwardingRule::new(0, kind).label;
+            }
+            editor.rule.kind = kind;
+        }
+        self.save_rule_draft();
+        cx.notify();
+    }
+
+    /// Continue / Done in the wizard; Done saves the rule and shows its form.
+    fn wizard_continue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = &mut self.rules.editor else { return };
+        let Some(step) = editor.wizard else { return };
+        if !wizard::can_continue(step, &editor.rule) {
+            return;
+        }
+        editor.hosts_open = false;
+        editor.wizard = wizard::next(editor.rule.kind, step);
+        editor.field = match editor.wizard {
+            Some(Step::Destination) => Field::Destination,
+            Some(Step::LocalPort | Step::RemotePort) => Field::Port,
+            _ => Field::Label,
+        };
+        if editor.wizard.is_none() {
+            self.save_rule_draft();
+        }
+        window.focus(&self.editor_focus);
+        cx.notify();
     }
 
     fn remove_rule(&mut self, id: u64, cx: &mut Context<Self>) {
@@ -208,7 +252,7 @@ impl Shell {
         }
     }
 
-    fn on_rule_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_rule_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.rules.editor else { return };
         if editor.confirm_remove {
@@ -242,13 +286,22 @@ impl Shell {
                 self.save_rule_draft();
             }
             Key::Escape => self.rules.editor = None,
+            Key::Enter if editor.wizard.is_some() => {
+                cx.stop_propagation();
+                return self.wizard_continue(window, cx);
+            }
             Key::Enter | Key::Ignored => {
                 if event.keystroke.key != "tab" {
                     return;
                 }
-                const ORDER: [Field; 5] = [Field::Label, Field::Port, Field::Bind, Field::Destination, Field::DestinationPort];
-                let at = ORDER.iter().position(|f| *f == editor.field).unwrap_or(0);
-                editor.field = ORDER[(at + 1) % ORDER.len()];
+                let order: &[Field] = match editor.wizard {
+                    None => &[Field::Label, Field::Port, Field::Bind, Field::Destination, Field::DestinationPort],
+                    Some(Step::LocalPort | Step::RemotePort) => &[Field::Port, Field::Bind],
+                    Some(Step::Destination) => &[Field::Destination, Field::DestinationPort],
+                    Some(_) => &[Field::Label],
+                };
+                let at = order.iter().position(|f| *f == editor.field).unwrap_or(0);
+                editor.field = order[(at + 1) % order.len()];
             }
         }
         cx.stop_propagation();
@@ -315,6 +368,128 @@ impl Shell {
             .child(div().relative().child(picker).children(list))
     }
 
+    /// One Port Forwarding Wizard step: Back, the question, the diagram,
+    /// the explanation and fields, and Continue (Done on the label).
+    fn render_wizard_step(&self, step: Step, window: &Window, cx: &mut Context<Self>) -> Div {
+        let Some(editor) = &self.rules.editor else { return div() };
+        let rule = &editor.rule;
+        let kind = rule.kind;
+        let port = |p: Option<u16>| p.map(|p| p.to_string()).unwrap_or_default();
+        let enabled = wizard::can_continue(step, rule);
+        let continue_button = |label: &str, cx: &mut Context<Self>| {
+            dialog::button("wizard-continue", label, Kind::Accent, !enabled).w_full().when(enabled, |b| b.on_click(cx.listener(|shell, _, window, cx| shell.wizard_continue(window, cx))))
+        };
+        let question = match step {
+            Step::Kind => "Select the port forwarding type:",
+            Step::LocalPort => "Set the local port and binding address:",
+            Step::RemotePort => "Set the port and binding address:",
+            Step::Host if kind == RuleKind::Remote => "Select the remote host:",
+            Step::Host => "Select the intermediate host:",
+            Step::Destination => "Select the destination host:",
+            Step::Label => "Select the label:",
+        };
+        let explanation = match (step, kind) {
+            (Step::Kind, RuleKind::Local) => "Local forwarding lets you access a remote server's listening port as though it were local.",
+            (Step::Kind, RuleKind::Remote) => "Remote forwarding opens a port on the remote machine and forwards connections to the local (current) host.",
+            (Step::Kind, RuleKind::Dynamic) => "Dynamic port forwarding turns Termius into a SOCKS proxy server. SOCKS proxy server is a protocol to request any connection via a remote host.",
+            (Step::LocalPort, RuleKind::Dynamic) => "This port will be open on the local (current) device, and it will receive the traffic.",
+            (Step::LocalPort, _) => "This port will be open on the local (current) machine to forward traffic to the remote host.",
+            (Step::RemotePort, _) => "We will forward traffic from specified port and interface address of the selected host.",
+            (Step::Host, RuleKind::Local) => "This device is used as an intermediate host to access the remote host.",
+            (Step::Host, RuleKind::Remote) => "Select a host where the port will be open. The traffic from this port will be forwarded to the destination host.",
+            (Step::Host, RuleKind::Dynamic) => "The intermediate host will receive the traffic that will be forwarded to the local (current) host.",
+            (Step::Destination, RuleKind::Local) => "IP address/hostname and the port number of the remote host where the intermediate host will direct the traffic.",
+            (Step::Destination, _) => "The destination address and port where the traffic will be forwarded.",
+            (Step::Label, _) => "",
+        };
+        let mut header = div().flex().flex_col().gap(px(20.)).child(div().font_weight(FontWeight::SEMIBOLD).child(question));
+        if step == Step::Kind {
+            header = header.child(div().flex().p_1().gap_1().rounded_md().bg(rgb(theme::INPUT)).children([RuleKind::Local, RuleKind::Remote, RuleKind::Dynamic].map(|k| {
+                div()
+                    .id(SharedString::from(format!("wizard-kind-{}", kind_name(k))))
+                    .flex_1()
+                    .h(px(30.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_sm()
+                    .text_sm()
+                    .when(k == kind, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .child(kind_name(k))
+                    .on_click(cx.listener(move |shell, _, _, cx| shell.set_rule_kind(k, cx)))
+            })));
+        }
+        let diagram = match kind {
+            RuleKind::Local => "pf_local",
+            RuleKind::Remote => "pf_remote",
+            RuleKind::Dynamic => "pf_dynamic",
+        };
+        let mut content = div().flex().flex_col().gap(px(20.)).when(!explanation.is_empty(), |d| d.child(div().text_sm().child(explanation)));
+        content = match step {
+            Step::Kind => content.child(continue_button("Continue", cx)).child(dialog::button("wizard-skip", "Skip wizard", Kind::Regular, false).w_full().on_click(cx.listener(|shell, _, window, cx| {
+                if let Some(editor) = &mut shell.rules.editor {
+                    editor.wizard = None;
+                }
+                shell.save_rule_draft();
+                window.focus(&shell.editor_focus);
+                cx.notify();
+            }))),
+            Step::LocalPort | Step::RemotePort => {
+                let label = if step == Step::LocalPort { "Local port number *" } else { "Remote port number *" };
+                content.child(self.rule_input(Field::Port, label, port(rule.port), window, cx)).child(self.rule_input(Field::Bind, "Bind address", rule.bind_address.clone(), window, cx)).child(continue_button("Continue", cx))
+            }
+            Step::Destination => content
+                .child(self.rule_input(Field::Destination, "Destination address *", rule.destination.clone(), window, cx))
+                .child(self.rule_input(Field::DestinationPort, "Destination port number *", port(rule.destination_port), window, cx))
+                .child(continue_button("Continue", cx)),
+            Step::Label => content.child(self.rule_input(Field::Label, "Label", rule.label.clone(), window, cx)).child(continue_button("Done", cx)),
+            Step::Host => {
+                let list = editor.hosts_open.then(|| {
+                    let mut list = div().id("wizard-host-list").max_h(px(240.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT));
+                    for host in &self.vault.hosts {
+                        let id = host.id;
+                        list = list.child(menu_row(format!("wizard-host-{id}"), host.display_label(), false, false).on_click(cx.listener(move |shell, _, window, cx| {
+                            if let Some(editor) = &mut shell.rules.editor {
+                                editor.rule.host = Some(id);
+                            }
+                            shell.wizard_continue(window, cx);
+                        })));
+                    }
+                    list
+                });
+                content
+                    .child(dialog::button("wizard-select-host", "Select a host", Kind::Accent, false).w_full().on_click(cx.listener(|shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.rules.editor {
+                            editor.hosts_open = !editor.hosts_open;
+                        }
+                        cx.notify();
+                    })))
+                    .children(list)
+            }
+        };
+        let back = (step != Step::Kind).then(|| {
+            div().id("wizard-back").flex().items_center().gap_1().cursor_pointer().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("‹ Back").on_click(cx.listener(|shell, _, window, cx| {
+                if let Some(editor) = &mut shell.rules.editor {
+                    if let Some(step) = editor.wizard {
+                        editor.wizard = Some(wizard::back(editor.rule.kind, step));
+                        editor.hosts_open = false;
+                    }
+                }
+                window.focus(&shell.editor_focus);
+                cx.notify();
+            }))
+        });
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(20.))
+            .text_color(rgb(theme::TEXT))
+            .children(back)
+            .child(header)
+            .child(div().flex().justify_center().child(img(icon(diagram)).w(px(250.)).h(px(150.))))
+            .child(content)
+    }
+
     fn render_rule_editor(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let editor = self.rules.editor.as_ref()?;
         let rule = &editor.rule;
@@ -328,7 +503,11 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { "New Port Forwarding" } else { "Edit Port Forwarding" }))
+            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(match editor.wizard {
+                Some(step) => wizard::title(step, rule.kind),
+                None if editor.created_here => "New Port Forwarding",
+                None => "Edit Port Forwarding",
+            }))
             .child(dialog::collapse_button("rule-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.rules.editor = None;
                 cx.notify();
@@ -350,17 +529,7 @@ impl Shell {
                     .text_color(rgb(theme::TEXT))
                     .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
                     .child(kind_name(kind))
-                    .on_click(cx.listener(move |shell, _, _, cx| {
-                        if let Some(editor) = &mut shell.rules.editor {
-                            let default_label = ForwardingRule::new(0, editor.rule.kind).label;
-                            if editor.rule.label == default_label {
-                                editor.rule.label = ForwardingRule::new(0, kind).label;
-                            }
-                            editor.rule.kind = kind;
-                        }
-                        shell.save_rule_draft();
-                        cx.notify();
-                    }))
+                    .on_click(cx.listener(move |shell, _, _, cx| shell.set_rule_kind(kind, cx)))
             }))
         });
         let diagram = match rule.kind {
@@ -397,8 +566,31 @@ impl Shell {
                 .child(self.host_field("Intermediate host", cx)),
         };
 
+        // "Need help…" while adding a rule, as in the legacy form.
+        let form = if editor.created_here {
+            form.child(
+                div()
+                    .mt(px(20.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .text_sm()
+                    .text_color(rgb(theme::TEXT_MUTED))
+                    .child("Need help configuring the port forwarding rule?")
+                    .child(div().id("rule-open-wizard").cursor_pointer().text_color(rgb(theme::ACCENT)).child("Open Port Forwarding Wizard").on_click(cx.listener(|shell, _, window, cx| {
+                        if let Some(editor) = &mut shell.rules.editor {
+                            editor.wizard = Some(Step::Kind);
+                            editor.hosts_open = false;
+                        }
+                        window.focus(&shell.editor_focus);
+                        cx.notify();
+                    }))),
+            )
+        } else {
+            form
+        };
         let id = rule.id;
-        let footer = (!editor.created_here || self.vault.rule(id).is_some()).then(|| {
+        let footer = (editor.wizard.is_none() && (!editor.created_here || self.vault.rule(id).is_some())).then(|| {
             div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).flex().justify_end().child(
                 dialog::button("rule-remove", "Remove", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.rules.editor {
@@ -425,7 +617,10 @@ impl Shell {
             .border_color(rgb(theme::TITLE_BAR))
             .shadow_lg()
             .child(header)
-            .child(div().id("rule-body").flex_1().overflow_y_scroll().p(px(15.)).child(form))
+            .child(div().id("rule-body").flex_1().overflow_y_scroll().p(px(15.)).child(match editor.wizard {
+                Some(step) => self.render_wizard_step(step, window, cx),
+                None => form,
+            }))
             .children(footer);
         let confirm = editor.confirm_remove.then(|| self.remove_rule_dialog(id, cx));
         Some(match confirm {
