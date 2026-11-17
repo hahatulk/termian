@@ -641,7 +641,8 @@ fn main() {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Termian".into()),
                     appears_transparent: cfg!(target_os = "macos"),
-                    ..Default::default()
+                    // Centred in the 44 px tab strip: the buttons are 12 px tall.
+                    traffic_light_position: Some(gpui::point(px(14.), px(16.))),
                 }),
                 ..Default::default()
             },
