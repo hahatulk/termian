@@ -227,6 +227,19 @@ impl Shell {
                 let _ = store.save(&vault);
             }
         }
+        if !demo && store.is_some() && !vault.legacy_hidden_identities_folded {
+            // Hosts' own credentials imported as Keychain identities; a
+            // locked keychain is tried again at the next start.
+            match load_legacy_vault() {
+                Ok(legacy) => vault.fold_hidden_identities(&legacy),
+                // Without a legacy profile there is nothing to fold.
+                Err(error) if error == "legacy profile not found" => vault.legacy_hidden_identities_folded = true,
+                Err(error) => eprintln!("[Termian] Host credentials were not separated from identities: {error}"),
+            }
+            if let Some(store) = &store {
+                let _ = store.save(&vault);
+            }
+        }
         if !demo && store.is_some() && !vault.legacy_templates_imported {
             import_legacy_templates(&mut vault);
             if let Some(store) = &store {

@@ -438,6 +438,18 @@ impl SettingsWindow {
                 }))
                 .into_any_element(),
         );
+        // Legacy routes this to the Termius feedback board, which the bundle
+        // lacks; here it opens the project's issues.
+        keywords.push(body_text("Would you like to add custom rules to highlight output in the terminal?").into_any_element());
+        keywords.push(
+            div()
+                .mt(px(10.))
+                .child(
+                    super::settings::action_button("term-keywords-feedback", "Let us know", true, false)
+                        .on_click(|_, _, cx| cx.open_url("https://github.com/hahatulk/termian/issues")),
+                )
+                .into_any_element(),
+        );
 
         // Detect Host Operating System
         let detect = vec![

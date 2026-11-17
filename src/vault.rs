@@ -381,6 +381,9 @@ pub struct Vault {
     /// Saved marks and comments were read for history imported before they were.
     #[serde(default)]
     pub legacy_bookmarks_imported: bool,
+    /// Hosts' own credentials imported as Keychain identities were folded back.
+    #[serde(default)]
+    pub legacy_hidden_identities_folded: bool,
     /// Vaults toolbar view and sorting per section; device-local like legacy.
     #[serde(default)]
     pub listing: crate::listing::ListingSettings,
@@ -471,6 +474,34 @@ impl Vault {
             }
         }
         self.secrets_missing = legacy.secrets_missing;
+    }
+
+    /// A host's own credentials (a hidden legacy identity) imported before
+    /// they were told apart ended up as a Keychain identity linked to the host.
+    /// An identity is folded back into its hosts only when the fresh legacy
+    /// read `legacy` has no such identity and gives the same host no identity;
+    /// a folded identity is removed once nothing links to it.
+    pub fn fold_hidden_identities(&mut self, legacy: &Vault) {
+        self.legacy_hidden_identities_folded = true;
+        let stale: Vec<u64> = self
+            .identities
+            .iter()
+            .filter(|i| !legacy.identities.iter().any(|l| l.id == i.id))
+            .map(|i| i.id)
+            .collect();
+        let mut folded = Vec::new();
+        for host in &mut self.hosts {
+            let Some(id) = host.identity.filter(|id| stale.contains(id)) else { continue };
+            let Some(from) = legacy.hosts.iter().find(|h| h.id == host.id && h.label == host.label && h.identity.is_none()) else { continue };
+            let identity = self.identities.iter().find(|i| i.id == id);
+            host.username = host.username.take().or_else(|| from.username.clone()).or_else(|| identity.map(|i| i.username.clone()).filter(|u| !u.is_empty()));
+            host.password = host.password.take().or_else(|| from.password.clone()).or_else(|| identity.and_then(|i| i.password.clone()));
+            host.key = host.key.or(from.key).or_else(|| identity.and_then(|i| i.key));
+            host.identity = None;
+            folded.push(id);
+        }
+        let hosts = &self.hosts;
+        self.identities.retain(|i| !folded.contains(&i.id) || hosts.iter().any(|h| h.identity == Some(i.id)));
     }
 
     /// Legacy Saved marks and comments for connections imported before they
@@ -884,6 +915,37 @@ pub(crate) mod tests {
         assert!(v.legacy_bookmarks_imported);
         let got: Vec<_> = v.history.iter().map(|e| (e.saved, e.comment.as_str())).collect();
         assert_eq!(got, [(true, "theirs"), (true, "mine"), (false, "")]);
+    }
+
+    #[test]
+    fn hidden_identities_imported_as_keychain_entries_fold_back_into_hosts() {
+        let identity = |id, label: &str| Identity { id, label: label.into(), username: label.into(), password: Some(format!("{label}-pw")), ..Identity::default() };
+        let mut vault = Vault {
+            hosts: vec![
+                Host { identity: Some(21), ..host(10, "web", None) },
+                Host { identity: Some(20), ..host(11, "api", None) },
+                Host { identity: Some(22), ..host(12, "renamed", None) },
+            ],
+            identities: vec![identity(20, "ops"), identity(21, "pt"), identity(22, "db"), identity(23, "mine")],
+            ..Vault::default()
+        };
+        let legacy = Vault {
+            hosts: vec![
+                Host { username: Some("pt".into()), password: Some("secret".into()), key: Some(1), ..host(10, "web", None) },
+                Host { identity: Some(20), ..host(11, "api", None) },
+                host(12, "old name", None),
+            ],
+            identities: vec![identity(20, "ops")],
+            ..Vault::default()
+        };
+        vault.fold_hidden_identities(&legacy);
+        assert!(vault.legacy_hidden_identities_folded);
+        let web = &vault.hosts[0];
+        assert_eq!((web.identity, web.username.as_deref(), web.password.as_deref(), web.key), (None, Some("pt"), Some("secret"), Some(1)));
+        assert_eq!(vault.hosts[1].identity, Some(20), "a real Keychain identity stays linked");
+        assert_eq!(vault.hosts[2].identity, Some(22), "a host that no longer matches is left alone");
+        // 23 was made here (not in legacy) and nothing links it, yet it is the user's own.
+        assert_eq!(vault.identities.iter().map(|i| i.id).collect::<Vec<_>>(), [20, 22, 23]);
     }
 
     #[test]
