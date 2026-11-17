@@ -3,6 +3,7 @@
 pub mod autocomplete;
 pub mod cloud;
 pub mod edits;
+pub mod file_access;
 pub mod files;
 pub mod forwarding;
 pub mod keys;

@@ -19,7 +19,7 @@ use super::cloud::Operation;
 use super::dialog::{checkbox, edit, Key};
 use crate::Shell;
 
-gpui::actions!(termian, [OpenSettings, OpenVaults, OpenSftp, Quit]);
+gpui::actions!(termian, [OpenSettings, OpenVaults, OpenSftp, OpenFileAccess, Quit]);
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tab {
@@ -200,17 +200,16 @@ pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
             let _ = main.update(cx, |shell, window, cx| shell.show_pinned(1, window, cx));
         });
     });
+    let file_access = std::rc::Rc::new(std::cell::RefCell::new(None));
+    cx.on_action(move |_: &OpenFileAccess, cx| super::file_access::open(&file_access, cx));
     cx.on_action(|_: &Quit, cx| cx.quit());
-    cx.set_menus(vec![Menu {
-        name: "termian".into(),
-        items: vec![
-            MenuItem::action("Vaults", OpenVaults),
-            MenuItem::action("SFTP", OpenSftp),
-            MenuItem::action("Settings…", OpenSettings),
-            MenuItem::separator(),
-            MenuItem::action("Quit termian", Quit),
-        ],
-    }]);
+    let mut items = vec![MenuItem::action("Vaults", OpenVaults), MenuItem::action("SFTP", OpenSftp), MenuItem::action("Settings…", OpenSettings)];
+    // The protected folders are a macOS matter, as in legacy.
+    if cfg!(target_os = "macos") {
+        items.push(MenuItem::action("Доступ к файлам…", OpenFileAccess));
+    }
+    items.extend([MenuItem::separator(), MenuItem::action("Quit termian", Quit)]);
+    cx.set_menus(vec![Menu { name: "termian".into(), items }]);
 }
 
 impl Shell {
