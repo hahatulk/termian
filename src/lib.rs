@@ -7,6 +7,7 @@ pub mod file_access;
 pub mod files;
 pub mod forwarding;
 pub mod forwarding_wizard;
+pub mod key_export;
 pub mod keys;
 pub mod known_hosts;
 pub mod legacy;

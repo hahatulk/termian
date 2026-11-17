@@ -1377,9 +1377,14 @@ pub(crate) mod tests {
                     script if script.starts_with(b"HISTFILE=;") => b"PRETTY_NAME=\"Ubuntu 24.04 LTS\" NAME=\"Ubuntu\" VERSION_ID=\"24.04\"\n",
                     _ => b"",
                 };
+                // `fail:` scripts exit 1 with the rest as output (key export errors).
+                let (reply, status) = match data.strip_prefix(b"fail:") {
+                    Some(message) => (message, 1),
+                    None => (reply, 0),
+                };
                 session.channel_success(channel)?;
                 session.data(channel, reply.to_vec())?;
-                session.exit_status_request(channel, 0)?;
+                session.exit_status_request(channel, status)?;
                 session.eof(channel)?;
                 session.close(channel)
             }

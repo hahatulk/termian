@@ -447,6 +447,13 @@ impl Shell {
                     .on_click(cx.listener(|shell, _, window, cx| shell.new_generated_key(window, cx)))
             ))
         });
+        // "Export to host", as in the legacy key form; a saved key only.
+        let export = (!editor.is_new && self.vault.key(key.id).is_some()).then(|| {
+            let id = key.id;
+            div().p(px(15.)).rounded_lg().bg(rgb(theme::SURFACE)).child(
+                dialog::button("key-export", "Export to host", Kind::Accent, false).w_full().on_click(cx.listener(move |shell, _, window, cx| shell.export_key(id, window, cx))),
+            )
+        });
         let remove = (!editor.is_new).then(|| {
             dialog::button("key-remove", "Remove", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.key_editor {
@@ -494,7 +501,7 @@ impl Shell {
             .border_color(rgb(theme::TITLE_BAR))
             .shadow_lg()
             .child(header)
-            .child(div().id("key-body").flex_1().overflow_y_scroll().p(px(15.)).flex().flex_col().gap(px(15.)).child(form).children(import))
+            .child(div().id("key-body").flex_1().overflow_y_scroll().p(px(15.)).flex().flex_col().gap(px(15.)).child(form).children(import).children(export))
             .children(remove.map(|button| div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).flex().justify_end().child(button)));
         Some(match confirm {
             Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
