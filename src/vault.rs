@@ -120,6 +120,9 @@ pub struct SshKey {
     pub public_key: Option<String>,
     #[serde(default)]
     pub passphrase: Option<String>,
+    /// OpenSSH user certificate for this key (legacy `ssh_certificates`, the first one).
+    #[serde(default)]
+    pub certificate: Option<String>,
 }
 
 impl SshKey {

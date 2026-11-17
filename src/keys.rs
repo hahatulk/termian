@@ -3,7 +3,7 @@
 //! key and algorithm it has.
 
 use russh::keys::{decode_secret_key, Algorithm, PrivateKey};
-use russh::keys::ssh_key::{private::RsaKeypair, EcdsaCurve, LineEnding};
+use russh::keys::ssh_key::{private::RsaKeypair, Certificate, EcdsaCurve, LineEnding};
 
 use crate::vault::key_kind;
 
@@ -55,6 +55,11 @@ pub fn generate(algorithm: KeyAlgorithm, passphrase: &str) -> Result<GeneratedKe
     Ok(GeneratedKey { private_key, public_key })
 }
 
+/// Parses an OpenSSH user certificate (`ssh-ed25519-cert-v01@openssh.com AAAA… comment`).
+pub fn parse_certificate(text: &str) -> Option<Certificate> {
+    Certificate::from_openssh(text.trim()).ok()
+}
+
 /// Decodes an OpenSSH, PEM or PuTTY private key.
 pub fn decode(private_key: &str, passphrase: Option<&str>) -> Result<PrivateKey, KeyCheck> {
     if private_key.trim().is_empty() {
@@ -92,6 +97,17 @@ pub fn is_encrypted(private_key: &str) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Throwaway user certificate for `PLAIN` (principal `root`, signed by a throwaway CA).
+    pub const PLAIN_CERTIFICATE: &str = "ssh-ed25519-cert-v01@openssh.com AAAAIHNzaC1lZDI1NTE5LWNlcnQtdjAxQG9wZW5zc2guY29tAAAAIFmfMFO4VnY6meSV7xctJkTLlE0M2bFdjZpxP8eHUQLaAAAAIGY0V/cXX2ZB2srXBjcLXphCpJPFX9l1YEFdHMVw14OyAAAAAAAAAAAAAAABAAAADHRlcm1pYW4tdGVzdAAAAAgAAAAEcm9vdAAAAAAAAAAA//////////8AAAAAAAAAggAAABVwZXJtaXQtWDExLWZvcndhcmRpbmcAAAAAAAAAF3Blcm1pdC1hZ2VudC1mb3J3YXJkaW5nAAAAAAAAABZwZXJtaXQtcG9ydC1mb3J3YXJkaW5nAAAAAAAAAApwZXJtaXQtcHR5AAAAAAAAAA5wZXJtaXQtdXNlci1yYwAAAAAAAAAAAAAAMwAAAAtzc2gtZWQyNTUxOQAAACBuQnXkDNkVzvFEhIW7sEuIX1y28WebSMfgCErUS5deZQAAAFMAAAALc3NoLWVkMjU1MTkAAABAfNu48zpibZIEA4J7GWSp600DkjiKIMz5tv+/DFgelzDHRZDsM/YekdCoS3huvWaNW/bXO+YLiV62c8QDDr9kAg== termian-test";
+
+    #[test]
+    fn certificates_parse_and_other_text_is_rejected() {
+        let certificate = parse_certificate(PLAIN_CERTIFICATE).unwrap();
+        assert_eq!(certificate.valid_principals(), ["root"]);
+        assert!(parse_certificate("ssh-ed25519 AAAA").is_none());
+        assert!(parse_certificate("").is_none());
+    }
 
     /// Throwaway test keys, generated for these tests only.
     pub const PLAIN: &str = "-----BEGIN OPENSSH PRIVATE KEY-----

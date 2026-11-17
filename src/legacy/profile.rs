@@ -115,6 +115,13 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
         })
         .collect();
 
+    // Legacy keeps certificates apart, linked to their key; the key form shows the first one.
+    let mut certificates: HashMap<u64, String> = HashMap::new();
+    for (_, v) in store("ssh_certificates") {
+        if let (Some(key), Some(certificate)) = (link(v, "ssh_key"), secret(v.get("certificate"))) {
+            certificates.entry(key).or_insert(certificate);
+        }
+    }
     let keys = store("keys")
         .iter()
         .map(|(id, v)| SshKey {
@@ -124,6 +131,7 @@ pub fn load_vault(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vault, S
             private_key: secret(v.get("private_key")),
             public_key: text(v.get("public_key")).filter(|k| !k.is_empty()),
             passphrase: secret(v.get("passphrase")),
+            certificate: certificates.remove(id),
         })
         .collect();
     let identities = store("ssh_identities")
@@ -563,6 +571,7 @@ mod tests {
         ]))]);
         write_store(root, "snippets_packages", vec![(5., record(&[("label", F::Secret("k8s"))]))]);
         write_store(root, "known_hosts", vec![(4., record(&[("hostname", F::Secret("[10.0.0.1]:2001"))]))]);
+        write_store(root, "ssh_certificates", vec![(6., record(&[("certificate", F::Secret("ssh-ed25519-cert-v01@openssh.com AAAA")), ("ssh_key", F::Link(1))]))]);
 
         let vault = load_vault(root, &cipher()).unwrap();
 
@@ -573,6 +582,7 @@ mod tests {
             private_key: Some("-----BEGIN OPENSSH PRIVATE KEY-----".into()),
             public_key: Some("ssh-ed25519 AAAA".into()),
             passphrase: Some("phrase".into()),
+            certificate: Some("ssh-ed25519-cert-v01@openssh.com AAAA".into()),
         }]);
         assert_eq!((vault.identities[0].password.as_deref(), vault.identities[0].key), (Some("pw"), Some(1)));
         assert_eq!(vault.identities[0].subtitle(), "Auth password and key");

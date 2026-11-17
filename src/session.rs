@@ -295,8 +295,27 @@ pub struct SshTarget {
     /// Saved password, tried once before asking.
     pub password: Option<String>,
     /// Private key from the Keychain (and its passphrase), offered first.
-    pub key: Option<(String, Option<String>)>,
+    pub key: Option<LoginKey>,
     pub options: SshOptions,
+}
+
+/// A Keychain key as SSH login offers it: with its certificate, when it has one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoginKey {
+    pub private_key: String,
+    pub passphrase: Option<String>,
+    pub certificate: Option<String>,
+}
+
+impl LoginKey {
+    pub fn new(private_key: impl Into<String>, passphrase: Option<String>) -> Self {
+        Self { private_key: private_key.into(), passphrase, certificate: None }
+    }
+
+    /// `None` for a key without its private part.
+    pub fn from_vault(key: &crate::vault::SshKey) -> Option<Self> {
+        Some(Self { certificate: key.certificate.clone(), ..Self::new(key.private_key.clone()?, key.passphrase.clone()) })
+    }
 }
 
 /// Settings → Terminal values a connection uses.
@@ -379,7 +398,7 @@ impl SshTarget {
         let (username, password, key) = vault.credentials(host);
         let mut target = Self {
             password,
-            key: key.and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone()))),
+            key: key.and_then(LoginKey::from_vault),
             ..Self::new(&host.destination(), username)
         };
         let settings = &host.settings;
@@ -432,7 +451,7 @@ pub(crate) trait Prompter: Send {
     fn host_key(&mut self, info: HostKeyInfo) -> BoxFuture<'_, HostKeyDecision>;
 
     /// Credentials of an identity picked on the Username question, once.
-    fn take_identity(&mut self) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
+    fn take_identity(&mut self) -> Option<(Option<String>, Option<LoginKey>)> {
         None
     }
 
@@ -448,7 +467,7 @@ pub(crate) struct EventPrompter<F: FnMut(LoginEvent) + Send> {
     pub emit: F,
     pub answers: UnboundedReceiver<Answer>,
     /// Password and key of an identity picked for the username.
-    pub picked: Option<(Option<String>, Option<(String, Option<String>)>)>,
+    pub picked: Option<(Option<String>, Option<LoginKey>)>,
 }
 
 impl<F: FnMut(LoginEvent) + Send> Prompter for EventPrompter<F> {
@@ -470,7 +489,7 @@ impl<F: FnMut(LoginEvent) + Send> Prompter for EventPrompter<F> {
         })
     }
 
-    fn take_identity(&mut self) -> Option<(Option<String>, Option<(String, Option<String>)>)> {
+    fn take_identity(&mut self) -> Option<(Option<String>, Option<LoginKey>)> {
         self.picked.take()
     }
 
@@ -864,7 +883,7 @@ async fn authenticate(
     if handle.authenticate_none(user).await.map_err(failed)?.success() {
         return Ok(());
     }
-    if let Some((private_key, passphrase)) = &target.key {
+    if let Some(LoginKey { private_key, passphrase, certificate }) = &target.key {
         io.lock().await.log("Offering the key from the Keychain".into());
         let key = match crate::keys::decode(private_key, passphrase.as_deref()) {
             Ok(key) => Some(key),
@@ -874,6 +893,14 @@ async fn authenticate(
             }
             Err(_) => None,
         };
+        let certificate = certificate.as_deref().and_then(crate::keys::parse_certificate);
+        if let (Some(key), Some(certificate)) = (&key, certificate) {
+            io.lock().await.log("Offering the certificate of the Keychain key".into());
+            if handle.authenticate_openssh_cert(user, Arc::new(key.clone()), certificate).await.map_err(failed)?.success() {
+                io.lock().await.log("Authenticated with the Keychain certificate".into());
+                return Ok(());
+            }
+        }
         if let Some(key) = key {
             let hash = handle.best_supported_rsa_hash().await.ok().flatten().flatten();
             if handle.authenticate_publickey(user, PrivateKeyWithHashAlg::new(Arc::new(key), hash)).await.map_err(failed)?.success() {
@@ -1293,6 +1320,11 @@ pub(crate) mod tests {
                 Ok(if user == "root" && accepted { Auth::Accept } else { Auth::reject() })
             }
 
+            async fn auth_openssh_certificate(&mut self, user: &str, certificate: &russh::keys::Certificate) -> Result<Auth, Self::Error> {
+                let accepted = certificate.valid_principals().iter().any(|p| p == user) && certificate.key_id() == "termian-test";
+                Ok(if user == "root" && accepted { Auth::Accept } else { Auth::reject() })
+            }
+
             async fn channel_open_session(
                 &mut self,
                 channel: Channel<Msg>,
@@ -1627,7 +1659,7 @@ pub(crate) mod tests {
     fn the_keychain_key_logs_in_and_its_passphrase_is_asked_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let mut target = target(server::start(), dir.path().join("known_hosts"));
-        target.key = Some((crate::keys::tests::PLAIN.into(), None));
+        target.key = Some(LoginKey::new(crate::keys::tests::PLAIN, None));
         let mut session = ssh(target, 80, 24);
         collect_until(&mut session, "<hostkey");
         session.answer(Answer::HostKey(HostKeyDecision::Once));
@@ -1636,7 +1668,7 @@ pub(crate) mod tests {
 
         // A key the server does not accept falls through to the password.
         let mut target = target_for(server::start(), dir.path().join("known_hosts2"));
-        target.key = Some((crate::keys::tests::ENCRYPTED.into(), None));
+        target.key = Some(LoginKey::new(crate::keys::tests::ENCRYPTED, None));
         let mut session = ssh(target, 80, 24);
         collect_until(&mut session, "<hostkey");
         session.answer(Answer::HostKey(HostKeyDecision::Once));
@@ -1647,12 +1679,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_keychain_certificate_is_offered_before_the_bare_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = target(server::start(), dir.path().join("known_hosts"));
+        target.key = Some(LoginKey { certificate: Some(crate::keys::tests::PLAIN_CERTIFICATE.into()), ..LoginKey::new(crate::keys::tests::PLAIN, None) });
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        let output = collect_until(&mut session, "welcome");
+        assert!(output.contains("Authenticated with the Keychain certificate"), "{output:?}");
+    }
+
+    #[test]
     fn generated_encrypted_key_prompts_only_when_passphrase_was_not_saved() {
         let dir = tempfile::tempdir().unwrap();
         let key = crate::keys::generate(crate::keys::KeyAlgorithm::Ed25519, "generated passphrase").unwrap();
         for saved in [false, true] {
             let mut target = target_for(server::start(), dir.path().join(format!("known-{saved}")));
-            target.key = Some((key.private_key.clone(), saved.then(|| "generated passphrase".into())));
+            target.key = Some(LoginKey::new(key.private_key.clone(), saved.then(|| "generated passphrase".into())));
             target.password = Some(server::PASSWORD.into());
             let mut session = ssh(target, 80, 24);
             collect_until(&mut session, "<hostkey");

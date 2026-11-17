@@ -43,6 +43,8 @@ pub struct HostEditor {
     port: String,
     groups_open: bool,
     pub(super) keys_open: bool,
+    /// The picker was opened from «Certificate»: only keys with a certificate.
+    pub(super) certificates_only: bool,
     /// The «+ SSH.id, Key, Certificate, FIDO2» menu is open.
     pub(super) key_menu: bool,
     menu_open: bool,
@@ -182,6 +184,7 @@ impl Shell {
             port,
             groups_open: false,
             keys_open: false,
+            certificates_only: false,
             key_menu: false,
             menu_open: false,
             confirm_remove: false,

@@ -46,7 +46,7 @@ pub enum Answer {
     Text(Option<String>),
     /// An identity picked on the Username question: its username answers it
     /// and its password and key are used to authenticate.
-    Identity { username: String, password: Option<String>, key: Option<(String, Option<String>)> },
+    Identity { username: String, password: Option<String>, key: Option<crate::session::LoginKey> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -194,7 +194,7 @@ impl IdentityChoice {
             .iter()
             .filter(|identity| !identity.username.is_empty())
             .map(|identity| {
-                let key = identity.key.and_then(|id| vault.key(id)).and_then(|k| Some((k.private_key.clone()?, k.passphrase.clone())));
+                let key = identity.key.and_then(|id| vault.key(id)).and_then(crate::session::LoginKey::from_vault);
                 Self {
                     label: identity.label.clone(),
                     subtitle: identity.subtitle(),
@@ -268,7 +268,7 @@ mod tests {
         let choices = IdentityChoice::all(&vault);
         assert_eq!(choices.len(), 1, "an identity without a username cannot answer");
         assert_eq!(choices[0].subtitle, "Auth key");
-        assert_eq!(choices[0].answer, Answer::Identity { username: "root".into(), password: None, key: Some(("PRIVATE".into(), None)) });
+        assert_eq!(choices[0].answer, Answer::Identity { username: "root".into(), password: None, key: Some(crate::session::LoginKey::new("PRIVATE", None)) });
         assert!(choices[0].matches("RO") && !choices[0].matches("pt"));
     }
 }

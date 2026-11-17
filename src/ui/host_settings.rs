@@ -144,7 +144,7 @@ impl Shell {
                 field_box(false)
                     .child(field_icon("keychain"))
                     .child(div().flex_1().truncate().text_color(rgb(theme::TEXT)).child(key.label.clone()))
-                    .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(key.kind.clone()))
+                    .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(if key.certificate.is_some() { "Certificate".to_owned() } else { key.kind.clone() }))
                     .child(clear("credentials-key-clear").on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(editor) = &mut shell.host_editor {
                             editor.host.key = None;
@@ -156,7 +156,8 @@ impl Shell {
             );
         } else if editor.keys_open {
             let mut menu = list("credentials-keys");
-            for key in &self.vault.keys {
+            let certificates_only = editor.certificates_only;
+            for key in self.vault.keys.iter().filter(|k| !certificates_only || k.certificate.is_some()) {
                 let id = key.id;
                 // A key whose private part could not be read from the legacy profile cannot be used.
                 let usable = key.private_key.is_some();
@@ -179,7 +180,7 @@ impl Shell {
                         field_box(true)
                             .id("credentials-key-field")
                             .child(field_icon("keychain"))
-                            .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child("Key"))
+                            .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child(if certificates_only { "Certificate" } else { "Key" }))
                             .child(clear("credentials-key-cancel").on_click(cx.listener(|shell, _, _, cx| {
                                 if let Some(editor) = &mut shell.host_editor {
                                     editor.keys_open = false;
@@ -210,8 +211,8 @@ impl Shell {
                     }
                     cx.notify();
                 }));
-            // SSH.id is a cloud service, and certificates and FIDO2 keys are not
-            // supported here: only Key can be chosen.
+            // SSH.id is a cloud service and FIDO2 keys are not supported here.
+            // A certificate belongs to its key, so Certificate picks among keys that have one.
             let menu = open.then(|| {
                 list("credentials-add-menu")
                     .child(menu_row("credentials-add-sshid".into(), "SSH.id — Passkeys for SSH", false, true))
@@ -219,10 +220,18 @@ impl Shell {
                         if let Some(editor) = &mut shell.host_editor {
                             editor.key_menu = false;
                             editor.keys_open = true;
+                            editor.certificates_only = false;
                         }
                         cx.notify();
                     })))
-                    .child(menu_row("credentials-add-certificate".into(), "Certificate", false, true))
+                    .child(menu_row("credentials-add-certificate".into(), "Certificate", false, false).on_click(cx.listener(|shell, _, _, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.key_menu = false;
+                            editor.keys_open = true;
+                            editor.certificates_only = true;
+                        }
+                        cx.notify();
+                    })))
                     .child(menu_row("credentials-add-fido2".into(), "FIDO2", false, true))
             });
             out.push(div().relative().child(button).children(menu.map(|menu| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(menu)).with_priority(1))).into_any_element());

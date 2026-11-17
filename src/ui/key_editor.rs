@@ -85,6 +85,7 @@ enum Field {
     Label,
     Passphrase,
     PrivateKey,
+    Certificate,
 }
 
 pub struct KeyEditor {
@@ -233,7 +234,8 @@ impl Shell {
             editor.field = match editor.field {
                 Field::Label => Field::Passphrase,
                 Field::Passphrase => Field::PrivateKey,
-                Field::PrivateKey => Field::Label,
+                Field::PrivateKey => Field::Certificate,
+                Field::Certificate => Field::Label,
             };
             cx.stop_propagation();
             cx.notify();
@@ -243,8 +245,9 @@ impl Shell {
             Field::Label => &mut editor.key.label,
             Field::Passphrase => editor.key.passphrase.get_or_insert_with(String::new),
             Field::PrivateKey => editor.key.private_key.get_or_insert_with(String::new),
+            Field::Certificate => editor.key.certificate.get_or_insert_with(String::new),
         };
-        let multiline = editor.field == Field::PrivateKey;
+        let multiline = matches!(editor.field, Field::PrivateKey | Field::Certificate);
         match keystroke.key.as_str() {
             _ if keystroke.modifiers.platform && keystroke.key == "v" => {
                 let text = paste.unwrap_or_default();
@@ -265,6 +268,9 @@ impl Shell {
         if editor.key.passphrase.as_deref() == Some("") {
             editor.key.passphrase = None;
         }
+        if editor.key.certificate.as_deref().is_some_and(|c| c.trim().is_empty()) {
+            editor.key.certificate = None;
+        }
         self.save_key_draft();
         cx.stop_propagation();
         cx.notify();
@@ -272,7 +278,7 @@ impl Shell {
 
     fn key_field(&self, field: Field, label: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.key_editor.as_ref().is_some_and(|e| e.field == field) && self.editor_focus.is_focused(window);
-        let multiline = field == Field::PrivateKey;
+        let multiline = matches!(field, Field::PrivateKey | Field::Certificate);
         let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
         // Base64 lines have no spaces to wrap at, so the key is cut into rows that fit.
         let width = if multiline { 46 } else { usize::MAX };
@@ -414,6 +420,12 @@ impl Shell {
             _ => None,
         };
         form = form.children(status.map(|(text, color)| div().text_xs().text_color(rgb(color)).child(text)));
+        // As in legacy: one OpenSSH certificate per key, signed for its public key.
+        let certificate = key.certificate.as_deref().unwrap_or("");
+        form = form.child(self.key_field(Field::Certificate, "Certificate", certificate, false, window, cx));
+        if !certificate.is_empty() && keys::parse_certificate(certificate).is_none() {
+            form = form.child(div().text_xs().text_color(rgb(theme::ERROR)).child("Unknown certificate format"));
+        }
         if let Some(public_key) = &key.public_key {
             form = form.child(
                 div()

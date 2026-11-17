@@ -93,6 +93,14 @@ fn host_links(vault: &Vault, host: u64, next: &mut u64) -> HostLinks {
     HostLinks { config: stored("sshConfigs-of-host"), identity: stored("identities-of-host") }
 }
 
+/// The key's certificate list: the imported first entry with the current text, or none.
+fn certificates(vault: &Vault, k: &SshKey) -> Value {
+    let Some(certificate) = &k.certificate else { return json!([]) };
+    let mut first = vault.portable.get(&key("sshKeys", k.id)).map(|raw| raw["certificates"][0].clone()).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    first["certificate"] = json!(certificate);
+    json!([first])
+}
+
 /// The vault as a portable snapshot with native ids as `local_id`.
 pub fn export(vault: &Vault, now: &str) -> Value {
     let mut out = empty_snapshot(now);
@@ -110,6 +118,7 @@ pub fn export(vault: &Vault, now: &str) -> Value {
                 "private_key": k.private_key.clone().unwrap_or_default(),
                 "public_key": k.public_key.clone().unwrap_or_default(),
                 "passphrase": k.passphrase.clone().unwrap_or_default(),
+                "certificates": certificates(vault, k),
             }))
         })
         .collect();
@@ -282,6 +291,7 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
             private_key: optional(&raw, "private_key"),
             public_key,
             passphrase: optional(&raw, "passphrase"),
+            certificate: raw["certificates"][0]["certificate"].as_str().filter(|c| !c.is_empty()).map(str::to_owned),
         });
         portable.insert(key("sshKeys", id), raw);
     }
@@ -478,7 +488,7 @@ mod tests {
         let mut vault = Vault::default();
         vault.groups.push(Group { id: 1, label: "work".into(), parent: None });
         vault.groups.push(Group { id: 2, label: "db".into(), parent: Some(1) });
-        vault.keys.push(SshKey { id: 3, label: "deploy".into(), kind: "ED25519".into(), private_key: Some("PRIVATE".into()), public_key: Some("ssh-ed25519 AAAA".into()), passphrase: None });
+        vault.keys.push(SshKey { id: 3, label: "deploy".into(), kind: "ED25519".into(), private_key: Some("PRIVATE".into()), public_key: Some("ssh-ed25519 AAAA".into()), passphrase: None, certificate: None });
         vault.identities.push(Identity { id: 4, label: "ops".into(), username: "ops".into(), password: Some("pw".into()), key: Some(3), ..Identity::default() });
         let host = |id, label: &str| Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: Some(2), username: None, tags: vec![], port: None, password: None, key: None, identity: None, settings: HostSettings::default() };
         vault.hosts.push(Host { username: Some("root".into()), password: Some("secret".into()), port: Some(2222), tags: vec!["prod".into()], ..host(5, "web") });
@@ -576,6 +586,14 @@ mod tests {
         let config = again["sshConfigs"].as_array().unwrap().iter().find(|c| c["local_id"] == config_id).unwrap();
         assert_eq!(config["env_variables"][0]["name"], "LANG");
         assert_eq!(again["sshKeys"][0]["certificates"][0]["certificate"], "cert");
+        assert_eq!(again["sshKeys"][0]["certificates"][0]["local_id"], 99, "the certificate keeps its id");
+
+        // Edited in the key form: the text changes, clearing it drops the certificate.
+        let mut edited = vault.clone();
+        edited.keys[0].certificate = Some("new cert".into());
+        assert_eq!(export(&edited, NOW)["sshKeys"][0]["certificates"], json!([{"local_id": 99, "certificate": "new cert"}]));
+        edited.keys[0].certificate = None;
+        assert_eq!(export(&edited, NOW)["sshKeys"][0]["certificates"], json!([]));
         assert_eq!((again["snippetPackages"][0]["label"].as_str(), again["snippetPackages"][0]["analytics_id"].as_str()), (Some("tools"), Some("pkg")));
         assert_eq!(again["settings"]["settings_font_size"], 14);
     }
