@@ -118,7 +118,7 @@ pub(super) fn picker(id: &str, value: &str, open: bool) -> Stateful<Div> {
 }
 
 /// The legacy drop-down arrow: a caret that turns up while the menu is open.
-fn arrow(open: bool) -> impl IntoElement {
+pub(super) fn arrow(open: bool) -> impl IntoElement {
     let caret = svg().path(super::assets::icon("caret_down")).w(px(11.)).h(px(7.)).text_color(rgb(theme::TEXT));
     if open { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret }
 }

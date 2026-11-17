@@ -29,7 +29,10 @@ impl Recording {
 
 /// Key caps, as the legacy `KeyboardKey` draws them.
 fn caps(shortcut: &str) -> Div {
+    // Legacy key caps: dark, muted glyphs; word keys (Shift, Ctrl, …) small and upper-case.
     div().flex().gap(px(6.)).children(shortcuts::display(shortcut).into_iter().map(|cap| {
+        let word = cap.chars().count() > 1 && cap.chars().all(char::is_alphabetic);
+        let cap = if word { cap.to_uppercase() } else { cap };
         div()
             .min_w(px(22.))
             .h(px(22.))
@@ -38,10 +41,10 @@ fn caps(shortcut: &str) -> Div {
             .items_center()
             .justify_center()
             .rounded(px(4.))
-            .bg(rgb(0xe2e3e8))
-            .text_size(px(12.))
+            .bg(rgb(0x41455c))
+            .text_size(px(if word { 8. } else { 13. }))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0x1e2133))
+            .text_color(rgb(0xb4b6c3))
             .child(cap)
     }))
 }
@@ -177,7 +180,7 @@ impl SettingsWindow {
             .items_center()
             .text_size(px(16.))
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(if editable { theme::TEXT } else { MUTED }))
+            .text_color(rgb(theme::TEXT))
             .child(typing.clone().unwrap_or_else(|| name.clone()))
             .when(typing.is_some(), |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(18.)).bg(rgb(theme::TEXT))))
             .when(editable, |d| {
@@ -202,9 +205,7 @@ impl SettingsWindow {
             .justify_center()
             .rounded(px(6.))
             .hover(|s| s.bg(rgb(theme::SURFACE)))
-            .text_size(px(10.))
-            .text_color(rgb(MUTED))
-            .child(if menu_open { "▲" } else { "▼" })
+            .child(super::settings_terminal::arrow(menu_open))
             .on_click(cx.listener(|settings, _, _, cx| {
                 settings.commit_edit(cx);
                 settings.submit_recording(cx);
