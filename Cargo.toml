@@ -1,0 +1,65 @@
+[package]
+name = "termian-native"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "termian-native"
+path = "src/main.rs"
+
+[dependencies]
+base64 = "0.23.1"
+crypto_secretbox = "0.1.1"
+gpui = { version = "0.2.2", features = ["runtime_shaders"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+keyring = { version = "3", features = ["windows-native", "apple-native"] }
+serde_json = "1.0.154"
+serde = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+scrypt = { version = "0.11", default-features = false }
+aes-gcm = "0.10"
+ureq = "2"
+url = "2"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3.27.0"
+alacritty_terminal = "0.26.0"
+portable-pty = "0.9"
+russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util", "fs"] }
+dirs = "7.0.0"
+futures = "0.3.34"
+serial2 = "0.2.39"
+encoding_rs = "0.8.35"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+russh-sftp = "3.0.1"
+minisign-verify = "0.3"
+semver = "1"
+flate2 = "1"
+tar = "0.4"
+regex = "1"
+rand10 = { package = "rand", version = "0.10" }
+
+[dev-dependencies]
+font-kit = { package = "zed-font-kit", version = "0.14.1-zed" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Dragging a tab must not move the window by its (transparent) title bar.
+objc = "0.2.7"
+raw-window-handle = "0.6.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+
+# scrypt (cloud snapshots) is unbearably slow unoptimised; tests and dev builds use it.
+[profile.dev.package.scrypt]
+opt-level = 3
+[profile.dev.package.salsa20]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3

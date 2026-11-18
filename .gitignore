@@ -15,7 +15,8 @@
 /cloud-sync-server/target/
 .idea/
 .DS_Store
-/tauri/dist/
-/tauri/src/gen/
+/legacy/dist/
+/legacy/src/gen/
+/target/
 node_modules
 /native/
