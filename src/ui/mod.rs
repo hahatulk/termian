@@ -2,6 +2,8 @@ pub mod assets;
 pub mod cloud;
 pub mod dialog;
 pub mod motion;
+pub(crate) mod pointer;
+pub(crate) mod keyboard;
 mod text_input;
 pub mod privacy;
 pub mod file_access;

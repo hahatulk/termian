@@ -17,6 +17,7 @@ use termian_native::updater::State;
 
 use super::cloud::Operation;
 use super::dialog::{checkbox, Key};
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -261,7 +262,7 @@ pub(super) fn action_button(id: impl Into<SharedString>, label: &str, primary: b
         .text_size(px(13.))
         .text_color(rgb(if primary { 0xffffff } else { theme::TEXT }))
         .when(disabled, |d| d.opacity(0.5))
-        .when(!disabled, |d| d.cursor_pointer().hover(|s| s.border_color(rgb(theme::ACCENT))))
+        .when(!disabled, |d| d.surface_feedback(if primary { theme::ACCENT } else { CARD }))
         .child(label.to_owned())
 }
 
@@ -296,6 +297,10 @@ impl SettingsWindow {
             self.record_key(event, cx);
             return;
         }
+        if super::keyboard::tab(event, window, cx, None) {
+            self.commit_edit(cx);
+            return;
+        }
         let keystroke = &event.keystroke;
         if keystroke.key == "w" && (keystroke.modifiers.platform || keystroke.modifiers.control) && self.editing.is_none() {
             window.remove_window();
@@ -327,18 +332,29 @@ impl SettingsWindow {
     }
 
     fn clear_logs(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.shell.read(cx).log_sync_busy() {
+            self.logs_result = Some((false, "Дождитесь завершения синхронизации и повторите очистку.".into()));
+            cx.notify();
+            return;
+        }
         let since = session_log::period_start(PERIODS[index].3, std::time::SystemTime::now());
         self.logs_busy = true;
         self.logs_result = None;
         let (cleared, cloud) = self.shell.update(cx, |shell, cx| {
+            shell.set_log_cleanup_busy(true);
             let cleared = session_log::clear(&mut shell.vault.history, &shell.logs_dir, since);
             shell.save_vault();
             cx.notify();
             (cleared, shell.vault.cloud.clone().and_then(|c| c.validate().ok().map(|client| (c, client))))
         });
         let remote = cx.background_spawn(async move { cloud.map(|(config, client)| client.delete_logs(since).map_err(|e| config.redact(&e))) });
+        let shell = self.shell.downgrade();
         cx.spawn(async move |this, cx| {
             let remote = remote.await;
+            let _ = shell.update(cx, |shell, cx| {
+                shell.set_log_cleanup_busy(false);
+                cx.notify();
+            });
             let _ = this.update(cx, |settings, cx| {
                 settings.logs_busy = false;
                 settings.logs_period = None;
@@ -560,7 +576,7 @@ impl SettingsWindow {
                         .justify_center()
                         .rounded(px(6.))
                         .text_color(rgb(ERROR_TONE))
-                        .hover(|s| s.bg(rgba(0xec706f22)))
+                        .menu_feedback(true)
                         .child("✕")
                         .on_click(cx.listener(move |settings, _, _, cx| {
                             if settings.editing.as_ref().is_some_and(|(e, _)| *e == Field::App(forget_ext.clone())) {
@@ -762,7 +778,7 @@ impl Render for SettingsWindow {
                 .text_size(px(14.))
                 .text_color(rgb(theme::TEXT))
                 .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(super::motion::sidebar_marker(theme::ACCENT)))
-                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
+                .surface_feedback(if selected { theme::SURFACE_ACTIVE } else { FOREGROUND })
                 .child(tab.title())
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     settings.commit_edit(cx);
@@ -779,6 +795,7 @@ impl Render for SettingsWindow {
             .bg(rgb(FOREGROUND))
             .text_color(rgb(theme::TEXT))
             .track_focus(&self.focus)
+            .tab_group()
             .on_key_down(cx.listener(Self::key))
             .on_modifiers_changed(cx.listener(Self::record_modifiers))
             .child(

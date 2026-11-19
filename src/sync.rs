@@ -340,7 +340,8 @@ fn records_of(snapshot: Option<&Value>) -> BTreeMap<String, Record> {
         }
     }
     for (name, value) in snapshot.get("settings").and_then(Value::as_object).into_iter().flatten() {
-        out.insert(format!("settings|{name}"), Record { kind: "settings".into(), name: Some(name.clone()), value: value.clone(), label: name.clone(), digest: sha(value) });
+        let label = crate::log_backup::catalog_label(name, value);
+        out.insert(format!("settings|{name}"), Record { kind: "settings".into(), name: Some(name.clone()), value: value.clone(), label: label.unwrap_or_else(|| name.clone()), digest: sha(value) });
     }
     out
 }

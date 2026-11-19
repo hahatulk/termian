@@ -312,11 +312,18 @@ pub struct HistoryEntry {
     #[serde(default)]
     pub subtitle: String,
     #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub log_os: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_log: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub connected: bool,
+    #[serde(default)]
     pub log: Option<LogRef>,
     /// The Saved (bookmark) mark in Logs.
     #[serde(default)]
     pub saved: bool,
-    /// Saved-log comment. Device-local, inside the encrypted vault only.
     #[serde(default)]
     pub comment: String,
 }
@@ -446,14 +453,13 @@ impl Vault {
         entry.id = self.history.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         let id = entry.id;
         self.history.insert(0, entry);
-        // Saved entries survive the limit, as bookmarked logs should.
-        while self.history.len() > HISTORY_LIMIT {
-            match self.history.iter().rposition(|e| !e.saved) {
-                Some(oldest) => {
-                    self.history.remove(oldest);
-                }
-                None => break,
-            }
+        let catalog = &self.foreign["settings"];
+        let is_local = |entry: &HistoryEntry| !crate::log_backup::catalogued(catalog, entry);
+        let excess = self.history.iter().filter(|entry| is_local(entry)).count().saturating_sub(HISTORY_LIMIT);
+        for _ in 0..excess {
+            let Some(oldest) = self.history.iter().rposition(|e| !e.saved && is_local(e)) else { break };
+            if oldest == 0 { break; }
+            self.history.remove(oldest);
         }
         id
     }

@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use gpui::{div, prelude::*, px, rgb, svg, AnimationExt, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
+use gpui::{div, prelude::*, px, rgb, svg, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::log_backup;
 use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Status};
 use termian_native::theme;
@@ -15,6 +15,7 @@ use termian_native::vault::Vault;
 
 use super::assets::icon;
 use super::dialog::Key;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -257,14 +258,24 @@ fn configured(vault: &Vault) -> bool {
 
 /// Takes the synced copy unless the vault was edited while the cloud worked
 /// on it; then the old merge base stays and the next sync carries both the
-/// edit and what came from the cloud. Device-local history is always kept: a
-/// session may end meanwhile.
+/// edit and what came from the cloud.
 fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
     let edited = Vault { history: Vec::new(), ..live.clone() } != Vault { history: Vec::new(), ..started.clone() };
-    if edited {
+    if edited || !live.history.iter().filter(|entry| entry.log.is_some())
+        .eq(started.history.iter().filter(|entry| entry.log.is_some())) {
         return false;
     }
-    synced.history = std::mem::take(&mut live.history);
+    let mut ids = synced.history.iter().filter(|entry| entry.log.is_some()).map(|entry| entry.id).collect::<HashSet<_>>();
+    let mut next = ids.iter().copied().chain(live.history.iter().map(|entry| entry.id)).max().unwrap_or(0);
+    synced.history.retain(|entry| entry.log.is_some());
+    for mut entry in live.history.iter().filter(|entry| entry.log.is_none()).cloned() {
+        if !ids.insert(entry.id) {
+            next += 1;
+            entry.id = next;
+        }
+        synced.history.push(entry);
+    }
+    synced.history.sort_by_key(|entry| std::cmp::Reverse((entry.connected_at, entry.id)));
     *live = synced;
     true
 }
@@ -284,7 +295,7 @@ fn button(id: &str, label: &str, primary: bool, disabled: bool) -> Stateful<Div>
         .text_xs()
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(0xffffff))
-        .when(!disabled, |d| d.hover(|s| s.opacity(0.85)))
+        .when(!disabled, |d| d.surface_feedback(if primary { theme::ACCENT } else { theme::SURFACE_ACTIVE }))
         .when(disabled, |d| d.opacity(0.45))
         .child(label.to_owned())
 }
@@ -388,7 +399,7 @@ impl Shell {
     fn backup_logs(&mut self, cx: &mut Context<Self>) {
         let state = &self.cloud;
         if state.dialog.as_ref().is_some_and(|d| d.busy && matches!(d.body, Body::Config(_)))
-            || state.logs_running || state.logs_unsupported || state.logs_paused_until.is_some_and(|t| std::time::Instant::now() < t) {
+            || state.running || state.logs_running || state.logs_unsupported || state.logs_paused_until.is_some_and(|t| std::time::Instant::now() < t) {
             return;
         }
         let Some(cloud) = self.vault.cloud.as_ref().filter(|c| c.auto_sync).and_then(|c| c.validate().ok()) else { return };
@@ -418,10 +429,18 @@ impl Shell {
         .detach();
     }
 
+    pub fn log_sync_busy(&self) -> bool {
+        self.cloud.running || self.cloud.logs_running
+    }
+
+    pub fn set_log_cleanup_busy(&mut self, busy: bool) {
+        self.cloud.logs_running = busy;
+    }
+
     /// Hourly merge sync.
     fn auto_sync(&mut self, cx: &mut Context<Self>) {
         let enabled = self.vault.cloud.as_ref().is_some_and(|c| c.auto_sync) && configured(&self.vault);
-        if !enabled || self.cloud.header.paused() || self.cloud.running || self.cloud.dialog.is_some() {
+        if !enabled || self.cloud.header.paused() || self.cloud.running || self.cloud.logs_running || self.cloud.dialog.is_some() {
             return;
         }
         self.run_cloud(Operation::Sync, cx);
@@ -478,12 +497,21 @@ impl Shell {
         let started = self.vault.clone();
         let mut vault = started.clone();
         let backups = self_cloud::default_backup_dir();
+        let logs_dir = self.logs_dir.clone();
+        let active = self.workspaces.values().flat_map(|workspace| workspace.panes.values().filter_map(|pane| pane.history))
+            .filter(|id| self.vault.history.iter().any(|entry| entry.id == *id && entry.disconnected_at.is_none())).collect();
         let task = cx.background_spawn(async move {
+            let logs_notice = if operation == Operation::Download {
+                None
+            } else {
+                self_cloud::prepare_logs(&mut vault, &logs_dir, &active)
+            };
             let result = match operation {
                 Operation::Sync => self_cloud::sync(&mut vault, &backups),
                 Operation::Upload => self_cloud::upload(&mut vault),
                 Operation::Download => self_cloud::download(&mut vault, &backups),
             };
+            let result = result.map(|text| match logs_notice { Some(notice) => format!("{text}. {notice}"), None => text });
             (vault, result)
         });
         cx.spawn(async move |this, cx| {
@@ -526,6 +554,11 @@ impl Shell {
         let Some(dialog) = &mut self.cloud.dialog else { return };
         let Body::Run(run) = &mut dialog.body else { return };
         if self.cloud.running || dialog.busy || !run.confirm {
+            return;
+        }
+        if self.cloud.logs_running {
+            dialog.out = Some(Out::Error("Дождитесь отправки логов и повторите.".into()));
+            cx.notify();
             return;
         }
         let operation = run.operation;
@@ -592,13 +625,17 @@ impl Shell {
 
     fn commit_cloud_config(&mut self, candidate: termian_native::cloud::CloudConfig, rotated: bool, cx: &mut Context<Self>) {
         let Some(CloudDialog { body: Body::Config(form), out, .. }) = &mut self.cloud.dialog else { return };
-        let previous = self.vault.cloud.replace(candidate);
-        if let Err(error) = self.store.save(&self.vault) {
-            self.vault.cloud = previous;
+        let mut vault = self.vault.clone();
+        if vault.cloud.as_ref().is_some_and(|previous| termian_native::sync::server_key(&previous.url) != termian_native::sync::server_key(&candidate.url)) {
+            log_backup::reset_catalog(&mut vault);
+        }
+        vault.cloud = Some(candidate);
+        if let Err(error) = self.store.save(&vault) {
             *out = Some(Out::Error(error));
             cx.notify();
             return;
         }
+        self.vault = vault;
         form.load(&self.vault);
         *out = Some(Out::Success(if rotated { "Новый пароль сохранён. Следующие отправки будут зашифрованы им." } else { "Настройки сохранены" }.into()));
         if rotated {
@@ -607,6 +644,10 @@ impl Shell {
         self.cloud.header.reset();
         self.check_cloud(false, cx);
         cx.notify();
+    }
+
+    pub(crate) fn cloud_keyboard_scope(&self) -> Option<&FocusHandle> {
+        self.cloud.dialog.as_ref().map(|_| &self.cloud_focus)
     }
 
     fn cloud_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -620,13 +661,22 @@ impl Shell {
         if dialog.busy {
             return;
         }
-        match &mut dialog.body {
-            Body::Config(form) => {
-                if keystroke.key == "tab" {
-                    form.next(keystroke.modifiers.shift);
+        if let Body::Config(form) = &mut dialog.body {
+            let mods = keystroke.modifiers;
+            if self.cloud_focus.is_focused(window) && keystroke.key == "tab" && !mods.alt && !mods.control && !mods.platform {
+                let last = Some(if form.basic { Field::BasicPassword } else { Field::Passphrase });
+                if !(if mods.shift { form.field == Some(Field::Url) } else { form.field == last }) {
+                    form.next(mods.shift);
                     cx.notify();
                     return;
                 }
+            }
+        }
+        if super::keyboard::tab(event, window, cx, Some(&self.cloud_focus)) || !self.cloud_focus.is_focused(window) {
+            return;
+        }
+        match &mut dialog.body {
+            Body::Config(form) => {
                 let field = form.field;
                 let mode = if matches!(field, Some(Field::Token | Field::Passphrase | Field::BasicPassword)) { Mode::Secret } else { Mode::Line };
                 let value = field.and_then(|f| form.value(f));
@@ -649,7 +699,7 @@ impl Shell {
         let title = header.sync_title(clock);
         let sync_icon = svg().path(icon("cloud_sync")).size(px(18.)).text_color(rgb(theme::TEXT));
         div().id("cloud-sync").relative().size(px(30.)).flex().items_center().justify_center().rounded_md()
-            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+            .icon_feedback()
             .tooltip(move |_, cx| cx.new(|_| Tooltip(title.clone())).into())
             .child(if header.syncing() {
                 sync_icon.with_animation(
@@ -918,6 +968,7 @@ impl Shell {
             .shadow_lg()
             .text_color(rgb(theme::TEXT))
             .track_focus(&self.cloud_focus)
+            .tab_group()
             .on_key_down(cx.listener(|shell, event, window, cx| shell.cloud_key(event, window, cx)))
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
@@ -945,7 +996,8 @@ impl Shell {
                             .items_center()
                             .justify_center()
                             .rounded(px(5.))
-                            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                            .when(!busy, |d| d.icon_feedback())
+                            .when(busy, |d| d.opacity(0.45))
                             .child(svg().path(icon("close")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     ),
@@ -973,6 +1025,7 @@ impl Shell {
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(rgb(theme::TEXT_MUTED))
                             .when(busy, |d| d.opacity(0.45))
+                            .when(!busy, |d| d.icon_feedback())
                             .child("Закрыть")
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     )

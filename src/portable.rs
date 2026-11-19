@@ -251,13 +251,12 @@ pub fn export(vault: &Vault, now: &str) -> Value {
     for name in FOREIGN {
         out[name] = vault.foreign.get(name).cloned().filter(Value::is_array).unwrap_or_else(|| json!([]));
     }
-    out["settings"] = vault.foreign.get("settings").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+    out["settings"] = crate::log_backup::export_settings(vault);
     out
 }
 
 /// Replaces the portable part of the vault with a (validated, sync-form)
-/// snapshot. Device-local data — history, logs, known hosts, cloud settings —
-/// stays. Returns the `[snapshot id, new id]` pairs the merge needs.
+/// snapshot. Returns the `[snapshot id, new id]` pairs the merge needs.
 pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Value, String> {
     let list = |name: &str| snapshot.get(name).and_then(Value::as_array).cloned().unwrap_or_default();
     let token = |id: &Value| id.to_string();
@@ -466,6 +465,7 @@ pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Valu
         *raw = map_ids(raw, "", &mut |kind, id| translate(kind, id));
     }
 
+    crate::log_backup::apply_catalog(vault, &foreign["settings"]);
     vault.keys = keys;
     vault.identities = identities;
     vault.groups = groups;

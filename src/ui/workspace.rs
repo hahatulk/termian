@@ -14,6 +14,7 @@ use termian_native::tabs::{TabId, TabKind};
 use termian_native::theme;
 use termian_native::workspace_template::{self as templates, OpenTerminal, Target, ViewMode, WorkspaceTemplate};
 
+use super::pointer::PointerFeedback;
 use super::terminal_view::{TerminalEvent, TerminalView, TOP_INSET};
 use crate::Shell;
 
@@ -170,11 +171,17 @@ impl Shell {
             match event {
                 // A Serial tab gets its Logs row only once the port opens.
                 TerminalEvent::SerialConnected(label) => {
-                    let (entry, log) = shell.record_session(None, label, "serial".into());
+                    let (entry, log) = shell.record_session(None, label, "serial".into(), None);
                     if let Some(p) = shell.workspaces.get_mut(&tab).and_then(|w| w.panes.get_mut(&pane)) {
                         p.history = Some(entry);
                     }
                     view.update(cx, |view, _| view.set_log(log));
+                }
+                TerminalEvent::Connected => {
+                    if let Some(entry) = history.and_then(|id| shell.vault.history_entry_mut(id)) {
+                        entry.connected = true;
+                        shell.save_vault();
+                    }
                 }
                 TerminalEvent::Os(os) => shell.host_os_detected(history, os),
                 TerminalEvent::SaveUsername(username) => {
@@ -865,7 +872,7 @@ impl Shell {
                 .font_weight(gpui::FontWeight::BOLD)
                 .bg(rgb(if on { theme::ERROR } else { theme::SURFACE }))
                 .text_color(rgb(if on { 0xffffff } else { theme::TEXT }))
-                .hover(|s| s.opacity(0.85))
+                .surface_feedback(if on { theme::ERROR } else { theme::SURFACE })
                 .child("Broadcast")
                 .on_click(cx.listener(|shell, _, _, cx| shell.toggle_broadcast(cx)))
                 .into_any_element(),

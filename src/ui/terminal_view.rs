@@ -10,6 +10,7 @@ use termian_native::session::{self, Session, SessionEvent, SshTarget};
 use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use super::login_view::{self, LoginActions, LoginTarget};
 #[path = "serial_form.rs"]
@@ -33,6 +34,7 @@ pub struct Connection {
 /// Requests from the tab to the window.
 pub enum TerminalEvent {
     Close,
+    Connected,
     /// The session ended (the tab may stay open).
     Ended,
     /// «Edit host» on the failed connection screen.
@@ -360,6 +362,9 @@ impl TerminalView {
                     .detach();
                 }
                 self.closed = false;
+                if !self.was_ready {
+                    cx.emit(TerminalEvent::Connected);
+                }
                 self.was_ready = true;
                 if self.reconnect.take().is_some() {
                     self.terminal.feed(b"\r\n\x1b[2m[Reconnected]\x1b[0m\r\n");
@@ -512,7 +517,7 @@ impl TerminalView {
                 .items_center()
                 .justify_center()
                 .rounded_sm()
-                .hover(|s| s.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
+                .icon_feedback()
                 .child(
                     gpui::svg()
                         .path(icon("caret_down"))

@@ -10,6 +10,7 @@ use termian_native::theme;
 
 use super::dialog::Key;
 use super::host_editor::menu_panel;
+use super::pointer::PointerFeedback;
 
 #[derive(Clone, Copy)]
 pub enum Mode {
@@ -459,6 +460,7 @@ pub fn field<T: 'static>(
     let left = activate.clone();
     let click_id = id.clone();
     let mut field = target
+        .cursor_text()
         .on_click(cx.listener(move |view, _, window, cx| {
             let state = cx.default_global::<Inputs>();
             if state.id.as_ref() != Some(&click_id) {
@@ -507,7 +509,7 @@ pub fn field<T: 'static>(
                         theme::TEXT_MUTED
                     }))
                     .when(enabled, |d| {
-                        d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                        d.menu_feedback(false)
                             .on_click(cx.listener(move |_, _, window, cx| {
                                 cx.default_global::<Inputs>().menu = None;
                                 let key = Keystroke {

@@ -10,6 +10,7 @@ use termian_native::terminal_settings::{self as ts, TerminalSettings, EMULATION_
 use termian_native::theme;
 
 use super::settings::{body_text, section, Field, Menu, SettingsWindow, MUTED};
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -166,7 +167,7 @@ impl Element for Switch {
 
 /// `SettingsSwitch`: the label on the left, the switch on the right.
 fn switch(id: &str, text: &str, on: bool) -> Stateful<Div> {
-    div().id(SharedString::from(id.to_owned())).mt(px(15.)).flex().items_center().justify_between().gap(px(10.)).cursor_pointer().child(label(text)).child(toggle(on))
+    div().id(SharedString::from(id.to_owned())).mt(px(15.)).flex().items_center().justify_between().gap(px(10.)).rounded_md().icon_feedback().child(label(text)).child(toggle(on))
 }
 
 /// A value with a drop-down arrow, like the legacy `FiltersButton`.
@@ -179,7 +180,8 @@ pub(super) fn picker(id: &str, value: &str, open: bool) -> Stateful<Div> {
         .text_size(px(12.))
         .font_weight(FontWeight::MEDIUM)
         .text_color(rgb(theme::TEXT))
-        .cursor_pointer()
+        .rounded_sm()
+        .icon_feedback()
         .child(value.to_owned())
         .child(arrow(open))
 }
@@ -205,8 +207,7 @@ pub(super) fn menu_item(id: SharedString, text: &str, selected: bool) -> Statefu
         .justify_between()
         .text_size(px(14.))
         .text_color(rgb(theme::TEXT))
-        .cursor_pointer()
-        .hover(|s| s.bg(rgba(0xffffff14)))
+        .icon_feedback()
         .child(div().flex_1().child(text.to_owned()))
         .when(selected, |d| d.child(div().text_color(rgb(MUTED)).child("✓")))
 }
@@ -409,7 +410,7 @@ impl SettingsWindow {
             .rounded(px(4.))
             .border_1()
             .border_color(rgba(0xffffff33))
-            .cursor_pointer()
+            .icon_feedback()
             .text_size(px(13.))
             .text_color(rgb(theme::TEXT))
             .child(t.font_family.clone())
@@ -445,7 +446,7 @@ impl SettingsWindow {
                 .font_weight(FontWeight::BOLD)
                 .text_color(rgb(theme::TEXT))
                 .when(disabled, |d| d.opacity(0.4))
-                .when(!disabled, |d| d.cursor_pointer())
+                .when(!disabled, |d| d.icon_feedback())
                 .child(text.to_owned())
         };
         font.push(
@@ -519,7 +520,7 @@ impl SettingsWindow {
             .flex()
             .items_center()
             .justify_between()
-            .cursor_pointer()
+            .rounded_md().icon_feedback()
             .child(heading("Keyword highlighting"))
             .child(toggle(t.keyword_highlighting))
             .on_click({
@@ -661,7 +662,7 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .justify_between()
-                .cursor_pointer()
+                .rounded_md().icon_feedback()
                 .child(label("Post-Quantum Key Exchange"))
                 .child(toggle(t.pqc_kex))
                 .on_click({

@@ -10,6 +10,7 @@ use termian_native::theme;
 use super::assets::icon;
 use super::dialog::Key;
 use super::hosts::os_tile;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -79,6 +80,15 @@ impl Shell {
     fn on_palette_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(palette) = &mut self.palette else { return };
         let count = flatten(&sections(&self.vault, self.tabs.all(), &palette.query)).len();
+        let mods = event.keystroke.modifiers;
+        if !mods.control && !mods.alt && !mods.platform && event.keystroke.key == "tab" {
+            if count > 0 {
+                palette.selected = if mods.shift { (palette.selected + count - 1) % count } else { (palette.selected + 1) % count };
+            }
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         match event.keystroke.key.as_str() {
             "down" => palette.selected = (palette.selected + 1).min(count.saturating_sub(1)),
             "up" => palette.selected = palette.selected.saturating_sub(1),
@@ -144,6 +154,7 @@ impl Shell {
                         .gap_3()
                         .rounded_md()
                         .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                        .surface_feedback(if selected { theme::SURFACE_ACTIVE } else { theme::BACKGROUND })
                         .child(tile.size(px(24.)).rounded_md())
                         .child(div().flex_1().truncate().text_color(rgb(theme::TEXT)).child(item.title().to_owned()))
                         .on_mouse_move(cx.listener(move |shell, _, _, cx| {

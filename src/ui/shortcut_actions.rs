@@ -45,6 +45,7 @@ gpui::actions!(
         FocusPaneDown,
         FocusPaneLeft,
         FocusPaneRight,
+        FocusWindowControls,
     ]
 );
 
@@ -91,6 +92,11 @@ fn tab_binding(keys: &str, number: usize) -> KeyBinding {
 /// Replaces the key bindings with the app keys and the current scheme's.
 pub fn bind(settings: &ShortcutSettings, cx: &mut App) {
     cx.clear_key_bindings();
+    cx.bind_keys([
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
+        KeyBinding::new("f6", FocusWindowControls, None),
+    ]);
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None), KeyBinding::new("cmd-q", Quit, None)]);
     #[cfg(not(target_os = "macos"))]
@@ -143,6 +149,7 @@ impl Shell {
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cloud_keyboard_scope().is_some() || self.palette.is_some() || self.list.menu.is_some() { return; }
         self.tabs.cycle(step);
         self.focus_active(window, cx);
     }
@@ -175,6 +182,12 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &CloseTab, _, cx| shell.close_active_tab(cx)))
             .on_action(cx.listener(|shell, _: &NextTab, window, cx| shell.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| shell.cycle_tab(-1, window, cx)))
+            .on_action(cx.listener(|shell, _: &FocusWindowControls, window, _| {
+                if shell.cloud_keyboard_scope().is_none() && shell.palette.is_none() && shell.list.menu.is_none() {
+                    window.focus(&shell.root_focus);
+                    window.focus_next();
+                }
+            }))
             .on_action(cx.listener(|shell, _: &JumpTo, window, cx| shell.open_palette(String::new(), window, cx)))
             .on_action(cx.listener(|shell, _: &ToggleSidepanel, window, cx| shell.toggle_side_panel(window, cx)))
             .on_action(cx.listener(|shell, _: &ToggleBroadcastMode, _, cx| shell.toggle_broadcast(cx)))

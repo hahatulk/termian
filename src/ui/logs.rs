@@ -1,24 +1,19 @@
-//! Logs screen, as in the legacy client: one row per recorded session with
-//! Date, User, Host and Saved columns; Date and Saved sort the list, the
-//! Saved cell edits its comment, and a click elsewhere opens the recording read-only.
+use std::{ops::Range, rc::Rc};
 
-use std::ops::Range;
-
-use gpui::{canvas, div, fill, prelude::*, px, rgb, rgba, size, svg, Bounds, ClipboardItem, Context, Div, ElementInputHandler, EntityInputHandler, FontWeight, HighlightStyle, InteractiveText, KeyDownEvent, MouseButton, Pixels, Point, ScrollHandle, SharedString, StyledText, Subscription, TextLayout, UnderlineStyle, UTF16Selection, Window};
+use gpui::{canvas, div, fill, list, prelude::*, px, rgb, rgba, size, svg, Bounds, ClipboardItem, Context, Div, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle, InteractiveText, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, Pixels, Point, ScrollHandle, SharedString, StyledText, Subscription, TextLayout, UnderlineStyle, UTF16Selection, Window};
 use termian_native::log_comment::Draft;
-use termian_native::session_log::{date_label, device_name, times_label};
+use termian_native::session_log::{clock_label, date_label, duration_label};
 use termian_native::vault::HistoryEntry;
 use termian_native::theme;
 
 use super::assets::icon;
-use super::hosts::{os_tile, tile};
+use super::hosts::os_tile_sized;
+use super::pointer::PointerFeedback;
 use super::sections::{bare_page, empty_state};
 use super::text_input::{self, Mode};
 use crate::Shell;
 
-const DATE: f32 = 140.;
-const USER: f32 = 300.;
-const HOST: f32 = 180.;
+const LOG_COLUMNS: [f32; 6] = [0.25, 0.15, 0.20, 0.10, 0.15, 0.15];
 
 /// Sorting and the one Saved cell being edited.
 #[derive(Default)]
@@ -26,6 +21,122 @@ pub struct LogsView {
     oldest_first: bool,
     saved_first: bool,
     editor: Option<CommentEditor>,
+    list: LogList,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct LogOrder {
+    index: usize,
+    id: u64,
+    connected_at: i64,
+    saved: bool,
+}
+
+enum LogItem {
+    Day(SharedString),
+    Session { index: usize, id: u64, stripe: bool, first: bool, last: bool },
+}
+
+impl LogItem {
+    fn session_id(&self) -> Option<u64> {
+        match self {
+            Self::Session { id, .. } => Some(*id),
+            Self::Day(_) => None,
+        }
+    }
+
+    fn same_row(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Day(a), Self::Day(b)) => a == b,
+            _ => self.session_id().is_some_and(|id| other.session_id() == Some(id)),
+        }
+    }
+}
+
+struct LogList {
+    state: ListState,
+    order: Vec<LogOrder>,
+    items: Rc<[LogItem]>,
+    sort: (bool, bool),
+    focused: Option<(u64, usize)>,
+}
+
+impl Default for LogList {
+    fn default() -> Self {
+        Self {
+            state: ListState::new(0, ListAlignment::Top, px(160.)),
+            order: Vec::new(),
+            items: Rc::from([]),
+            sort: (false, false),
+            focused: None,
+        }
+    }
+}
+
+impl LogList {
+    fn update(&mut self, history: &[HistoryEntry], sort: (bool, bool), editing: Option<u64>, focus: &FocusHandle) {
+        let (oldest_first, saved_first) = sort;
+        let order = history.iter().enumerate().filter(|(_, row)| row.log.is_some()).map(|(index, row)| LogOrder {
+            index, id: row.id, connected_at: row.connected_at, saved: saved_first && row.saved,
+        });
+        if self.sort != sort || !order.clone().eq(self.order.iter().copied()) {
+            self.order = order.collect();
+            let mut sorted = self.order.clone();
+            sorted.sort_by_key(|row| std::cmp::Reverse(row.connected_at));
+            if oldest_first {
+                sorted.reverse();
+            }
+
+            let mut days: Vec<(String, Vec<LogOrder>)> = Vec::new();
+            for row in sorted {
+                let date = date_label(row.connected_at);
+                match days.last_mut() {
+                    Some((label, rows)) if *label == date => rows.push(row),
+                    _ => days.push((date, vec![row])),
+                }
+            }
+
+            let mut items = Vec::with_capacity(self.order.len() + days.len());
+            for (date, mut rows) in days {
+                if saved_first {
+                    rows.sort_by_key(|row| !row.saved);
+                }
+                items.push(LogItem::Day(date.into()));
+                let len = rows.len();
+                items.extend(rows.into_iter().enumerate().map(|(i, row)| LogItem::Session {
+                    index: row.index, id: row.id, stripe: i % 2 == 0, first: i == 0, last: i + 1 == len,
+                }));
+            }
+
+            let top = self.state.logical_scroll_top();
+            let new_top = (self.sort == sort).then(|| {
+                let anchor = self.items.get(top.item_ix)?;
+                let item_ix = items.iter().position(|item| item.same_row(anchor))?;
+                Some(ListOffset { item_ix, ..top })
+            }).flatten();
+            self.state.reset(items.len());
+            if let Some(top) = new_top {
+                self.state.scroll_to(top);
+            }
+            self.items = items.into();
+            self.sort = sort;
+            self.focused = None;
+        }
+
+        if self.focused.map(|(id, _)| id) != editing {
+            let top = self.state.logical_scroll_top();
+            if let Some((_, ix)) = self.focused.take() {
+                self.state.splice(ix..ix + 1, 1);
+            }
+            if let Some(id) = editing {
+                if let Some(ix) = self.items.iter().position(|item| item.session_id() == Some(id)) {
+                    self.state.splice_focusable(ix..ix + 1, [Some(focus.clone())]);
+                    self.focused = Some((id, ix));
+                }
+            }
+            self.state.scroll_to(top);
+        }
+    }
 }
 
 struct CommentEditor {
@@ -38,17 +149,24 @@ struct CommentEditor {
     _blur: Subscription,
 }
 
-fn header_cell(label: &str, width: Option<f32>) -> Div {
-    div()
-        .when_some(width, |d, w| d.w(px(w)).flex_none())
-        .when(width.is_none(), |d| d.flex_1())
-        .px(px(15.))
-        .flex()
-        .items_center()
-        .gap(px(6.))
-        .font_weight(FontWeight::MEDIUM)
-        .text_color(rgb(theme::TEXT))
-        .child(label.to_owned())
+fn log_column(index: usize) -> Div {
+    div().w(gpui::relative(LOG_COLUMNS[index])).flex_none().min_w_0()
+        .px_2().flex().items_center().gap_2().text_size(px(12.))
+        .when(index != 0, |d| d.border_l_1().border_color(rgba(0xffffff12)))
+}
+
+fn log_tile(glyph: &str, background: u32, color: u32) -> Div {
+    div().size(px(34.)).flex_none().rounded(px(10.)).bg(rgb(background))
+        .flex().items_center().justify_center()
+        .child(svg().path(icon(glyph)).size(px(17.)).text_color(rgb(color)))
+}
+
+fn log_value(text: &str, detail: Option<&str>) -> Div {
+    div().flex_1().min_w_0()
+        .child(div().truncate().text_color(rgb(theme::TEXT)).child(text.to_owned()))
+        .when_some(detail.filter(|s| !s.is_empty()), |d, detail| {
+            d.child(div().truncate().text_size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).child(detail.to_owned()))
+        })
 }
 
 impl Shell {
@@ -143,7 +261,7 @@ impl Shell {
             // A boxed bookmark, as the legacy Saved cell.
             .size(px(24.)).flex_none().flex().items_center().justify_center().rounded_md()
             .bg(rgb(theme::SURFACE_ACTIVE))
-            .hover(|s| s.bg(rgb(theme::INPUT)))
+            .surface_feedback(theme::SURFACE_ACTIVE)
             .child(svg().path(icon(if saved || editing.is_some() { "bookmark_filled" } else { "bookmark" })).size(px(14.)).text_color(rgb(if saved || editing.is_some() { theme::ACCENT } else { theme::TEXT_MUTED })))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 cx.stop_propagation();
@@ -155,7 +273,8 @@ impl Shell {
                 }
             }));
         let cell = div().id(SharedString::from(format!("log-comment-{id}")))
-            .flex_1().min_w(px(140.)).px(px(15.)).py(px(10.)).flex().gap(px(8.)).rounded_md()
+            .w_full().min_w_0().flex().items_center().gap_1().rounded_md()
+            .when(!saved && editing.is_none(), |d| d.invisible().group_hover(SharedString::from(format!("log-row-{id}")), |s| s.visible()))
             .when(editing.is_some(), |d| d.on_mouse_down_out(cx.listener(move |shell, _, window, cx| {
                 if !text_input::menu_open("log-comment", cx) && shell.logs_view.editor.as_ref().is_some_and(|e| e.draft.id == id) {
                     shell.finish_log_comment(true, cx);
@@ -252,112 +371,94 @@ impl Shell {
         cell.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)).child(input)
     }
 
-    pub fn render_logs(&self, cx: &mut Context<Self>) -> Div {
-        let mut logs = self.vault.logs(self.logs_view.saved_first);
-        if self.logs_view.oldest_first && !self.logs_view.saved_first {
-            logs.reverse();
+    pub fn render_logs(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let editing = self.logs_view.editor.as_ref().map(|editor| editor.draft.id);
+        let sort = (self.logs_view.oldest_first, self.logs_view.saved_first);
+        self.logs_view.list.update(&self.vault.history, sort, editing, &self.editor_focus);
+        if self.logs_view.list.items.is_empty() {
+            return bare_page("logs-scroll", empty_state("logs", "Session logs", "Sessions you open are recorded here, encrypted. Recordings are kept for 60 days.")).into_any_element();
         }
-        if logs.is_empty() {
-            return bare_page("logs-scroll", empty_state("logs", "Session logs", "Sessions you open are recorded here, encrypted. They are kept for 60 days."));
+        let arrow = || svg().path(icon("sorting")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))
+            .when(self.logs_view.oldest_first, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
+        let mut header = div().h(px(48.)).flex_none().flex().items_center().border_b_1().border_color(rgb(theme::SURFACE_ACTIVE));
+        for (index, label, glyph) in [
+            (0, "User", "person"), (1, "Action", "connect"), (2, "Host", "hosts"),
+            (3, "Time", "calendar"), (4, "Device", "local"), (5, "Location", "navigate"),
+        ] {
+            header = header.child(log_column(index)
+                .child(svg().path(icon(glyph)).size(px(12.)).flex_none().text_color(rgb(theme::TEXT_MUTED)))
+                .child(div().text_color(rgb(theme::TEXT)).child(label))
+                .when(index == 3, |d| d.child(div().id("logs-sort-time").px_1().rounded_sm()
+                    .icon_feedback().child(arrow())
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.logs_view.oldest_first = !shell.logs_view.oldest_first;
+                        cx.notify();
+                    }))))
+                .when(index == 5, |d| d.child(div().id("logs-sort-saved").ml_auto().px_1().rounded_sm()
+                    .icon_feedback()
+                    .child(svg().path(icon(if self.logs_view.saved_first { "bookmark_filled" } else { "bookmark" })).size(px(13.)).text_color(rgb(theme::TEXT_MUTED)))
+                    .on_click(cx.listener(|shell, _, _, cx| {
+                        shell.logs_view.saved_first = !shell.logs_view.saved_first;
+                        cx.notify();
+                    })))));
         }
-        // Legacy «sorting» bars: longest at the bottom for newest first, flipped for oldest.
-        let arrow = |up: bool| svg().path(icon("sorting")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED)).when(up, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
-        let header = div()
-            .h(px(40.))
+
+        let items = self.logs_view.list.items.clone();
+        let shell = cx.entity();
+        let body = list(self.logs_view.list.state.clone(), move |ix, _, cx| match &items[ix] {
+            LogItem::Day(date) => div().px_2().py(px(10.)).text_xs().font_weight(FontWeight::MEDIUM)
+                .text_color(rgb(theme::TEXT)).child(date.clone()).into_any_element(),
+            LogItem::Session { index, stripe, first, last, .. } => shell.update(cx, |shell, cx| {
+                let row = &shell.vault.history[*index];
+                let mut element = shell.render_log_row(row, *stripe, cx);
+                let corners = &mut element.style().corner_radii;
+                if *first {
+                    corners.top_left = Some(px(12.).into());
+                    corners.top_right = Some(px(12.).into());
+                }
+                if *last {
+                    corners.bottom_left = Some(px(12.).into());
+                    corners.bottom_right = Some(px(12.).into());
+                }
+                element.into_any_element()
+            }),
+        }).flex_1().min_h_0().pb_3();
+        div().id("logs-horizontal").size_full().min_w_0().overflow_x_scroll().px(px(10.)).child(
+            div().size_full().min_w(px(925.)).flex().flex_col().child(header).child(body)
+        ).into_any_element()
+    }
+
+    fn render_log_row(&self, entry: &HistoryEntry, stripe: bool, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        let id = entry.id;
+        let host = entry.host.and_then(|id| self.vault.host(id));
+        let os = entry.log_os.as_deref().or_else(|| host.and_then(|host| host.os.as_deref()));
+        let tile = if entry.subtitle == "local" || entry.subtitle == "serial" {
+            log_tile(if entry.subtitle == "serial" { "serial" } else { "local" }, theme::TILE_BLUE, theme::TEXT)
+        } else {
+            os_tile_sized(os, 34., 17.).rounded(px(10.))
+        };
+        let duration = entry.disconnected_at.map(|end| duration_label(entry.connected_at, end));
+        let action = if entry.connected { "Connected" } else { "Recorded" };
+        let device = if entry.device.is_empty() { "Unknown device" } else { entry.device.as_str() };
+        let background = if stripe { theme::SURFACE_ACTIVE } else { theme::SURFACE };
+        div()
+            .id(SharedString::from(format!("log-{id}")))
+            .group(SharedString::from(format!("log-row-{id}")))
+            .min_h(px(50.))
+            .py(px(5.))
             .flex()
             .items_center()
-            .border_b_1()
-            .border_color(rgb(theme::SURFACE_ACTIVE))
-            .child(
-                header_cell("Date", Some(DATE)).child(
-                    div()
-                        .id("logs-sort-date")
-                        .px_1()
-                        .rounded_sm()
-                        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                        .child(arrow(self.logs_view.oldest_first))
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            shell.logs_view.oldest_first = !shell.logs_view.oldest_first;
-                            shell.logs_view.saved_first = false;
-                            cx.notify();
-                        })),
-                ),
-            )
-            .child(header_cell("User", Some(USER)))
-            .child(header_cell("Host", Some(HOST)))
-            .child(
-                header_cell("Saved", None).child(
-                    div()
-                        .id("logs-sort-saved")
-                        .px_1()
-                        .rounded_sm()
-                        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                        .child(svg().path(icon(if self.logs_view.saved_first { "bookmark_filled" } else { "bookmark" })).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                        .on_click(cx.listener(|shell, _, _, cx| {
-                            shell.logs_view.saved_first = !shell.logs_view.saved_first;
-                            cx.notify();
-                        })),
-                ),
-            );
-
-        let device = device_name();
-        let rows = logs.into_iter().map(|entry| {
-            let id = entry.id;
-            let host = entry.host.and_then(|h| self.vault.host(h));
-            let icon_tile = match (host, entry.host) {
-                (Some(host), _) => os_tile(host.os.as_deref()),
-                (None, None) => tile("local", theme::TILE_BLUE),
-                (None, Some(_)) => tile("new_host", theme::TILE_BLUE),
-            };
-            let times = entry.disconnected_at.map(|end| times_label(entry.connected_at, end)).unwrap_or_default();
-            div()
-                .id(SharedString::from(format!("log-{id}")))
-                .group(SharedString::from(format!("log-row-{id}")))
-                .min_h(px(60.))
-                .flex()
-                .items_start()
-                // Legacy rows are cards separated by a background line.
-                .bg(rgb(theme::SURFACE))
-                .border_b_1()
-                .border_color(rgb(theme::BACKGROUND))
-                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                .child(
-                    div()
-                        .w(px(DATE))
-                        .flex_none()
-                        .px(px(15.))
-                        .py(px(10.))
-                        .child(div().text_color(rgb(theme::TEXT)).child(date_label(entry.connected_at)))
-                        .child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(times)),
-                )
-                // The native client has no account: the legacy "No account" cell with this device's name.
-                .child(
-                    div()
-                        .w(px(USER))
-                        .flex_none()
-                        .px(px(15.))
-                        .py(px(10.))
-                        .flex()
-                        .gap(px(10.))
-                        .child(div().size(px(24.)).flex_none().rounded_full().bg(rgb(theme::SURFACE_ACTIVE)).flex().items_center().justify_center().child(svg().path(icon("person")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))))
-                        .child(div().min_w_0().child(div().text_color(rgb(theme::TEXT_MUTED)).child("No account")).child(div().text_sm().truncate().text_color(rgb(theme::TEXT_MUTED)).child(device.clone()))),
-                )
-                .child(
-                    div()
-                        .w(px(HOST))
-                        .flex_none()
-                        .min_w_0()
-                        .px(px(15.))
-                        .py(px(10.))
-                        .flex()
-                        .gap(px(10.))
-                        .child(icon_tile.size(px(24.)).rounded(px(6.)))
-                        .child(div().min_w_0().child(div().truncate().text_color(rgb(theme::TEXT)).child(entry.label.clone())).child(div().text_sm().truncate().text_color(rgb(theme::TEXT_MUTED)).child(entry.subtitle.clone()))),
-                )
-                .child(self.render_log_saved_cell(entry, cx))
-                .on_click(cx.listener(move |shell, _, window, cx| shell.open_log(id, window, cx)))
-        });
-        bare_page("logs-scroll", div().pt_3().child(header).children(rows))
+            .bg(rgb(background))
+            .surface_feedback(background)
+            .child(log_column(0).child(log_tile("person", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value("No account", None)))
+            .child(log_column(1).child(log_tile("connect", 0x2b4d48, theme::ACCENT)).child(log_value(action, None)))
+            .child(log_column(2).child(tile).child(log_value(&entry.label, Some(&entry.subtitle))))
+            .child(log_column(3).child(log_value(&clock_label(entry.connected_at), duration.as_deref())))
+            .child(log_column(4).child(log_tile("local", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value(device, None)))
+            .child(log_column(5).flex_col().items_start().gap_0()
+                .child(div().w_full().truncate().text_color(rgb(theme::TEXT_MUTED)).child("Location unavailable"))
+                .child(self.render_log_saved_cell(entry, cx)))
+            .on_click(cx.listener(move |shell, _, window, cx| shell.open_log(id, window, cx)))
     }
 }
 

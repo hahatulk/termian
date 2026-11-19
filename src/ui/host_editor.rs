@@ -13,6 +13,7 @@ use termian_native::vault::{GroupId, Host, HostId};
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::hosts::host_tile;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -105,7 +106,7 @@ pub(super) fn menu_row(id: String, label: &str, red: bool, disabled: bool) -> St
             (false, true) => theme::ERROR,
             (false, false) => theme::TEXT,
         }))
-        .when(!disabled, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+        .when(!disabled, |d| d.menu_feedback(red))
         .child(label.to_owned())
 }
 
@@ -277,13 +278,24 @@ impl Shell {
             }
             return;
         }
-        if event.keystroke.key == "tab" {
+        let stroke = &event.keystroke;
+        if !self.editor_focus.is_focused(window) && stroke.key != "escape" {
+            super::keyboard::tab(event, window, cx, Some(&self.editor_focus));
+            return;
+        }
+        let mods = stroke.modifiers;
+        if stroke.key == "tab" && !mods.control && !mods.alt && !mods.platform {
             const ORDER: [Field; 6] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password];
-            let at = ORDER.iter().position(|f| *f == editor.field).unwrap_or(0);
-            let step = if event.keystroke.modifiers.shift { ORDER.len() - 1 } else { 1 };
-            editor.field = ORDER[(at + step) % ORDER.len()];
-            cx.stop_propagation();
-            cx.notify();
+            let next = ORDER.iter().position(|f| *f == editor.field)
+                .and_then(|at| if mods.shift { at.checked_sub(1) } else { Some(at + 1) })
+                .and_then(|at| ORDER.get(at));
+            if let Some(next) = next {
+                editor.field = *next;
+                cx.stop_propagation();
+                cx.notify();
+            } else {
+                super::keyboard::step(window, cx, Some(&self.editor_focus), mods.shift);
+            }
             return;
         }
         let value = match editor.field {
@@ -626,6 +638,7 @@ impl Shell {
             div()
                 .id("host-editor")
                 .track_focus(&self.editor_focus)
+                .tab_group()
                 .on_key_down(cx.listener(Self::on_editor_key))
                 .absolute()
                 .top_0()

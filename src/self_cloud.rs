@@ -367,6 +367,26 @@ fn configured(vault: &Vault) -> Result<(cloud::CloudConfig, cloud::Cloud), Strin
     Ok((config, client))
 }
 
+pub fn prepare_logs(vault: &mut Vault, logs_dir: &Path, active: &std::collections::HashSet<u64>) -> Option<String> {
+    if vault.secrets_missing {
+        return None;
+    }
+    let (config, client) = configured(vault).ok()?;
+    match crate::log_backup::backup(&client, logs_dir, &vault.history) {
+        Ok(outcome) => {
+            crate::log_backup::prepare_catalog(vault, &outcome.ready, active);
+            if outcome.unsupported {
+                Some("Сервер не поддерживает отправку логов.".into())
+            } else if outcome.skipped > 0 {
+                Some(format!("Логов больше 34 МиБ пропущено: {}", outcome.skipped))
+            } else {
+                None
+            }
+        }
+        Err(error) => Some(format!("Не удалось отправить логи: {}", config.redact(&error))),
+    }
+}
+
 /// Sync: merge, retrying twice when another device uploaded meanwhile.
 pub fn sync(vault: &mut Vault, backups: &Path) -> Result<String, String> {
     let (config, client) = configured(vault)?;

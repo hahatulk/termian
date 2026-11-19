@@ -105,6 +105,22 @@ pub fn date_label(at: i64) -> String {
     chrono::Local.timestamp_opt(at, 0).single().map(|t| t.format("%b %d, %Y").to_string()).unwrap_or_default()
 }
 
+pub fn clock_label(connected: i64) -> String {
+    use chrono::TimeZone;
+    chrono::Local.timestamp_opt(connected, 0).single()
+        .map(|t| t.format("%H:%M").to_string()).unwrap_or_default()
+}
+
+pub fn duration_label(connected: i64, disconnected: i64) -> String {
+    let seconds = disconnected.saturating_sub(connected).max(0);
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => format!("{}m {}s", seconds / 60, seconds % 60),
+        3600..=86399 => format!("{}h {}m", seconds / 3600, seconds / 60 % 60),
+        _ => format!("{}d {}h", seconds / 86400, seconds / 3600 % 24),
+    }
+}
+
 /// Legacy `formatSessionLogTitle`: `Log: web, 21:05:12 Nov 14, 2026`.
 pub fn log_tab_title(label: &str, connected: i64) -> String {
     use chrono::TimeZone;
@@ -127,9 +143,9 @@ pub fn times_label(connected: i64, disconnected: i64) -> String {
 pub fn device_name() -> String {
     #[cfg(unix)]
     {
-        let mut buffer = [0 as libc::c_char; 256];
+        let mut buffer = [0 as libc::c_char; 257];
         // SAFETY: the buffer is valid for its length; gethostname NUL-terminates on success.
-        if unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len()) } == 0 {
+        if unsafe { libc::gethostname(buffer.as_mut_ptr(), buffer.len() - 1) } == 0 {
             // SAFETY: as above.
             return unsafe { std::ffi::CStr::from_ptr(buffer.as_ptr()) }.to_string_lossy().trim_end_matches(".local").to_owned();
         }

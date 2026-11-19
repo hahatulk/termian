@@ -71,14 +71,14 @@ impl Shell {
         if !vault.keys.is_empty() {
             body = body.child(section_title("Keys")).child(self.cards("keychain").children(self.listed("keychain", &vault.keys, |k| k.label.as_str(), |k| k.id).into_iter().map(|key| {
                 let id = key.id;
-                card(format!("key-{id}").into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle())
+                super::keyboard::target(card(format!("key-{id}").into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle()))
                     .on_click(cx.listener(move |shell, _, window, cx| shell.edit_key(id, window, cx)))
             })));
         }
         if !vault.identities.is_empty() {
             body = body.child(section_title("Identities")).child(self.cards("keychain").children(self.listed("keychain", &vault.identities, |i| i.label.as_str(), |i| i.id).into_iter().map(|identity| {
                 let id = identity.id;
-                card(format!("identity-{id}").into(), tile("identity", theme::TILE_BLUE), identity.label.clone(), identity.subtitle().to_owned())
+                super::keyboard::target(card(format!("identity-{id}").into(), tile("identity", theme::TILE_BLUE), identity.label.clone(), identity.subtitle().to_owned()))
                     .on_click(cx.listener(move |shell, _, window, cx| shell.edit_identity(id, window, cx)))
             })));
         }

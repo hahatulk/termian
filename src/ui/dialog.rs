@@ -2,11 +2,12 @@
 //! close cross, 30 px of padding, text, then right-aligned buttons. Escape
 //! closes and Enter confirms, as in the legacy `MessageDialog`.
 
-use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, Stateful};
 use termian_native::theme;
 
 use super::assets::icon;
 use super::motion;
+use super::pointer::PointerFeedback;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -35,7 +36,10 @@ pub fn button(id: &str, label: &str, kind: Kind, disabled: bool) -> Stateful<Div
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(rgb(fg))
         .when_some(bg, |d, bg| d.bg(rgb(bg)))
-        .when(kind == Kind::Text && !disabled, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+        .when(!disabled, |d| match bg {
+            Some(color) => d.surface_feedback(color),
+            None => d.icon_feedback(),
+        })
         .when(disabled, |d| d.opacity(0.5))
         .child(label.to_owned())
 }
@@ -49,7 +53,7 @@ pub fn close_button(id: &str) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .rounded_md()
-        .hover(|s| s.bg(rgba(0xffffff22)))
+        .icon_feedback()
         .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(0xffffff)))
 }
 
@@ -62,7 +66,7 @@ pub fn collapse_button(id: &str) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .rounded_md()
-        .hover(|s| s.bg(rgba(0xffffff22)))
+        .icon_feedback()
         .child(svg().path(icon("collapse_right")).size(px(16.)).text_color(rgb(0xffffff)))
 }
 

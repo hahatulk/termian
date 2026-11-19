@@ -7,6 +7,7 @@ use termian_native::vault::{Group, GroupId, Host};
 
 use super::assets::icon;
 use super::motion;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -83,7 +84,9 @@ pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String)
         .bg(rgb(theme::SURFACE))
         .border_2()
         .border_color(rgb(theme::SURFACE))
-        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)).border_color(rgb(theme::SURFACE_ACTIVE)))
+        .cursor_pointer()
+        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)).border_color(rgb(0x5a627f)))
+        .active(|s| s.bg(rgb(theme::INPUT)).border_color(rgb(theme::ACCENT)))
         .child(tile)
         .child(
             div()
@@ -113,6 +116,7 @@ pub(super) fn split_arrow(id: &str) -> Stateful<Div> {
         .items_center()
         .rounded_r_md()
         .bg(rgb(theme::INPUT))
+        .surface_feedback(theme::INPUT)
         .child(glyph("caret_down", 10., theme::TEXT))
 }
 
@@ -126,6 +130,7 @@ pub(super) fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Di
         .gap_1()
         .rounded_md()
         .bg(rgb(theme::INPUT))
+        .surface_feedback(theme::INPUT)
         .text_xs()
         .font_weight(gpui::FontWeight::BOLD)
         .text_color(rgb(theme::TEXT))
@@ -146,7 +151,7 @@ impl Shell {
             Section::PortForwarding => self.render_port_forwarding(window, cx).into_any_element(),
             Section::Snippets => self.render_snippets(window, cx).into_any_element(),
             Section::KnownHosts => self.render_known_hosts(window, cx).into_any_element(),
-            Section::Logs => self.render_logs(cx).into_any_element(),
+            Section::Logs => self.render_logs(cx),
         };
         let editor = match self.section {
             Section::Hosts => self.render_host_editor(window, cx).or_else(|| self.render_group_editor(window, cx)),
@@ -197,7 +202,7 @@ impl Shell {
                     .rounded_md()
                     .text_color(rgb(theme::TEXT))
                     .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(motion::sidebar_marker(theme::ACCENT)))
-                    .when(!active, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
+                    .surface_feedback(if active { theme::SURFACE_ACTIVE } else { theme::SIDEBAR })
                     .child(glyph(icon_name, 14., theme::TEXT))
                     .child(label)
                     .on_click(cx.listener(move |shell, _, _, cx| {
@@ -259,7 +264,8 @@ impl Shell {
                     .rounded_sm()
                     .bg(rgb(theme::SURFACE))
                     .text_xs()
-                    .text_color(rgb(if self.query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
+                    .text_color(rgb(if self.query.trim().is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
+                    .when(!self.query.trim().is_empty(), |d| d.surface_feedback(theme::SURFACE))
                     .child("CONNECT")
                     .on_click(cx.listener(|shell, _, window, cx| shell.connect_query(window, cx))),
             );
@@ -354,7 +360,7 @@ impl Shell {
             .rounded_md()
             .invisible()
             .group_hover(group.clone(), |s| s.visible())
-            .hover(|s| s.bg(rgb(theme::INPUT)))
+            .icon_feedback()
             .child(svg().path(icon("edit")).size(px(12.)).text_color(rgb(theme::TEXT)))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 cx.stop_propagation();
@@ -362,12 +368,12 @@ impl Shell {
             }));
         // Legacy outlines the host connected last.
         let last = self.vault.last_connected_host() == Some(id);
-        card(format!("host-{id}").into(), host_tile(host), host.display_label().to_owned(), host.subtitle())
+        super::keyboard::target(card(format!("host-{id}").into(), host_tile(host), host.display_label().to_owned(), host.subtitle()))
             .when(last, |d| d.border_1().border_color(rgb(theme::ACCENT)))
             .group(group)
             .child(edit)
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
-                if event.click_count() >= 2 {
+                if event.is_keyboard() || event.click_count() >= 2 {
                     shell.connect_host(id, window, cx);
                 }
             }))
@@ -391,13 +397,13 @@ impl Shell {
             .rounded_md()
             .invisible()
             .group_hover(hover.clone(), |s| s.visible())
-            .hover(|s| s.bg(rgb(theme::INPUT)))
+            .icon_feedback()
             .child(svg().path(icon("edit")).size(px(12.)).text_color(rgb(theme::TEXT)))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 cx.stop_propagation();
                 shell.edit_group(id, window, cx);
             }));
-        card(format!("group-{id}").into(), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {noun}"))
+        super::keyboard::target(card(format!("group-{id}").into(), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {noun}")))
             .group(hover)
             .child(edit)
             .on_click(cx.listener(move |shell, _, _, cx| {
@@ -414,6 +420,8 @@ impl Shell {
             div()
                 .id(SharedString::from(id.to_owned()))
                 .text_color(rgb(theme::ACCENT))
+                .cursor_pointer()
+                .hover(|s| s.underline())
                 .child(label)
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     shell.group = target;

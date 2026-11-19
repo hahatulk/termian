@@ -320,6 +320,7 @@ pub fn load_history(indexeddb_dir: &Path, cipher: &FieldCipher) -> Result<Vec<Hi
                 log,
                 saved: bookmarks.contains_key(local_id),
                 comment: bookmarks.get(local_id).cloned().unwrap_or_default(),
+                ..HistoryEntry::default()
             })
         })
         .collect();

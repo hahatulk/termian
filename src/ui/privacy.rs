@@ -11,6 +11,7 @@ use super::{
     cloud::Tooltip,
     dialog::Key,
 };
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -257,8 +258,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .cursor_pointer()
-                    .hover(|d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .icon_feedback()
                     .tooltip(|_, cx| cx.new(|_| Tooltip("Lock Termian".into())).into())
                     .child(glyph)
                     .on_click(cx.listener(|shell, _, window, cx| shell.lock_privacy(window, cx))),

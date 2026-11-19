@@ -15,6 +15,7 @@ use super::assets::icon;
 use super::dialog::Key;
 use super::host_editor::{menu_panel, menu_row};
 use super::hosts::Section;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -74,7 +75,7 @@ impl Shell {
             .items_center()
             .justify_center()
             .rounded_md()
-            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+            .icon_feedback()
             .child(svg().path(icon("side_panel")).w(px(18.)).h(px(14.)).text_color(rgb(if self.side_panel.is_some() { theme::TEXT } else { theme::TEXT_MUTED })))
             .on_click(cx.listener(|shell, _, window, cx| shell.toggle_side_panel(window, cx)))
             .into_any_element()
@@ -180,7 +181,7 @@ impl Shell {
                 .justify_center()
                 .rounded_md()
                 .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
-                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                .surface_feedback(if active { theme::SURFACE_ACTIVE } else { self.chrome(cx).map_or(theme::SIDEBAR, |c| c.panel) })
                 .child(svg().path(icon(name)).size(px(16.)).text_color(rgb(if active { theme::TEXT } else { theme::TEXT_MUTED })))
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     if let Some(panel) = &mut shell.side_panel {

@@ -12,6 +12,7 @@ use termian_native::workspace_template::{self as templates, Target, TemplateTerm
 
 use super::dialog::{self, Key, Kind};
 use super::hosts::os_tile_sized;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -144,12 +145,12 @@ impl Shell {
                 .text_sm()
                 .when(selected, |d| d.bg(rgb(0x41455c)))
                 .when(!selected && striped, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
-                .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+                .surface_feedback(if selected { 0x41455c } else if striped { theme::SURFACE_ACTIVE } else { theme::SURFACE })
                 .child(os_tile_sized(host.os.as_deref(), 24., 14.).rounded(px(5.)))
                 .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(host.display_label().to_owned()))
                 .child(div().flex_none().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(self.vault.host_location(host)))
                 .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
-                    if event.click_count() >= 2 {
+                    if matches!(event, ClickEvent::Keyboard(key) if key.button == gpui::KeyboardButton::Enter) || event.click_count() >= 2 {
                         shell.launch(vec![id], window, cx);
                         return;
                     }
@@ -184,7 +185,8 @@ impl Shell {
                 .items_center()
                 .justify_center()
                 .child(gpui::svg().path(super::assets::icon(icon)).size(px(14.)).text_color(rgb(if selected { theme::ACCENT } else { theme::TEXT_MUTED })))
-                .hover(move |s| s.text_color(rgb(if danger { theme::ERROR } else { theme::ACCENT })))
+                .rounded_sm()
+                .menu_feedback(danger)
         };
         let label = match &renaming {
             Some(text) => {
@@ -204,7 +206,7 @@ impl Shell {
             .gap_3()
             .rounded_lg()
             .when(selected && renaming.is_none(), |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
-            .when(!selected && renaming.is_none(), |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+            .when(renaming.is_none(), |d| d.surface_feedback(if selected { theme::SURFACE_ACTIVE } else { theme::SURFACE }))
             .child(
                 div()
                     .size(px(32.))
@@ -253,7 +255,7 @@ impl Shell {
                     return;
                 }
                 shell.finish_rename(false);
-                if event.click_count() >= 2 {
+                if event.is_keyboard() || event.click_count() >= 2 {
                     shell.open_selected_template(id, window, cx);
                     return;
                 }
@@ -278,6 +280,10 @@ impl Shell {
             .bg(rgb(theme::TITLE_BAR))
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::DIALOG_ROW }))
+            .map(super::keyboard::target)
+            .cursor_pointer()
+            .hover(|s| s.border_color(rgb(if focused { theme::ACCENT } else { 0x65708d })))
+            .active(|s| s.border_color(rgb(theme::ACCENT)))
             .child(div().flex_1().child(text_input::text("launcher-search", query, "Search hosts or tabs", focused, Mode::Line, cx)))
             .child(div().mx(px(5.)).text_color(rgb(theme::TEXT_MUTED)).child(PALETTE_SHORTCUT))
             .on_click(cx.listener(|shell, _, window, cx| shell.open_palette(String::new(), window, cx)));

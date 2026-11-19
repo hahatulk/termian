@@ -4,7 +4,7 @@
 
 use std::{cell::Cell, rc::Rc};
 
-use gpui::{anchored, div, prelude::*, px, rgb, svg, AnyElement, Context, Corner, Div, KeyDownEvent, MouseButton, Point, Pixels, SharedString, Stateful, Window};
+use gpui::{anchored, div, prelude::*, px, rgb, svg, AnyElement, Context, Corner, Div, FocusHandle, KeyDownEvent, MouseButton, Point, Pixels, SharedString, Stateful, Window};
 use termian_native::listing::{self, Listing, SortOrder, ViewMode};
 use termian_native::theme;
 use termian_native::vault::RuleKind;
@@ -12,6 +12,7 @@ use termian_native::vault::RuleKind;
 use super::assets::icon;
 use super::dialog::Key;
 use super::host_editor::menu_panel;
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -27,6 +28,7 @@ pub enum MenuKind {
 #[derive(Default)]
 pub struct ListingState {
     pub menu: Option<(MenuKind, Point<Pixels>)>,
+    menu_invoker: Option<FocusHandle>,
     /// The search field opened by the magnifier, per section.
     pub query: Option<(&'static str, String)>,
     /// Hosts tag filter and the text typed in «Search tags».
@@ -60,7 +62,7 @@ fn row(id: String, leading: impl IntoElement, label: &str, checked: bool) -> Sta
         .gap_3()
         .rounded_md()
         .text_color(rgb(theme::TEXT))
-        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+        .menu_feedback(false)
         .child(leading)
         .child(div().flex_1().child(label.to_owned()))
         .when(checked, |d| d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))))
@@ -71,13 +73,12 @@ impl Shell {
         self.vault.listing.get(key).copied().unwrap_or_default()
     }
 
-    fn set_listing(&mut self, key: &str, change: impl FnOnce(&mut Listing), cx: &mut Context<Self>) {
+    fn set_listing(&mut self, key: &str, change: impl FnOnce(&mut Listing), window: &mut Window, cx: &mut Context<Self>) {
         let mut listing = self.listing(key);
         change(&mut listing);
         self.vault.listing.insert(key.to_owned(), listing);
         self.save_vault();
-        self.list.menu = None;
-        cx.notify();
+        self.close_list_menu(window, cx);
     }
 
     /// Cards laid out as the section's view: as many columns as fit (legacy
@@ -103,9 +104,41 @@ impl Shell {
         items
     }
 
-    fn open_list_menu(&mut self, kind: MenuKind, at: Point<Pixels>, cx: &mut Context<Self>) {
-        self.list.menu = if self.list.menu.is_some_and(|(k, _)| k == kind) { None } else { Some((kind, at)) };
+    fn open_list_menu(&mut self, kind: MenuKind, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list.menu.is_some_and(|(k, _)| k == kind) {
+            self.close_list_menu(window, cx);
+            return;
+        }
+        self.list.menu_invoker = window.focused(cx);
+        self.list.menu = Some((kind, at));
+        window.focus(if kind == MenuKind::Tags { &self.tag_focus } else { &self.list_menu_focus });
         cx.notify();
+    }
+
+    fn close_list_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list.menu = None;
+        window.focus(self.list.menu_invoker.take().as_ref().unwrap_or(&self.root_focus));
+        cx.notify();
+    }
+
+    fn list_menu_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let scope = &self.list_menu_focus;
+        if super::keyboard::tab(event, window, cx, Some(scope)) {
+            return;
+        }
+        let stroke = &event.keystroke;
+        if stroke.modifiers.modified() {
+            return;
+        }
+        match stroke.key.as_str() {
+            "escape" => {
+                self.close_list_menu(window, cx);
+                cx.stop_propagation();
+            }
+            "down" => super::keyboard::step(window, cx, Some(scope), false),
+            "up" => super::keyboard::step(window, cx, Some(scope), true),
+            _ => {}
+        }
     }
 
     pub(super) fn list_menu_button(
@@ -122,9 +155,9 @@ impl Shell {
             .items_center()
             .gap(px(1.))
             .children(leading)
-            .child(button.on_click(cx.listener(move |shell, _, _, cx| {
+            .child(button.on_click(cx.listener(move |shell, _, window, cx| {
                 if let Some(at) = click_anchor.get() {
-                    shell.open_list_menu(kind, at, cx);
+                    shell.open_list_menu(kind, at, window, cx);
                 }
             })))
             .on_children_prepainted(move |bounds, _, _| {
@@ -146,7 +179,8 @@ impl Shell {
             .items_center()
             .gap(px(4.))
             .rounded_md()
-            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+            .when(open, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).surface_feedback(theme::SURFACE_ACTIVE))
+            .when(!open, |d| d.icon_feedback())
             .child(leading)
             .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(color)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))));
         self.list_menu_button(kind, None, button, cx).into_any_element()
@@ -187,7 +221,7 @@ impl Shell {
                     .items_center()
                     .justify_center()
                     .rounded_md()
-                    .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .icon_feedback()
                     .child(svg().path(icon("search")).size(px(18.)).text_color(rgb(theme::TEXT)))
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         shell.list.query = Some((key, String::new()));
@@ -226,9 +260,9 @@ impl Shell {
         cx.notify();
     }
 
-    fn on_tag_search_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_tag_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         match text_input::edit("tag-search", Some(&mut self.list.tag_query), &event.keystroke, Mode::Line, cx) {
-            Key::Escape => self.list.menu = None,
+            Key::Escape => self.close_list_menu(window, cx),
             Key::Ignored => return,
             _ => {}
         }
@@ -244,14 +278,15 @@ impl Shell {
             MenuKind::Tags => 300.,
             _ => 200.,
         };
-        let mut panel = menu_panel("list-menu").w(px(width)).p_2().rounded(px(12.));
+        let mut panel = menu_panel("list-menu").w(px(width)).p_2().rounded(px(12.))
+            .tab_group().track_focus(&self.list_menu_focus).on_key_down(cx.listener(Self::list_menu_key));
         match kind {
             MenuKind::View(key) => {
                 let view = self.listing(key).view;
                 for (mode, name, label) in [(ViewMode::Grid, "grid", "Grid"), (ViewMode::List, "list", "List")] {
                     panel = panel.child(
                         row(format!("view-{label}"), svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT_MUTED)), label, view == mode)
-                            .on_click(cx.listener(move |shell, _, _, cx| shell.set_listing(key, |l| l.view = mode, cx))),
+                            .on_click(cx.listener(move |shell, _, window, cx| shell.set_listing(key, |l| l.view = mode, window, cx))),
                     );
                 }
             }
@@ -267,7 +302,7 @@ impl Shell {
                         _ => svg().path(icon("calendar")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)).into_any_element(),
                     };
                     panel = panel.child(
-                        row(format!("sort-{i}"), leading, order.label(), sort == order).on_click(cx.listener(move |shell, _, _, cx| shell.set_listing(key, |l| l.sort = order, cx))),
+                        row(format!("sort-{i}"), leading, order.label(), sort == order).on_click(cx.listener(move |shell, _, window, cx| shell.set_listing(key, |l| l.sort = order, window, cx))),
                     );
                 }
             }
@@ -319,7 +354,7 @@ impl Shell {
                         .flex()
                         .items_center()
                         .text_color(rgb(if any { theme::TEXT } else { theme::TEXT_MUTED }))
-                        .when(any, |d| d.hover(|s| s.text_color(rgb(theme::ACCENT))))
+                        .when(any, |d| d.menu_feedback(false))
                         .child("Clear selection")
                         .on_click(cx.listener(|shell, _, _, cx| {
                             shell.list.tags.clear();
@@ -330,7 +365,7 @@ impl Shell {
             MenuKind::NewForwarding => {
                 for (kind, letter, label) in [(RuleKind::Local, "L", "Local Forwarding"), (RuleKind::Remote, "R", "Remote Forwarding"), (RuleKind::Dynamic, "D", "Dynamic Forwarding")] {
                     panel = panel.child(row(format!("new-rule-{letter}"), badge(letter), label, false).on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.list.menu = None;
+                        shell.close_list_menu(window, cx);
                         shell.new_rule_of(kind, window, cx);
                     })));
                 }
@@ -350,10 +385,7 @@ impl Shell {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(|shell, _, _, cx| {
-                    shell.list.menu = None;
-                    cx.notify();
-                }))
+                .on_mouse_down(MouseButton::Left, cx.listener(|shell, _, window, cx| shell.close_list_menu(window, cx)))
                 .child(anchored().position(at).anchor(corner).snap_to_window().child(menu))
                 .into_any_element(),
         )

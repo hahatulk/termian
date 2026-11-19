@@ -24,6 +24,7 @@ fn now() -> i64 {
 }
 use ui::assets::{icon, Assets};
 use ui::hosts::Section;
+use ui::pointer::PointerFeedback;
 
 /// Room left of the tab strip for the macOS traffic-light buttons.
 #[cfg(target_os = "macos")]
@@ -102,6 +103,7 @@ pub struct Shell {
     cards_width: std::cell::Cell<f32>,
     list_focus: FocusHandle,
     tag_focus: FocusHandle,
+    list_menu_focus: FocusHandle,
 }
 
 /// Reads hosts from the legacy profile without modifying it.
@@ -290,7 +292,7 @@ impl Shell {
             palette: None,
             palette_focus: cx.focus_handle(),
             root_focus: cx.focus_handle(),
-            editor_focus: cx.focus_handle(),
+            editor_focus: cx.focus_handle().tab_stop(true),
             group: None,
             workspaces: HashMap::new(),
             next_pane: 0,
@@ -300,7 +302,7 @@ impl Shell {
             candidates: HashMap::new(),
             candidates_key: Default::default(),
             query: String::new(),
-            search_focus: cx.focus_handle(),
+            search_focus: cx.focus_handle().tab_stop(true),
             sftp: ui::sftp::SftpState::new(),
             sftp_filter_focus: cx.focus_handle(),
             sftp_answer_focus: cx.focus_handle(),
@@ -311,11 +313,12 @@ impl Shell {
             main_window: None,
             loaded_fonts: Default::default(),
             settings_window: None,
-            cloud_focus: cx.focus_handle(),
+            cloud_focus: cx.focus_handle().tab_stop(true),
             list: Default::default(),
             cards_width: std::cell::Cell::new(1200.),
-            list_focus: cx.focus_handle(),
-            tag_focus: cx.focus_handle(),
+            list_focus: cx.focus_handle().tab_stop(true),
+            tag_focus: cx.focus_handle().tab_stop(true),
+            list_menu_focus: cx.focus_handle(),
         }
     }
 
@@ -344,6 +347,8 @@ impl Shell {
         let leading = if tab.closable() && active {
             div()
                 .id(SharedString::from(format!("close-{id:?}")))
+                .size(px(18.)).flex_none().flex().items_center().justify_center().rounded_sm()
+                .pointer_feedback(gpui::rgba(0xf25e6140), gpui::rgba(0xf25e6170))
                 .child(svg().path(icon("close")).size(px(12.)).text_color(rgb(tab_text)))
                 .on_click(cx.listener(move |shell, _, _, cx| {
                     cx.stop_propagation();
@@ -352,6 +357,13 @@ impl Shell {
                 }))
         } else {
             div().id(SharedString::from(format!("icon-{id:?}"))).child(svg().path(icon(icon_name)).size(px(14.)).text_color(rgb(tab_text)))
+        };
+        let tab_bg = match (connecting, active, chrome) {
+            (true, _, _) => theme::CONNECTING,
+            (_, true, Some(c)) => c.tab_active,
+            (_, false, Some(c)) => c.tab,
+            (_, true, None) => theme::SURFACE_ACTIVE,
+            (_, false, None) => theme::SURFACE,
         };
         div()
             .id(SharedString::from(format!("tab-{id:?}")))
@@ -364,14 +376,8 @@ impl Shell {
             .rounded_md()
             .text_sm()
             .text_color(rgb(tab_text))
-            .bg(rgb(match (connecting, active, chrome) {
-                (true, _, _) => theme::CONNECTING,
-                (_, true, Some(c)) => c.tab_active,
-                (_, false, Some(c)) => c.tab,
-                (_, true, None) => theme::SURFACE_ACTIVE,
-                (_, false, None) => theme::SURFACE,
-            }))
-            .when(!active && !connecting, |d| d.hover(|s| s.bg(rgb(chrome.map_or(theme::SURFACE_ACTIVE, |c| c.tab_active)))))
+            .bg(rgb(tab_bg))
+            .surface_feedback(tab_bg)
             .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
                 if let Some(view) = shell.focused_view(id) {
@@ -399,6 +405,8 @@ impl Shell {
                         .id(SharedString::from(format!("save-template-{id:?}")))
                         .group("save-template")
                         .size(px(20.))
+                        .rounded_sm()
+                        .icon_feedback()
                         .flex_none()
                         .flex()
                         .items_center()
@@ -435,15 +443,18 @@ impl Shell {
     }
 
     /// Adds a history entry with a fresh encrypted session log (FR-L1, FR-L2).
-    fn record_session(&mut self, host: Option<HostId>, label: &str, subtitle: String) -> (u64, Option<session_log::SessionLog>) {
+    fn record_session(&mut self, host: Option<HostId>, label: &str, subtitle: String, log_os: Option<String>) -> (u64, Option<session_log::SessionLog>) {
         let key = session_log::new_key();
-        let name = format!("{}-{}", now(), self.vault.history.iter().map(|e| e.id).max().unwrap_or(0) + 1);
+        let name = uuid::Uuid::new_v4().to_string();
         let log = if self.vault.logs_disabled { None } else { session_log::SessionLog::start(&self.logs_dir, &name, key).ok() };
         let entry = HistoryEntry {
             host,
             connected_at: now(),
             label: label.to_owned(),
+            connected: subtitle == "local" || subtitle == "serial",
             subtitle,
+            device: session_log::device_name(),
+            log_os,
             log: log.as_ref().map(|_| LogRef { name, key: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, key) }),
             ..HistoryEntry::default()
         };
@@ -453,7 +464,7 @@ impl Shell {
     }
 
     pub fn open_terminal(&mut self, title: String, session: session::Session, window: &mut Window, cx: &mut Context<Self>) {
-        let (history, log) = self.record_session(None, &title, "local".into());
+        let (history, log) = self.record_session(None, &title, "local".into(), None);
         let settings = self.vault.terminal.clone();
         let view = cx.new(|cx| TerminalView::new(session, &settings, window, cx).with_log(log));
         self.add_terminal(title, view, Some(history), ui::workspace::Origin::Local, cx);
@@ -473,7 +484,7 @@ impl Shell {
         let unknown = host.and_then(|id| self.vault.hosts.iter().find(|h| h.id == id)).is_some_and(|h| h.os.is_none());
         target.options.detect_os = self.vault.terminal.detect_os && unknown;
         let subtitle = std::iter::once("ssh").chain(target.username.as_deref()).collect::<Vec<_>>().join(", ");
-        let (history, log) = self.record_session(host, &label, subtitle);
+        let (history, log) = self.record_session(host, &label, subtitle, os.clone());
         let origin = match host {
             Some(host) => ui::workspace::Origin::Host(host),
             None => ui::workspace::Origin::Ssh { label: label.clone(), os: os.clone(), target: Box::new(target.clone()) },
@@ -513,11 +524,15 @@ impl Shell {
         let file = self.logs_dir.join(session_log::file_name(&log.name));
         if !file.exists() {
             if let Some(cloud) = self.vault.cloud.as_ref().and_then(|c| c.validate().ok()) {
-                let (logs_dir, name) = (self.logs_dir.clone(), log.name.clone());
-                let task = cx.background_spawn(async move { termian_native::log_backup::restore(&cloud, &logs_dir, &name) });
+                let (logs_dir, log) = (self.logs_dir.clone(), log.clone());
+                let requested = log.clone();
+                let task = cx.background_spawn(async move { termian_native::log_backup::restore(&cloud, &logs_dir, &log) });
                 cx.spawn_in(window, async move |this, cx| {
                     let restored = task.await;
                     let _ = this.update_in(cx, |shell, window, cx| {
+                        if !shell.vault.history.iter().any(|entry| entry.id == history && entry.log.as_ref() == Some(&requested)) {
+                            return;
+                        }
                         if let Err(error) = &restored {
                             eprintln!("[Termian] Session log was not restored from the cloud: {error}");
                         }
@@ -608,8 +623,10 @@ impl Render for Shell {
                     .child(
                         div()
                             .id("new-tab")
-                            .px_2()
-                            .child(svg().path(icon("plus")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+                            .size(px(30.))
+                            .flex().items_center().justify_center().rounded_md()
+                            .icon_feedback()
+                            .child(svg().path(icon("plus")).size(px(14.)).text_color(rgb(chrome.map_or(theme::TEXT_MUTED, |c| c.muted))))
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.tabs.open(TabKind::Launcher);
                                 window.focus(&shell.launcher_focus);
@@ -628,6 +645,11 @@ impl Render for Shell {
                 d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))
             })
             .track_focus(&self.root_focus)
+            .tab_group()
+            .on_key_down(cx.listener(|shell, event, window, cx| {
+                let scope = shell.cloud_keyboard_scope();
+                ui::keyboard::tab(event, window, cx, scope);
+            }))
             // A tab hovered made the window unmovable; a released drag ends that.
             .capture_any_mouse_up(|_, window, _| ui::workspace::set_window_movable(window, true))
             .children(self.render_palette(window, cx))

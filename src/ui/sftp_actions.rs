@@ -20,6 +20,7 @@ use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, I
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
+use super::pointer::PointerFeedback;
 use super::sftp::{Side, SftpState};
 use super::text_input::{self, Mode};
 use crate::Shell;
@@ -622,6 +623,16 @@ impl Shell {
     }
 
     fn on_dialog_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if super::keyboard::tab(event, window, cx, Some(&self.sftp_dialog_focus)) {
+            return;
+        }
+        if !self.sftp_dialog_focus.is_focused(window) {
+            if event.keystroke.key == "escape" {
+                self.close_dialog(cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
         let input = match &mut self.sftp.actions.dialog {
             Some(Dialog::Rename { input, .. } | Dialog::NewFolder { input, .. }) => Some(input),
             _ => None,
@@ -835,7 +846,7 @@ impl Shell {
             .rounded_md()
             .text_sm()
             .text_color(rgb(if open { theme::ACCENT } else { theme::TEXT }))
-            .hover(|s| s.text_color(rgb(theme::ACCENT)))
+            .icon_feedback()
             .child("Actions")
             .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
@@ -851,6 +862,7 @@ impl Shell {
             return Some(
                 dialog::backdrop(card)
                     .track_focus(&self.sftp_dialog_focus)
+                    .tab_group()
                     .on_key_down(cx.listener(Self::on_dialog_key))
                     .into_any_element(),
             );
@@ -876,7 +888,7 @@ impl Shell {
                     (false, true) => theme::ERROR,
                     (false, false) => theme::TEXT,
                 }))
-                .when(!disabled, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+                .when(!disabled, |d| d.menu_feedback(red))
                 .child(title)
                 .when(!disabled, |d| {
                     d.on_click(cx.listener(move |shell, _, window, cx| {

@@ -18,6 +18,7 @@ use super::hosts::{host_tile, os_tile};
 use super::login_view::{self, LoginActions, LoginTarget};
 use super::sftp_actions::{Actions, DraggedRows, MenuKind};
 use super::text_input::{self, Mode};
+use super::pointer::PointerFeedback;
 use crate::Shell;
 
 /// Folder blue from the legacy file icons.
@@ -247,7 +248,7 @@ fn icon_button(id: String, name: &str, enabled: bool) -> Stateful<Div> {
         .items_center()
         .justify_center()
         .rounded_sm()
-        .when(enabled, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
+        .when(enabled, |d| d.icon_feedback())
         .child(svg().path(icon(name)).size(px(10.)).text_color(rgb(if enabled { theme::TEXT } else { theme::TEXT_MUTED })))
 }
 
@@ -274,6 +275,7 @@ fn button(id: &str, label: &str, primary: bool) -> Stateful<Div> {
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(if primary { 0xffffff } else { theme::TEXT }))
         .bg(rgb(if primary { theme::ACCENT } else { theme::SURFACE }))
+        .surface_feedback(if primary { theme::ACCENT } else { theme::SURFACE })
         .child(label.to_owned())
 }
 
@@ -738,6 +740,7 @@ impl Shell {
                     .py_1()
                     .rounded_sm()
                     .bg(rgb(theme::SURFACE_ACTIVE))
+                    .surface_feedback(theme::SURFACE_ACTIVE)
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(theme::TEXT))
@@ -946,8 +949,8 @@ impl Shell {
             .px_4()
             .flex()
             .items_center()
-            .when(selected, |d| d.bg(rgb(theme::ACCENT)))
-            .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
+            .when(selected, |d| d.bg(rgb(theme::ACCENT)).surface_feedback(theme::ACCENT))
+            .when(!selected, |d| d.icon_feedback())
             .child(
                 div()
                     .flex_1()
@@ -976,7 +979,7 @@ impl Shell {
                 cx.stop_propagation();
                 let modifiers = event.modifiers();
                 let file = shell.sftp.panel(side).and_then(|p| p.entry(&target)).filter(|e| !e.is_dir).cloned();
-                if event.click_count() >= 2 {
+                if matches!(event, ClickEvent::Keyboard(key) if key.button == gpui::KeyboardButton::Enter) || event.click_count() >= 2 {
                     // Double click opens folders here and files in their app, as in the legacy panel.
                     match file {
                         Some(entry) => shell.open_entry(side, &entry, None, window, cx),
