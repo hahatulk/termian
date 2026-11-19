@@ -1,6 +1,0 @@
-node_modules/
-dist/
-src/gen/
-src/tauri.release.conf.json
-termian-data/
-*.log

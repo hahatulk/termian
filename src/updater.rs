@@ -1,17 +1,6 @@
-//! Automatic updates from this repository's GitHub releases, compatible with
-//! the legacy client (legacy/src/rust/updater.rs + tauri-plugin-updater).
-//!
-//! The release publishes `latest.json` (legacy/scripts/updater-manifest.mjs):
-//! `{version, notes, pub_date, platforms: {target: {signature, url}}}`, every
-//! package signed with minisign by the release key and bound to its version
-//! (`version:` in the trusted comment). The native client trusts the same public
-//! key as legacy `plugins.updater.pubkey`, so installed copies of either client
-//! accept the same signed packages.
-//!
-//! macOS: the `.app.tar.gz` is extracted next to the bundle and swapped in.
-//! Windows (portable EXE): the running EXE is renamed aside and the new one
-//! takes its path. The new version starts when the user restarts, so open SSH
-//! sessions are never cut off by an update.
+//! Automatic updates from GitHub Releases. Packages in `latest.json` carry
+//! a minisign signature bound to the version in the signed comment.
+
 use serde::Deserialize;
 use std::{
     io::Read,
@@ -19,12 +8,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-/// The legacy `plugins.updater.pubkey` (base64 minisign public key). Changing it
-/// is a key rotation: installed copies accept only signatures of this key.
-pub const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQ3NTM1ODAwQTQxNjc5NDYKUldSR2VSYWtBRmhUMXcyWEU4dTk0dnVEaTR4eC9PeENoM1dDS2ZsT3VId1ZveGhGTnY4MEgwL1IK";
+pub const PUBLIC_KEY: &str = include_str!("../assets/app/update-public-key");
 const REPOSITORY: &str = match option_env!("TERMIAN_UPDATE_REPOSITORY") {
     Some(repository) => repository,
-    None => "hahatulk/termius",
+    None => "hahatulk/termian",
 };
 const MANIFEST_ASSET: &str = "latest.json";
 pub const FIRST_CHECK: Duration = Duration::from_secs(20);
@@ -388,13 +375,6 @@ mod tests {
     const KEY_CHECK_SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSR2VSYWtBRmhUMS9kNndVSU5rb2dqd0IybGRvanlLTzQ0TGxpaEZBbTBMQ01vZWp4QWlVdkJUTWNaRzJBWlIzZWJaUEpOMHdzVmlKc0xQRTA1dUI5TXRmbG1WZ0x3SkFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0MjU5OTYyCWZpbGU6a2V5Y2hlY2sudHh0CXZlcnNpb246MS4wLjAKK1BLdjEzYVJGSG11Smd2cDM3L3NKTVovMVQ0UHR4ZEFUd0dMa3A1aTE3Ly9rdUZxZFRucUFiajduY2s3RFVEektVMTM2c2pFbnFLQWZERWVhZWNmQkE9PQo=";
 
     #[test]
-    fn trusts_the_legacy_release_key() {
-        let config: serde_json::Value = serde_json::from_str(include_str!("../legacy/src/tauri.conf.json")).unwrap();
-        assert_eq!(config["plugins"]["updater"]["pubkey"].as_str(), Some(PUBLIC_KEY));
-        assert_eq!(config["plugins"]["updater"]["requireSignedVersion"], true);
-    }
-
-    #[test]
     fn accepts_only_release_signatures_bound_to_the_version() {
         let data = b"termian-updater-key-check";
         verify(data, KEY_CHECK_SIGNATURE, "1.0.0").unwrap();
@@ -435,7 +415,6 @@ mod tests {
 
     #[test]
     fn package_for_this_platform_is_read_from_latest_json() {
-        // The shape legacy/scripts/updater-manifest.mjs writes.
         let manifest = r#"{"version":"1.3.0","notes":"","pub_date":"2026-11-01T00:00:00.000Z","platforms":{
             "darwin-aarch64":{"signature":"c2ln","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-mac-arm64.app.tar.gz"},
             "windows-x86_64":{"signature":"d2lu","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-win-x64.exe"},

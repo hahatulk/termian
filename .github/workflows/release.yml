@@ -1,20 +1,20 @@
-name: Release Termian Tauri (Windows x64, macOS Silicon)
+name: Release Termian (Windows x64, macOS Apple Silicon)
 
 on:
   push:
     branches: [main, master]
-    paths:
-      - 'legacy/**'
-      - '.github/workflows/release.yml'
+    paths-ignore:
+      - 'cloud-sync-server/**'
+      - '**.md'
   pull_request:
     branches: [main, master]
-    paths:
-      - 'legacy/**'
-      - '.github/workflows/release.yml'
+    paths-ignore:
+      - 'cloud-sync-server/**'
+      - '**.md'
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional stable SemVer override (for example 1.2.0)"
+        description: "Optional stable SemVer override"
         required: false
         type: string
 
@@ -22,253 +22,115 @@ permissions:
   contents: read
 
 concurrency:
-  group: termian-release
+  group: ${{ github.event_name == 'pull_request' && format('termian-pr-{0}', github.event.pull_request.number) || 'termian-release' }}
   cancel-in-progress: false
 
 jobs:
   prepare:
-    name: Calculate release version
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
-      sha: ${{ steps.version.outputs.sha }}
-      changelog: ${{ steps.version.outputs.changelog }}
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      sha: ${{ steps.release.outputs.sha }}
+      changelog: ${{ steps.release.outputs.changelog }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
         with:
-          node-version: 26
-      - name: Fetch release tags
-        run: git fetch --force --tags origin
-      - name: Check version calculator
-        run: node --test legacy/scripts/release-version.test.cjs
-      - name: Calculate version and changelog
-        id: version
+          workspaces: scripts/release
+      - run: cargo test --locked --manifest-path scripts/release/Cargo.toml
+      - name: Calculate release version
+        id: release
         env:
           REQUESTED_VERSION: ${{ inputs.version || '' }}
-        run: |
-          args=(--github-output "$GITHUB_OUTPUT")
-          if [[ -n "$REQUESTED_VERSION" ]]; then
-            args+=(--version "$REQUESTED_VERSION")
-          fi
-          node legacy/scripts/release-version.cjs "${args[@]}"
+        run: cargo run --locked --manifest-path scripts/release/Cargo.toml -- prepare
 
   build:
-    name: Tauri ${{ matrix.label }}
+    name: Cargo ${{ matrix.target }}
     needs: prepare
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: windows-latest
-            label: Windows x64
-            platform: win
-            arch: x64
-            extension: exe
+            target: x86_64-pc-windows-msvc
+            platform: win-x64
           - os: macos-15
-            label: macOS Apple Silicon
-            platform: mac
-            arch: arm64
-            extension: dmg
+            target: aarch64-apple-darwin
+            platform: mac-arm64
+            deployment: '11.0'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 65
-    # Keep native macOS deployment settings identical in cargo test and DMG build,
-    # so compiled dependencies can be reused instead of recompiling twice.
     env:
-      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.platform == 'mac' && '11.0' || '' }}
-    defaults:
-      run:
-        shell: bash
-        working-directory: legacy
+      MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment || '' }}
+      TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+      TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 26
-          cache: npm
-          cache-dependency-path: legacy/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.platform == 'mac' && 'aarch64-apple-darwin' || 'x86_64-pc-windows-msvc' }}
+          targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
-        with:
-          # Cargo is invoked from legacy/src, but its real output is legacy/dist/.cargo.
-          # Without the -> target mapping the previous cache never stored Rust objects.
-          workspaces: legacy/src -> ../dist/.cargo
-          cache-targets: true
-          cache-on-failure: true
-      - name: Install JavaScript dependencies
-        run: npm ci
-      - name: Test JavaScript UI and bundle
+      - name: Test client
+        run: cargo test --locked --release --target '${{ matrix.target }}'
+      - name: Build client
+        run: cargo build --locked --release --target '${{ matrix.target }}' --bin termian-native
+      - name: Package Windows EXE and installer
+        if: matrix.platform == 'win-x64'
+        shell: pwsh
         run: |
-          npm run check:web
-          npm test
-      - name: Test Rust backend using production profile (reuse compiled dependencies)
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $portable = Join-Path $PWD "dist/termian-$env:TERMIAN_RELEASE_VERSION-win-x64.exe"
+          $installer = Join-Path $PWD "dist/termian-$env:TERMIAN_RELEASE_VERSION-win-x64-setup.exe"
+          Copy-Item target/x86_64-pc-windows-msvc/release/termian-native.exe $portable
+          choco install nsis --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $nsis = Join-Path ${env:ProgramFiles(x86)} 'NSIS/makensis.exe'
+          & $nsis "/DBINARY=$portable" "/DOUTPUT=$installer" "/DVERSION=$env:TERMIAN_RELEASE_VERSION" scripts/termian.nsi
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Sign and package Apple Silicon app
+        if: matrix.platform == 'mac-arm64'
+        shell: bash
         env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}/legacy/dist/.cargo
-        run: |
-          npm run build:web
-          if [[ "${{ matrix.platform }}" == 'mac' ]]; then
-            # Match Tauri's explicit DMG target: release/ and
-            # aarch64-apple-darwin/release/ are otherwise separate Cargo caches.
-            cargo test --release --lib --target aarch64-apple-darwin --manifest-path src/Cargo.toml --locked
-          else
-            cargo test --release --lib --manifest-path src/Cargo.toml --locked
-          fi
-      - name: Configure release version
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: node scripts/set-version.mjs "$RELEASE_VERSION"
-      - name: Build Windows portable EXE and NSIS installer
-        if: matrix.platform == 'win'
-        env:
-          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
-        run: |
-          node scripts/tauri-cli.mjs build --no-bundle --config src/tauri.release.conf.json
-          # Copies the portable EXE, then bundles the per-user NSIS installer.
-          node scripts/publish-windows.mjs
-      - name: Build and verify signed Apple Silicon DMG
-        if: matrix.platform == 'mac'
-        env:
-          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
-          MACOSX_DEPLOYMENT_TARGET: "11.0"
-          # Without an Apple Developer certificate use Tauri's ARM64 ad-hoc
-          # code signature; fully trusted downloads require notarization.
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_SIGNING_IDENTITY: .event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_CERTIFICATE: .event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: .event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: .event_name != 'pull_request' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: .event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: .event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
         run: |
           set -euo pipefail
-          if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
-            for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
-              [[ -n "${!name}" ]] || { echo "::error::Missing $name for Apple Developer signing/notarization"; exit 1; }
+          if [[ -n "$APPLE_SIGNING_IDENTITY" && "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
+            for secret in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+              [[ -n "${!secret}" ]] || { echo "::error::Missing $secret for Developer ID signing"; exit 1; }
             done
-          else
-            if [[ -n "$APPLE_CERTIFICATE" || -n "$APPLE_CERTIFICATE_PASSWORD" || -n "$APPLE_ID" || -n "$APPLE_PASSWORD" || -n "$APPLE_TEAM_ID" ]]; then
-              echo '::error::Partial Apple signing credentials: set APPLE_SIGNING_IDENTITY and all Developer ID/notarization secrets, or remove them for ad-hoc signing.'
-              exit 1
-            fi
-            # GitHub Actions exports absent secrets as empty environment variables.
-            # Tauri attempts PKCS#12 import whenever APPLE_CERTIFICATE exists,
-            # even when its value is empty. Remove all signing/notary secrets
-            # from the build process for a genuine ad-hoc signature.
-            unset APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID
-            echo 'Apple Developer certificate not configured: using ad-hoc signing (not notarized).'
+            scratch="$(mktemp -d)"
+            export APPLE_KEYCHAIN="$scratch/termian.keychain-db"
+            trap 'security delete-keychain "$APPLE_KEYCHAIN" || true; rm -rf "$scratch"' EXIT
+            keychain_password="$(openssl rand -hex 32)"
+            printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$scratch/cert.p12"
+            security create-keychain -p "$keychain_password" "$APPLE_KEYCHAIN"
+            security set-keychain-settings -lut 21600 "$APPLE_KEYCHAIN"
+            security unlock-keychain -p "$keychain_password" "$APPLE_KEYCHAIN"
+            security import "$scratch/cert.p12" -P "$APPLE_CERTIFICATE_PASSWORD" -A -k "$APPLE_KEYCHAIN"
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$APPLE_KEYCHAIN"
+          elif [[ -n "$APPLE_CERTIFICATE$APPLE_CERTIFICATE_PASSWORD$APPLE_ID$APPLE_PASSWORD$APPLE_TEAM_ID" ]]; then
+            echo '::error::Set APPLE_SIGNING_IDENTITY for the configured Developer ID credentials.'
+            exit 1
           fi
-          # Compile once; transient hdiutil failures should retry bundling only.
-          # Request both app and dmg to retain the .app for codesign/spctl.
-          node scripts/tauri-cli.mjs build --no-bundle --target aarch64-apple-darwin --config src/tauri.release.conf.json
-          bundle_log="$(mktemp)"
-          trap 'rm -f "$bundle_log"' EXIT
-          for attempt in 1 2 3; do
-            if node scripts/tauri-cli.mjs bundle --bundles app,dmg --target aarch64-apple-darwin --config src/tauri.release.conf.json 2>&1 | tee "$bundle_log"; then
-              break
-            fi
-            if ! grep -Eqi 'hdiutil: .*failed - Resource busy' "$bundle_log"; then
-              echo '::error::macOS bundling failed for a reason other than a transient hdiutil Resource busy error.'
-              exit 1
-            fi
-            if (( attempt == 3 )); then
-              echo '::error::macOS hdiutil Resource busy after three bundling attempts.'
-              exit 1
-            fi
-            echo "::warning::hdiutil was busy during DMG creation (attempt $attempt/3); retrying only the bundling step."
-            sleep "$((attempt * 15))"
-          done
-          app="dist/.cargo/aarch64-apple-darwin/release/bundle/macos/termian.app"
-          [[ -d "$app" ]] || { echo "::error::Missing termian.app in DMG build"; exit 1; }
-          codesign --verify --deep --verbose=2 "$app"
-          codesign -dv --verbose=2 "$app" 2>&1 | grep -E 'Signature=|Authority=|TeamIdentifier=' || true
-          if [[ "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
-            # A Developer ID DMG must also pass Gatekeeper; a valid code
-            # signature alone does not prove Apple's notarization succeeded.
-            spctl --assess --verbose --type execute "$app"
-          fi
-          node scripts/publish-mac.mjs
-      - name: Sign auto-update package
-        # Pull requests cannot read secrets and are never published.
-        if: github.event_name != 'pull_request'
-        env:
-          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          [[ -n "$TAURI_SIGNING_PRIVATE_KEY" ]] || { echo '::error::Missing TAURI_SIGNING_PRIVATE_KEY secret: releases must ship signed auto-update packages.'; exit 1; }
-          node scripts/updater-artifacts.mjs
-      - name: Verify exact release asset in dist
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          PLATFORM: ${{ matrix.platform }}
-          ARCH: ${{ matrix.arch }}
-          EXTENSION: ${{ matrix.extension }}
-        run: |
-          set -euo pipefail
-          expected=("termian-${RELEASE_VERSION}-${PLATFORM}-${ARCH}.${EXTENSION}")
-          if [[ "$PLATFORM" == 'win' ]]; then
-            expected+=("termian-${RELEASE_VERSION}-${PLATFORM}-${ARCH}-setup.exe")
-          fi
-          for asset in "${expected[@]}"; do
-            [[ -s "dist/$asset" ]] || { echo "Missing Tauri release artifact in dist/: $asset"; exit 1; }
-          done
-      # The artifact service sometimes times out (CreateArtifact) after a
-      # successful build: retry the upload instead of failing the whole job.
-      - name: Upload release artifacts
-        id: upload1
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
+          scripts/package-macos.sh target/aarch64-apple-darwin/release/termian-native dist "$TERMIAN_RELEASE_VERSION"
+      - uses: actions/upload-artifact@v4
         with:
-          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            legacy/dist/termian-*.${{ matrix.extension }}
-            legacy/dist/termian-*.app.tar.gz
-            legacy/dist/termian-*.sig
+          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}
+          path: dist/termian-*
           if-no-files-found: error
           retention-days: 14
-      - name: Wait before retrying artifact upload
-        if: steps.upload1.outcome == 'failure'
-        run: sleep 60
-      - name: Retry artifact upload
-        id: upload2
-        if: steps.upload1.outcome == 'failure'
-        continue-on-error: true
-        uses: actions/upload-artifact@v4
-        with:
-          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            legacy/dist/termian-*.${{ matrix.extension }}
-            legacy/dist/termian-*.app.tar.gz
-            legacy/dist/termian-*.sig
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
-      - name: Wait before the last artifact upload attempt
-        if: steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
-        run: sleep 120
-      - name: Last artifact upload attempt
-        id: upload3
-        if: steps.upload1.outcome == 'failure' && steps.upload2.outcome == 'failure'
-        continue-on-error: false
-        uses: actions/upload-artifact@v4
-        with:
-          name: termian-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}-${{ matrix.arch }}
-          path: |
-            legacy/dist/termian-*.${{ matrix.extension }}
-            legacy/dist/termian-*.app.tar.gz
-            legacy/dist/termian-*.sig
-          if-no-files-found: error
-          retention-days: 14
-          overwrite: true
 
   publish:
-    name: Publish Tauri GitHub release
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     needs: [prepare, build]
     runs-on: ubuntu-latest
@@ -276,39 +138,29 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
         with:
-          sparse-checkout: legacy/scripts
+          workspaces: scripts/release
       - uses: actions/download-artifact@v4
         with:
           pattern: termian-${{ needs.prepare.outputs.version }}-*
           path: release-assets
           merge-multiple: true
-      - name: Require both desktop platforms and no extra files
+      - name: Sign update packages and write latest.json
         env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          expected=(
-            "termian-${RELEASE_VERSION}-mac-arm64.app.tar.gz"
-            "termian-${RELEASE_VERSION}-mac-arm64.app.tar.gz.sig"
-            "termian-${RELEASE_VERSION}-mac-arm64.dmg"
-            "termian-${RELEASE_VERSION}-win-x64.exe"
-            "termian-${RELEASE_VERSION}-win-x64.exe.sig"
-            "termian-${RELEASE_VERSION}-win-x64-setup.exe"
-            "termian-${RELEASE_VERSION}-win-x64-setup.exe.sig"
-          )
-          mapfile -t actual < <(find release-assets -maxdepth 1 -type f -printf '%f\n' | sort)
-          [[ "${#actual[@]}" -eq "${#expected[@]}" ]] || { printf "Unexpected release assets:\n%s\n" "${actual[*]}"; exit 1; }
-          for asset in "${expected[@]}"; do
-            [[ -s "release-assets/$asset" ]] || { echo "Missing: $asset"; exit 1; }
-          done
-      - name: Write auto-update manifest
-        env:
-          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
           RELEASE_NOTES: ${{ needs.prepare.outputs.changelog }}
-          REPOSITORY: ${{ github.repository }}
-        run: node legacy/scripts/updater-manifest.mjs release-assets "$RELEASE_VERSION" "$RELEASE_TAG" "$REPOSITORY" "$RELEASE_NOTES"
+          TERMIAN_SIGNING_PRIVATE_KEY: ${{ secrets.TERMIAN_SIGNING_PRIVATE_KEY }}
+          TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD }}
+          PREVIOUS_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          PREVIOUS_SIGNING_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [[ -z "$TERMIAN_SIGNING_PRIVATE_KEY" ]]; then
+            export TERMIAN_SIGNING_PRIVATE_KEY="$PREVIOUS_SIGNING_KEY"
+            export TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD="$PREVIOUS_SIGNING_PASSWORD"
+          fi
+          cargo run --locked --manifest-path scripts/release/Cargo.toml -- sign release-assets
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:

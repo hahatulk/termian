@@ -15,8 +15,9 @@
 /cloud-sync-server/target/
 .idea/
 .DS_Store
-/legacy/dist/
-/legacy/src/gen/
+/legacy/
+/dist/
+/scripts/release/target/
 /target/
 node_modules
 /native/
