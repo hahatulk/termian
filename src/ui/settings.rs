@@ -368,7 +368,7 @@ impl SettingsWindow {
 
         let mut cloud = vec![
             section_title("Своё облако").into_any_element(),
-            body_text("Личная синхронизация с вашим сервером. Отправить и получить изменения также можно кнопками в верхней панели главного окна.").into_any_element(),
+            body_text("Личная синхронизация с вашим сервером. Кнопки отправки и получения заменяют снимок целиком после подтверждения.").into_any_element(),
             div()
                 .mt(px(12.))
                 .flex()
@@ -415,6 +415,13 @@ impl SettingsWindow {
             buttons.push(
                 action_button("settings-cloud-sync", "Синхронизировать", false, false)
                     .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(Some(Operation::Sync), window, cx))))
+                    .into_any_element(),
+            );
+        }
+        if configured {
+            buttons.push(
+                action_button("settings-cloud-upload", "Отправить данные на сервер", false, false)
+                    .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(Some(Operation::Upload), window, cx))))
                     .into_any_element(),
             );
         }

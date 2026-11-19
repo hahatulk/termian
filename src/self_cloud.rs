@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use crate::cloud::{self, Condition};
 use crate::portable::{self, VaultDevice};
-use crate::sync::{self, ConflictInfo, Prefer};
+use crate::sync::{self, ConflictInfo, ConflictPolicy};
 use crate::vault::Vault;
 
 /// Legacy-profile data has no passwords or keys; sending it would erase them in the cloud.
@@ -204,8 +204,6 @@ impl Default for Status {
 pub const TONE_OK: u32 = 0x3dcc94;
 pub const TONE_ERROR: u32 = 0xe66b6b;
 pub const TONE_WARNING: u32 = 0xf2b34b;
-const TONE_PENDING: u32 = 0xffbd59;
-const TONE_IDLE: u32 = 0x8d91a5;
 
 /// The legacy header: the sync icon keeps the last settled state while a
 /// background check runs, so it does not flicker.
@@ -263,23 +261,6 @@ impl Header {
             _ => Some(("!", TONE_WARNING)),
         }
     }
-
-    /// Count and colour of the upload (`true`) or download dot.
-    pub fn indicator(&self, upload: bool) -> (usize, u32) {
-        let (up, down) = match &self.status {
-            Status::Checked(preview) => preview.counts(),
-            _ => (0, 0),
-        };
-        let count = if upload { up } else { down };
-        let tone = match &self.status {
-            Status::Error { .. } => TONE_ERROR,
-            Status::Checked(Preview::Conflicts(_)) => TONE_WARNING,
-            _ if count > 0 => TONE_PENDING,
-            Status::Checked(Preview::Synced | Preview::Empty) => TONE_OK,
-            _ => TONE_IDLE,
-        };
-        (count, tone)
-    }
 }
 
 /// Compares this device with the cloud without changing either side.
@@ -295,7 +276,7 @@ pub fn preview(vault: &Vault) -> Result<Preview, String> {
     sync::match_ids(&exported, Some(&remote), &mut ids);
     let local = sync::to_sync_form(&exported, &mut ids);
     let base = saved.map(|s| sync::Base { local: s.local, remote: s.remote });
-    let merged = sync::merge_snapshots(&local, Some(&remote), base.as_ref(), None, &now());
+    let merged = sync::merge_snapshots(&local, Some(&remote), base.as_ref(), ConflictPolicy::Preview, &now());
     Ok(if !merged.conflicts.is_empty() {
         Preview::Conflicts(merged.conflicts)
     } else if merged.changes.is_empty() {
@@ -357,14 +338,6 @@ pub fn verify_cloud_password(config: &cloud::CloudConfig) -> Result<(), String> 
     Ok(())
 }
 
-#[derive(Debug, PartialEq)]
-pub enum Report {
-    /// Done; the text says what moved.
-    Done(String),
-    /// The same records changed on both sides: the user picks a side.
-    Conflicts(Vec<ConflictInfo>),
-}
-
 fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
@@ -395,7 +368,7 @@ fn configured(vault: &Vault) -> Result<(cloud::CloudConfig, cloud::Cloud), Strin
 }
 
 /// Sync: merge, retrying twice when another device uploaded meanwhile.
-pub fn sync(vault: &mut Vault, prefer: Option<Prefer>, backups: &Path) -> Result<Report, String> {
+pub fn sync(vault: &mut Vault, backups: &Path) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
@@ -407,16 +380,9 @@ pub fn sync(vault: &mut Vault, prefer: Option<Prefer>, backups: &Path) -> Result
         let passphrase = config.passphrase.clone();
         let result = {
             let mut device = VaultDevice { vault: &mut *vault, now: now(), backup: Box::new(move |s| backup(backups, s, &passphrase)) };
-            sync::sync_once(saved, &server, prefer, &mut device, &client, &now())
+            sync::sync_once(saved, &server, &mut device, &client, &now())
         };
         match result {
-            Ok(outcome) if !outcome.conflicts.is_empty() => {
-                // New ID matches are kept so the next attempt starts from them.
-                if outcome.state.is_some() {
-                    vault.sync_state = outcome.state;
-                }
-                return Ok(Report::Conflicts(outcome.conflicts));
-            }
             Ok(outcome) => {
                 vault.sync_state = outcome.state;
                 let mut parts = Vec::new();
@@ -426,8 +392,11 @@ pub fn sync(vault: &mut Vault, prefer: Option<Prefer>, backups: &Path) -> Result
                 if outcome.from_remote > 0 {
                     parts.push(format!("получено изменений: {}", outcome.from_remote));
                 }
+                if outcome.resolved_conflicts > 0 {
+                    parts.push(format!("разрешено конфликтов: {}", outcome.resolved_conflicts));
+                }
                 let text = if parts.is_empty() { "Данные уже синхронизированы".to_owned() } else { format!("Синхронизировано: {}", parts.join(", ")) };
-                return Ok(Report::Done(text));
+                return Ok(text);
             }
             Err(error) if attempt < 2 && error.contains(cloud::REVISION_CHANGED) => attempt += 1,
             Err(error) => return Err(config.redact(&error)),
@@ -436,7 +405,7 @@ pub fn sync(vault: &mut Vault, prefer: Option<Prefer>, backups: &Path) -> Result
 }
 
 /// «Отправить»: the cloud snapshot is replaced with this device's data.
-pub fn upload(vault: &mut Vault) -> Result<Report, String> {
+pub fn upload(vault: &mut Vault) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
@@ -446,11 +415,11 @@ pub fn upload(vault: &mut Vault) -> Result<Report, String> {
     let snapshot = sync::validate_snapshot(&sync::to_sync_form(&exported, &mut ids))?;
     client.upload(&snapshot, Condition::Any).map_err(|e| config.redact(&e))?;
     vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&snapshot)), remote: sync::digests_of(Some(&snapshot)), ids });
-    Ok(Report::Done("Данные загружены".into()))
+    Ok("Данные загружены".into())
 }
 
 /// «Получить»: the local data is replaced with the cloud snapshot, after a backup.
-pub fn download(vault: &mut Vault, backups: &Path) -> Result<Report, String> {
+pub fn download(vault: &mut Vault, backups: &Path) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     let remote = client.fetch().map_err(|e| config.redact(&e))?.ok_or("В облаке ещё нет данных")?;
     let snapshot = sync::validate_snapshot(&remote.snapshot)?;
@@ -466,7 +435,7 @@ pub fn download(vault: &mut Vault, backups: &Path) -> Result<Report, String> {
     sync::match_ids(&exported, Some(&snapshot), &mut ids);
     let local = sync::to_sync_form(&exported, &mut ids);
     vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&local)), remote: sync::digests_of(Some(&snapshot)), ids });
-    Ok(Report::Done("Данные загружены и применены".into()))
+    Ok("Данные загружены и применены".into())
 }
 
 /// Dot colour of the Settings → Account status line.
@@ -568,7 +537,7 @@ mod tests {
         assert_eq!(*stored.lock().unwrap(), rotated);
         local.cloud = Some(next);
         let backups = tempfile::tempdir().unwrap();
-        assert_eq!(sync(&mut local, None, backups.path()).unwrap(), Report::Done("Данные уже синхронизированы".into()));
+        assert_eq!(sync(&mut local, backups.path()).unwrap(), "Данные уже синхронизированы");
     }
 
     #[test]
@@ -576,28 +545,28 @@ mod tests {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &["db"]));
-        assert_eq!(sync(&mut a, None, backups.path()).unwrap(), Report::Done("Синхронизировано: отправлено изменений: 2".into()));
-        assert!(matches!(sync(&mut b, None, backups.path()).unwrap(), Report::Done(text) if text.contains("получено изменений: 2")));
+        assert_eq!(sync(&mut a, backups.path()).unwrap(), "Синхронизировано: отправлено изменений: 2");
+        assert!(sync(&mut b, backups.path()).unwrap().contains("получено изменений: 2"));
         assert_eq!(labels(&b), ["db", "web"]);
         assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), 1, "a backup before the import");
-        sync(&mut a, None, backups.path()).unwrap();
-        assert_eq!(sync(&mut a, None, backups.path()).unwrap(), Report::Done("Данные уже синхронизированы".into()));
+        sync(&mut a, backups.path()).unwrap();
+        assert_eq!(sync(&mut a, backups.path()).unwrap(), "Данные уже синхронизированы");
     }
 
     #[test]
-    fn conflicts_wait_for_the_users_choice() {
+    fn preview_lists_conflicts_that_sync_resolves() {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &[]));
-        sync(&mut a, None, backups.path()).unwrap();
-        sync(&mut b, None, backups.path()).unwrap();
+        sync(&mut a, backups.path()).unwrap();
+        sync(&mut b, backups.path()).unwrap();
         a.hosts[0].address = "a.lan".into();
         b.hosts[0].address = "b.lan".into();
-        sync(&mut a, None, backups.path()).unwrap();
-        let Report::Conflicts(conflicts) = sync(&mut b, None, backups.path()).unwrap() else { panic!("expected a conflict") };
+        sync(&mut a, backups.path()).unwrap();
+        let Preview::Conflicts(conflicts) = preview(&b).unwrap() else { panic!("expected a conflict") };
         assert_eq!(conflicts[0].label, "web");
-        assert_eq!(b.hosts[0].address, "b.lan", "nothing applied");
-        sync(&mut b, Some(Prefer::Remote), backups.path()).unwrap();
+        assert_eq!(b.hosts[0].address, "b.lan");
+        assert!(sync(&mut b, backups.path()).unwrap().contains("разрешено конфликтов: 1"));
         assert_eq!(b.hosts[0].address, "a.lan");
     }
 
@@ -609,14 +578,14 @@ mod tests {
         full.hosts[0].password = Some("secret".into());
         upload(&mut full).unwrap();
         let mut legacy = Vault { secrets_missing: true, ..vault(&url, &["web"]) };
-        assert_eq!(sync(&mut legacy, None, backups.path()).unwrap_err(), SECRETS_MISSING);
+        assert_eq!(sync(&mut legacy, backups.path()).unwrap_err(), SECRETS_MISSING);
         assert_eq!(upload(&mut legacy).unwrap_err(), SECRETS_MISSING);
         let before = stored.lock().unwrap().clone();
         download(&mut legacy, backups.path()).unwrap();
         assert_eq!(stored.lock().unwrap().clone(), before, "the cloud is untouched");
         assert_eq!(legacy.hosts[0].password.as_deref(), Some("secret"));
         assert!(!legacy.secrets_missing);
-        assert!(sync(&mut legacy, None, backups.path()).is_ok(), "sync is allowed after a download");
+        assert!(sync(&mut legacy, backups.path()).is_ok(), "sync is allowed after a download");
     }
 
     #[test]
@@ -626,8 +595,8 @@ mod tests {
         assert_eq!(preview(&Vault::default()).unwrap(), Preview::Unconfigured);
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &[]));
         assert_eq!(preview(&a).unwrap(), Preview::Empty);
-        sync(&mut a, None, backups.path()).unwrap();
-        sync(&mut b, None, backups.path()).unwrap();
+        sync(&mut a, backups.path()).unwrap();
+        sync(&mut b, backups.path()).unwrap();
         assert_eq!(preview(&a).unwrap(), Preview::Synced);
         a.hosts[0].label = "web-1".into();
         let before = stored.lock().unwrap().clone();
@@ -636,7 +605,7 @@ mod tests {
         assert_eq!(changes[0].text(), "Хост «web-1»: изменено");
         assert!(changes.iter().all(|c| c.upload));
         assert_eq!(Preview::Changes(changes).headline(), "Есть новые локальные изменения → требуется отправка в облако");
-        sync(&mut a, None, backups.path()).unwrap();
+        sync(&mut a, backups.path()).unwrap();
         let Preview::Changes(incoming) = preview(&b).unwrap() else { panic!("expected changes") };
         assert!(incoming.iter().all(|c| !c.upload));
         b.hosts[0].label = "web-b".into();
@@ -678,14 +647,12 @@ mod tests {
         assert_eq!((header.sync_title(|_| String::new()).as_str(), header.sync_badge()), ("Синхронизация…", None));
         let change = sync::Change { upload: true, kind: "hosts".into(), label: "web".into(), action: "modified" };
         header.set(Status::Checked(Preview::Changes(vec![change])));
-        assert_eq!((header.indicator(true).0, header.indicator(false).0), (1, 0));
         assert_eq!(header.sync_badge(), Some(("!", TONE_WARNING)));
         let message = "Загрузка из облака: сервер отклонил авторизацию (HTTP 401). Проверьте токен";
         assert!(is_credential_error(message) && is_credential_error(crate::cloud::WRONG_PASSPHRASE));
         assert!(!is_credential_error(crate::cloud::REVISION_CHANGED));
         header.set(Status::Error { message: message.into(), credentials: true });
         assert!(header.paused());
-        assert_eq!(header.indicator(true), (0, TONE_ERROR));
     }
 
     #[test]
@@ -723,7 +690,7 @@ mod tests {
         }
         assert_eq!(labels(&b), ["web"]);
         assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), BACKUPS_KEPT);
-        assert_eq!(sync(&mut Vault::default(), None, backups.path()).unwrap_err(), NOT_CONFIGURED);
+        assert_eq!(sync(&mut Vault::default(), backups.path()).unwrap_err(), NOT_CONFIGURED);
     }
 
     #[test]

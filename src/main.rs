@@ -568,7 +568,6 @@ impl Render for Shell {
         }
         let chrome = self.chrome(cx);
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, chrome, cx)).collect();
-        let toolbar = self.render_cloud_buttons(cx);
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
             TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
@@ -611,7 +610,7 @@ impl Render for Shell {
                     )
                     .child(div().flex_1())
                     .child(self.render_privacy_button(cx))
-                    .children(toolbar)
+                    .child(self.render_cloud_button(cx))
                     .children(self.render_broadcast_button(cx))
                     .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx))),
             )

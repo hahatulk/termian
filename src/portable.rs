@@ -675,9 +675,9 @@ mod tests {
             let saved = vault.sync_state.take();
             let outcome = {
                 let mut device = VaultDevice { vault: &mut *vault, now: NOW.into(), backup: Box::new(|_| Ok(())) };
-                crate::sync::sync_once(saved, "server", None, &mut device, &cloud, NOW).unwrap()
+                crate::sync::sync_once(saved, "server", &mut device, &cloud, NOW).unwrap()
             };
-            assert!(outcome.conflicts.is_empty(), "{:?}", outcome.conflicts);
+            assert_eq!(outcome.resolved_conflicts, 0);
             vault.sync_state = outcome.state;
         };
         round(&mut a);

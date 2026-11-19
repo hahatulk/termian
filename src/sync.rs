@@ -407,10 +407,10 @@ fn owner_labels(sources: &[&BTreeMap<String, Record>]) -> HashMap<String, String
     owners
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Prefer {
-    Local,
-    Remote,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConflictPolicy {
+    Preview,
+    Automatic,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -466,7 +466,7 @@ fn same_digests(a: &BTreeMap<String, Record>, b: &BTreeMap<String, Record>) -> b
     a.len() == b.len() && a.iter().all(|(key, r)| b.get(key).is_some_and(|o| o.digest == r.digest))
 }
 
-pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base>, prefer: Option<Prefer>, now: &str) -> Merged {
+pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base>, policy: ConflictPolicy, now: &str) -> Merged {
     let l_records = records_of(Some(local));
     let r_records = records_of(remote);
     let empty = Base::default();
@@ -483,14 +483,12 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
         } else {
             let local_changed = l.map(|x| &x.digest) != base.local.get(key);
             let remote_changed = r.map(|x| &x.digest) != base.remote.get(key);
-            match (local_changed, remote_changed, prefer) {
-                (true, false, _) => "local",
-                (false, true, _) => "remote",
+            match (local_changed, remote_changed) {
+                (true, false) => "local",
+                (false, true) => "remote",
                 // Neither side changed it since the last sync: an importer difference.
-                (false, false, _) => "same",
-                (_, _, Some(Prefer::Local)) => "local",
-                (_, _, Some(Prefer::Remote)) => "remote",
-                _ => {
+                (false, false) => "same",
+                (true, true) => {
                     let item = l.or(r).expect("a key comes from one side");
                     let label = if item.label.is_empty() { owners.get(key).cloned().unwrap_or_else(|| "запись".into()) } else { item.label.clone() };
                     let detail = if l.is_none() {
@@ -506,7 +504,11 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
                         label,
                         detail: detail.into(),
                     });
-                    continue;
+                    match policy {
+                        ConflictPolicy::Preview => continue,
+                        ConflictPolicy::Automatic if r.is_some() => "remote",
+                        ConflictPolicy::Automatic => "local",
+                    }
                 }
             }
         };
@@ -535,7 +537,7 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
             to_remote.insert(key.clone(), record.clone());
         }
     }
-    if !conflicts.is_empty() {
+    if policy == ConflictPolicy::Preview && !conflicts.is_empty() {
         return Merged { changes, conflicts, from_local, from_remote, local: Value::Null, remote: Value::Null, import_needed: false, upload_needed: false };
     }
     restore_references(&mut to_local, &[&l_records, &r_records]);
@@ -598,8 +600,7 @@ impl Server for crate::cloud::Cloud {
 
 #[derive(Debug)]
 pub struct Outcome {
-    pub conflicts: Vec<ConflictInfo>,
-    /// The state to keep: always after success; after conflicts, with the new ID matches.
+    pub resolved_conflicts: usize,
     pub state: Option<State>,
     pub uploaded: bool,
     pub imported: bool,
@@ -608,7 +609,7 @@ pub struct Outcome {
 }
 
 /// One sync round, as `syncOnce` in sync-merge.js.
-pub fn sync_once(saved: Option<State>, server_id: &str, prefer: Option<Prefer>, device: &mut dyn Device, server: &dyn Server, now: &str) -> Result<Outcome, String> {
+pub fn sync_once(saved: Option<State>, server_id: &str, device: &mut dyn Device, server: &dyn Server, now: &str) -> Result<Outcome, String> {
     let saved = saved.filter(|s| s.server == server_id);
     let mut ids = saved.as_ref().map(|s| s.ids.clone()).unwrap_or_default();
     let (fetched, can_create) = server.fetch_for_sync()?;
@@ -625,11 +626,7 @@ pub fn sync_once(saved: Option<State>, server_id: &str, prefer: Option<Prefer>, 
     let exported = device.export()?;
     match_ids(&exported, remote.as_ref(), &mut ids);
     let local = to_sync_form(&exported, &mut ids);
-    let merged = merge_snapshots(&local, remote.as_ref(), base.as_ref(), prefer, now);
-    if !merged.conflicts.is_empty() {
-        let state = saved.map(|s| State { ids, ..s });
-        return Ok(Outcome { conflicts: merged.conflicts, state, uploaded: false, imported: false, from_local: merged.from_local, from_remote: merged.from_remote });
-    }
+    let merged = merge_snapshots(&local, remote.as_ref(), base.as_ref(), ConflictPolicy::Automatic, now);
     let outgoing = if merged.upload_needed {
         let condition = match (&fetched, &remote) {
             (Some(Remote { revision: Some(revision), .. }), Some(_)) => Condition::Revision(revision.clone()),
@@ -660,7 +657,7 @@ pub fn sync_once(saved: Option<State>, server_id: &str, prefer: Option<Prefer>, 
         settled_local = to_sync_form(&exported, &mut ids);
     }
     Ok(Outcome {
-        conflicts: Vec::new(),
+        resolved_conflicts: merged.conflicts.len(),
         state: Some(State { server: server_id.into(), local: digests_of(Some(&settled_local)), remote: digests_of(cloud.as_ref()), ids }),
         uploaded: merged.upload_needed,
         imported: merged.import_needed,
@@ -975,12 +972,10 @@ mod tests {
         }
     }
 
-    fn sync(device: &mut TestDevice, server: &TestServer, prefer: Option<Prefer>) -> Outcome {
+    fn sync(device: &mut TestDevice, server: &TestServer) -> Outcome {
         let saved = device.saved.clone();
-        let outcome = sync_once(saved, "server", prefer, device, server, NOW).unwrap();
-        if outcome.conflicts.is_empty() {
-            device.saved = outcome.state.clone();
-        }
+        let outcome = sync_once(saved, "server", device, server, NOW).unwrap();
+        device.saved = outcome.state.clone();
         outcome
     }
 
@@ -989,20 +984,20 @@ mod tests {
         let cloud = TestServer::default();
         let (mut a, mut b) = (TestDevice::new("A", 1), TestDevice::new("B", 500));
         a.add_host("web", 22, None);
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         let snapshot = cloud.snapshot.borrow().clone().unwrap();
         assert_eq!(snapshot["hosts"].as_array().unwrap().len(), 1);
         assert!(snapshot["hosts"][0]["local_id"].is_string(), "the cloud keeps stable sync IDs");
 
-        sync(&mut b, &cloud, None);
+        sync(&mut b, &cloud);
         assert_eq!(b.labels("hosts"), ["web"]);
 
         a.add_host("api", 22, None);
         b.add_host("db", 22, None);
-        assert!(sync(&mut a, &cloud, None).uploaded);
-        let from_b = sync(&mut b, &cloud, None);
+        assert!(sync(&mut a, &cloud).uploaded);
+        let from_b = sync(&mut b, &cloud);
         assert_eq!((from_b.from_local, from_b.from_remote), (2, 2), "db (+config) up, api (+config) down");
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         assert_eq!(a.labels("hosts"), ["api", "db", "web"]);
         assert_eq!(b.labels("hosts"), ["api", "db", "web"]);
         let snapshot = cloud.snapshot.borrow().clone().unwrap();
@@ -1010,20 +1005,20 @@ mod tests {
 
         let uploads = *cloud.uploads.borrow();
         for device in [&mut a, &mut b] {
-            let again = sync(device, &cloud, None);
+            let again = sync(device, &cloud);
             assert_eq!((again.uploaded, again.imported), (false, false), "{}", device.name);
         }
         assert_eq!(*cloud.uploads.borrow(), uploads, "converged: nothing more to send");
     }
 
     #[test]
-    fn edits_of_different_records_merge_and_the_same_record_twice_is_a_conflict() {
+    fn sync_uses_cloud_versions_only_for_records_changed_on_both_sides() {
         let cloud = TestServer::default();
         let (mut a, mut b) = (TestDevice::new("A", 1), TestDevice::new("B", 500));
         a.add_host("web", 22, None);
         a.add_host("db", 22, None);
-        sync(&mut a, &cloud, None);
-        sync(&mut b, &cloud, None);
+        sync(&mut a, &cloud);
+        sync(&mut b, &cloud);
 
         // A changes web's port (its SSH config), B renames db.
         let config_id = a.host_mut("web")["ssh_config"]["local_id"].clone();
@@ -1034,25 +1029,43 @@ mod tests {
         }
         a.host_mut("web")["ssh_config"]["port"] = json!(2222);
         b.host_mut("db")["label"] = json!("database");
-        sync(&mut a, &cloud, None);
-        assert!(sync(&mut b, &cloud, None).conflicts.is_empty());
+        sync(&mut a, &cloud);
+        assert_eq!(sync(&mut b, &cloud).resolved_conflicts, 0);
         let web_config = b.host_mut("web")["ssh_config"]["local_id"].clone();
         let port = records(&b.data, "sshConfigs").find(|c| c["local_id"] == web_config).unwrap()["port"].clone();
         assert_eq!(port, 2222);
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         assert_eq!(a.labels("hosts"), ["database", "web"]);
 
         a.host_mut("web")["label"] = json!("web-a");
         b.host_mut("web")["label"] = json!("web-b");
-        sync(&mut a, &cloud, None);
-        let conflict = sync(&mut b, &cloud, None);
-        assert_eq!(conflict.conflicts.len(), 1);
-        assert_eq!(conflict.conflicts[0].kind, "hosts");
-        assert_eq!(conflict.conflicts[0].text, "Конфликт: Хост «web-b»");
-        assert_eq!(b.labels("hosts"), ["database", "web-b"], "nothing is applied on a conflict");
-        assert!(sync(&mut b, &cloud, Some(Prefer::Local)).conflicts.is_empty());
-        sync(&mut a, &cloud, None);
-        assert_eq!(a.labels("hosts"), ["database", "web-b"]);
+        sync(&mut a, &cloud);
+        b.host_mut("database")["label"] = json!("db-b");
+        let backups = b.backups;
+        assert_eq!(sync(&mut b, &cloud).resolved_conflicts, 1);
+        assert_eq!(b.labels("hosts"), ["db-b", "web-a"]);
+        assert_eq!(b.backups, backups + 1);
+        sync(&mut a, &cloud);
+        assert_eq!(a.labels("hosts"), ["db-b", "web-a"]);
+        assert_eq!(sync(&mut b, &cloud).resolved_conflicts, 0);
+    }
+
+    #[test]
+    fn automatic_sync_keeps_an_edit_over_a_concurrent_deletion() {
+        let mut previous = empty_snapshot(NOW);
+        previous["settings"]["value"] = json!(1);
+        let digests = digests_of(Some(&previous));
+        let base = Base { local: digests.clone(), remote: digests };
+        let mut edited = previous;
+        edited["settings"]["value"] = json!(2);
+        let deleted = empty_snapshot(NOW);
+
+        for (local, remote) in [(&edited, &deleted), (&deleted, &edited)] {
+            let merged = merge_snapshots(local, Some(remote), Some(&base), ConflictPolicy::Automatic, NOW);
+            assert_eq!(merged.conflicts.len(), 1);
+            assert_eq!(merged.local["settings"]["value"], 2);
+            assert_eq!(merged.remote["settings"]["value"], 2);
+        }
     }
 
     #[test]
@@ -1062,18 +1075,18 @@ mod tests {
         a.add_group("prod");
         a.add_host("web", 22, None);
         a.add_host("old", 22, None);
-        sync(&mut a, &cloud, None);
-        sync(&mut b, &cloud, None);
+        sync(&mut a, &cloud);
+        sync(&mut b, &cloud);
 
         a.data["hosts"].as_array_mut().unwrap().retain(|h| h["label"] != "old");
         a.data["groups"] = json!([]);
         let prod = records(&b.data, "groups").find(|g| g["label"] == "prod").cloned();
         b.add_host("db", 22, prod);
-        sync(&mut a, &cloud, None);
-        assert!(sync(&mut b, &cloud, None).conflicts.is_empty());
+        sync(&mut a, &cloud);
+        assert_eq!(sync(&mut b, &cloud).resolved_conflicts, 0);
         assert_eq!(b.labels("hosts"), ["db", "web"]);
         assert_eq!(b.labels("groups"), ["prod"], "the group db needs survives the deletion");
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         assert_eq!(a.labels("hosts"), ["db", "web"]);
         assert_eq!(a.labels("groups"), ["prod"]);
     }
@@ -1087,7 +1100,7 @@ mod tests {
         b.add_host("extra", 22, None);
         // An older client uploaded A's data with plain numeric IDs.
         *cloud.snapshot.borrow_mut() = Some(validate_snapshot(&a.data).unwrap());
-        assert!(sync(&mut b, &cloud, None).conflicts.is_empty());
+        assert_eq!(sync(&mut b, &cloud).resolved_conflicts, 0);
         let snapshot = cloud.snapshot.borrow().clone().unwrap();
         let mut hosts: Vec<_> = records(&snapshot, "hosts").map(|h| h["label"].as_str().unwrap().to_owned()).collect();
         hosts.sort();
@@ -1096,9 +1109,8 @@ mod tests {
 
         let mut c = TestDevice::new("C", 900);
         c.add_host("web", 2200, None);
-        let conflict = sync(&mut c, &cloud, None);
-        assert_eq!(conflict.conflicts.len(), 1);
-        assert_eq!(conflict.conflicts[0].label, "web");
+        assert_eq!(sync(&mut c, &cloud).resolved_conflicts, 1);
+        assert_eq!(c.host_mut("web")["ssh_config"]["port"], 22);
     }
 
     #[test]
@@ -1106,11 +1118,11 @@ mod tests {
         let mut cloud = TestServer::default();
         let mut a = TestDevice::new("A", 1);
         a.add_host("web", 22, None);
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         a.add_host("api", 22, None);
         cloud.race = true;
         let saved = a.saved.clone();
-        let error = sync_once(saved, "server", None, &mut a, &cloud, NOW).unwrap_err();
+        let error = sync_once(saved, "server", &mut a, &cloud, NOW).unwrap_err();
         assert!(error.contains("изменился во время синхронизации"), "{error}");
         assert_eq!(cloud.snapshot.borrow().as_ref().unwrap()["hosts"].as_array().unwrap().len(), 1);
     }
@@ -1120,9 +1132,9 @@ mod tests {
         let cloud = TestServer::default();
         let mut a = TestDevice::new("A", 1);
         a.add_host("web", 22, None);
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         *cloud.snapshot.borrow_mut() = None;
-        sync(&mut a, &cloud, None);
+        sync(&mut a, &cloud);
         assert_eq!(a.labels("hosts"), ["web"]);
         assert_eq!(cloud.snapshot.borrow().as_ref().unwrap()["hosts"].as_array().unwrap().len(), 1);
         assert_eq!(a.backups, 0, "nothing was imported, so no backup was needed");
@@ -1132,10 +1144,10 @@ mod tests {
     fn settings_merge_per_key() {
         let local = json!({"format": FORMAT, "version": 1, "settings": {"font": "A", "theme": "dark"}});
         let remote = json!({"format": FORMAT, "version": 1, "settings": {"font": "A", "theme": "light", "size": 14}});
-        assert!(!merge_snapshots(&local, Some(&local), None, None, NOW).upload_needed);
+        assert!(!merge_snapshots(&local, Some(&local), None, ConflictPolicy::Preview, NOW).upload_needed);
         let base = Base { local: digests_of(Some(&local)), remote: digests_of(Some(&local)) };
         let changed = json!({"format": FORMAT, "version": 1, "settings": {"font": "B", "theme": "dark"}});
-        let merged = merge_snapshots(&changed, Some(&remote), Some(&base), None, NOW);
+        let merged = merge_snapshots(&changed, Some(&remote), Some(&base), ConflictPolicy::Preview, NOW);
         assert!(merged.conflicts.is_empty());
         assert_eq!(merged.local["settings"], json!({"font": "B", "theme": "light", "size": 14}));
         assert_eq!(merged.remote["settings"], json!({"font": "B", "theme": "light", "size": 14}));
@@ -1159,8 +1171,8 @@ mod tests {
 
     fn sync_with(device: &mut TestDevice, cloud: &crate::cloud::Cloud) {
         let saved = device.saved.clone();
-        let outcome = sync_once(saved, "server", None, device, cloud, NOW).unwrap();
-        assert!(outcome.conflicts.is_empty());
+        let outcome = sync_once(saved, "server", device, cloud, NOW).unwrap();
+        assert_eq!(outcome.resolved_conflicts, 0);
         device.saved = outcome.state;
     }
 

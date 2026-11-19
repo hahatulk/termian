@@ -9,8 +9,7 @@ use std::time::Duration;
 
 use gpui::{div, prelude::*, px, rgb, rgba, svg, AnimationExt, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::log_backup;
-use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Report, Status};
-use termian_native::sync::{ConflictInfo, Prefer};
+use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Status};
 use termian_native::theme;
 use termian_native::vault::Vault;
 
@@ -32,7 +31,6 @@ const ERROR_TONE: u32 = 0xec706f;
 /// Legacy title-bar badge text (`#131626`).
 const BADGE_TEXT: u32 = 0x131626;
 
-const CONFLICT_ERROR: &str = "Одни и те же записи изменены и на устройстве, и в облаке. Выберите, чью версию оставить.";
 const HELP: &str = "Токен и пароли сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.";
 const AUTO_SYNC: &str = "Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)";
 const SAVED_SECRET: &str = "Пароль сохранён. Поле — только для замены.";
@@ -178,10 +176,8 @@ struct Run {
     /// What the preview panel shows; `None` before the first check.
     panel: Option<Status>,
     /// Conflicts found by a confirmed sync.
-    conflicts: Option<Vec<ConflictInfo>>,
     checked_at: Option<i64>,
     confirm: bool,
-    prefer: bool,
     /// Groups the user opened or closed, by position.
     toggled: HashSet<usize>,
 }
@@ -194,16 +190,10 @@ impl Run {
     }
 
     /// Applies a finished operation; the status text is returned.
-    fn finished(&mut self, result: &Result<Report, String>) -> Out {
+    fn finished(&mut self, result: &Result<String, String>) -> Out {
         self.toggled.clear();
         match result {
-            Ok(Report::Conflicts(conflicts)) => {
-                self.conflicts = Some(conflicts.clone());
-                self.prefer = true;
-                Out::Error(CONFLICT_ERROR.into())
-            }
-            Ok(Report::Done(text)) => {
-                self.conflicts = None;
+            Ok(text) => {
                 self.panel = Some(Status::Checked(Preview::Synced));
                 Out::Success(text.clone())
             }
@@ -316,7 +306,7 @@ impl Shell {
         }
         let body = match operation {
             None => Body::Config(ConfigForm::from_vault(&self.vault)),
-            Some(operation) => Body::Run(Run { operation, configured: configured(&self.vault), panel: None, conflicts: None, checked_at: None, confirm: false, prefer: false, toggled: HashSet::new() }),
+            Some(operation) => Body::Run(Run { operation, configured: configured(&self.vault), panel: None, checked_at: None, confirm: false, toggled: HashSet::new() }),
         };
         let checking = matches!(&body, Body::Run(run) if run.configured);
         let out = match &body {
@@ -428,13 +418,13 @@ impl Shell {
         .detach();
     }
 
-    /// Hourly merge sync; conflicts are left for the user.
+    /// Hourly merge sync.
     fn auto_sync(&mut self, cx: &mut Context<Self>) {
         let enabled = self.vault.cloud.as_ref().is_some_and(|c| c.auto_sync) && configured(&self.vault);
         if !enabled || self.cloud.header.paused() || self.cloud.running || self.cloud.dialog.is_some() {
             return;
         }
-        self.run_cloud(Operation::Sync, None, cx);
+        self.run_cloud(Operation::Sync, cx);
     }
 
     /// Read-only comparison; `for_dialog` also fills an open dialog's panel.
@@ -477,7 +467,7 @@ impl Shell {
     }
 
     /// Runs a confirmed operation on a copy of the vault and adopts the result.
-    fn run_cloud(&mut self, operation: Operation, prefer: Option<Prefer>, cx: &mut Context<Self>) {
+    fn run_cloud(&mut self, operation: Operation, cx: &mut Context<Self>) {
         if self.cloud.running {
             return;
         }
@@ -490,7 +480,7 @@ impl Shell {
         let backups = self_cloud::default_backup_dir();
         let task = cx.background_spawn(async move {
             let result = match operation {
-                Operation::Sync => self_cloud::sync(&mut vault, prefer, &backups),
+                Operation::Sync => self_cloud::sync(&mut vault, &backups),
                 Operation::Upload => self_cloud::upload(&mut vault),
                 Operation::Download => self_cloud::download(&mut vault, &backups),
             };
@@ -503,15 +493,7 @@ impl Shell {
                 let mut result = result;
                 if result.is_ok() {
                     let mut candidate = shell.vault.clone();
-                    let applied = match &result {
-                        Ok(Report::Done(_)) => adopt(&mut candidate, &started, vault),
-                        Ok(Report::Conflicts(_)) if candidate.cloud == started.cloud => {
-                            candidate.sync_state = vault.sync_state;
-                            true
-                        }
-                        _ => false,
-                    };
-                    if !applied {
+                    if !adopt(&mut candidate, &started, vault) {
                         result = Err("Конфигурация изменилась во время операции. Проверьте изменения и повторите.".into());
                     } else if let Err(error) = shell.store.save(&candidate) {
                         result = Err(format!("Не удалось сохранить результат операции в Vault: {error}"));
@@ -520,12 +502,9 @@ impl Shell {
                     }
                 }
                 match &result {
-                    Ok(Report::Done(_)) => {
+                    Ok(_) => {
                         shell.cloud.header.synced_at = Some(now());
                         shell.cloud.header.set(Status::Checked(Preview::Synced));
-                    }
-                    Ok(Report::Conflicts(conflicts)) => {
-                        shell.cloud.header.set(Status::Checked(Preview::Conflicts(conflicts.clone())));
                     }
                     Err(message) => {
                         shell.cloud.header.set(Status::Error { credentials: self_cloud::is_credential_error(message), message: message.clone() });
@@ -543,18 +522,17 @@ impl Shell {
         .detach();
     }
 
-    fn confirm_cloud(&mut self, prefer: Option<Prefer>, cx: &mut Context<Self>) {
+    fn confirm_cloud(&mut self, cx: &mut Context<Self>) {
         let Some(dialog) = &mut self.cloud.dialog else { return };
         let Body::Run(run) = &mut dialog.body else { return };
-        if dialog.busy || (prefer.is_none() && !run.confirm) || (prefer.is_some() && !run.prefer) {
+        if self.cloud.running || dialog.busy || !run.confirm {
             return;
         }
-        let operation = if prefer.is_some() { Operation::Sync } else { run.operation };
+        let operation = run.operation;
         run.confirm = false;
-        run.prefer = false;
         dialog.busy = true;
         dialog.out = Some(Out::Working("Выполняется…".into()));
-        self.run_cloud(operation, prefer, cx);
+        self.run_cloud(operation, cx);
         cx.notify();
     }
 
@@ -660,74 +638,33 @@ impl Shell {
             }
             Body::Run(_) => {
                 if keystroke.key == "enter" {
-                    self.confirm_cloud(None, cx);
+                    self.confirm_cloud(cx);
                 }
             }
         }
     }
 
-    /// Sync, Upload and Download in the title bar, with the legacy indicators.
-    pub fn render_cloud_buttons(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub fn render_cloud_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let header = &self.cloud.header;
-        let dot = |count: usize, tone: u32| {
-            div()
-                .absolute()
-                .top(px(-3.))
-                .right(px(-3.))
-                .h(px(if count > 0 { 16. } else { 8. }))
-                .min_w(px(if count > 0 { 16. } else { 8. }))
-                .px(px(if count > 0 { 3. } else { 0. }))
-                .rounded_full()
-                .bg(rgb(tone))
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_size(px(10.))
-                .font_weight(FontWeight::BOLD)
-                .text_color(rgb(BADGE_TEXT))
-                .when(count > 0, |d| d.child(if count > 99 { "99+".to_owned() } else { count.to_string() }))
-        };
-        let anchor = |id: &str, name: &str, title: String| {
-            div()
-                .id(SharedString::from(id.to_owned()))
-                .relative()
-                .size(px(30.))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_md()
-                .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                .child(svg().path(icon(name)).size(px(18.)).text_color(rgb(theme::TEXT)))
-                .tooltip(move |_, cx| cx.new(|_| Tooltip(title.clone())).into())
-        };
-        let (up, up_tone) = header.indicator(true);
-        let (down, down_tone) = header.indicator(false);
+        let title = header.sync_title(clock);
         let sync_icon = svg().path(icon("cloud_sync")).size(px(18.)).text_color(rgb(theme::TEXT));
-        vec![
-            anchor("cloud-sync", "cloud_sync", header.sync_title(clock))
-                .when(header.syncing(), |d| {
-                    d.child(
-                        div().absolute().inset_0().flex().items_center().justify_center().bg(rgb(theme::TITLE_BAR)).child(sync_icon.with_animation(
-                            "cloud-syncing",
-                            gpui::Animation::new(Duration::from_secs(1)).repeat(),
-                            |icon, delta| icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta))),
-                        )),
-                    )
-                })
-                .children(header.sync_badge().map(|(mark, tone)| {
-                    div().absolute().top(px(-2.)).right(px(-2.)).size(px(13.)).rounded_full().bg(rgb(tone)).flex().items_center().justify_center().text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(rgb(BADGE_TEXT)).child(mark)
-                }))
-                .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Sync), window, cx)))
-                .into_any_element(),
-            anchor("cloud-upload", "cloud_upload", format!("Отправить изменения — {up} локальных изменений"))
-                .child(dot(up, up_tone))
-                .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Upload), window, cx)))
-                .into_any_element(),
-            anchor("cloud-download", "cloud_download", format!("Получить изменения — {down} изменений на сервере"))
-                .child(dot(down, down_tone))
-                .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Download), window, cx)))
-                .into_any_element(),
-        ]
+        div().id("cloud-sync").relative().size(px(30.)).flex().items_center().justify_center().rounded_md()
+            .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+            .tooltip(move |_, cx| cx.new(|_| Tooltip(title.clone())).into())
+            .child(if header.syncing() {
+                sync_icon.with_animation(
+                    "cloud-syncing",
+                    gpui::Animation::new(Duration::from_secs(1)).repeat(),
+                    |icon, delta| icon.with_transformation(gpui::Transformation::rotate(gpui::percentage(delta))),
+                ).into_any_element()
+            } else {
+                sync_icon.into_any_element()
+            })
+            .children(header.sync_badge().map(|(mark, tone)| {
+                div().absolute().top(px(-2.)).right(px(-2.)).size(px(13.)).rounded_full().bg(rgb(tone)).flex().items_center().justify_center().text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(rgb(BADGE_TEXT)).child(mark)
+            }))
+            .on_click(cx.listener(|shell, _, window, cx| shell.open_cloud(Some(Operation::Sync), window, cx)))
+            .into_any_element()
     }
 
     fn cloud_input(&self, field: Field, label: &str, value: &str, secret: bool, placeholder: &str, hint: Option<&str>, enabled: bool, cx: &mut Context<Self>) -> Div {
@@ -819,8 +756,6 @@ impl Shell {
 
     fn render_cloud_panel(&self, run: &Run, cx: &mut Context<Self>) -> Option<Div> {
         let status = run.panel.as_ref()?;
-        let conflicts = run.conflicts.as_ref().map(|c| Status::Checked(Preview::Conflicts(c.clone())));
-        let status = conflicts.as_ref().unwrap_or(status);
         let (headline, tone) = match status {
             Status::Checking => ("Проверяю изменения…", theme::TEXT),
             Status::Syncing => ("Синхронизация…", theme::TEXT),
@@ -851,9 +786,8 @@ impl Shell {
             .text_xs()
             .text_color(rgb(theme::TEXT))
             .child(div().text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).child(headline));
-        let conflicted = matches!(status, Status::Checked(Preview::Conflicts(_))) || matches!(status, Status::Checked(Preview::Changes(_))) && status_both(status);
-        if conflicted {
-            panel = panel.child(muted("Изменения разных записей объединяются автоматически. Если одна и та же запись изменена на обеих сторонах, нужно выбрать, чью версию оставить."));
+        if run.operation == Operation::Sync && matches!(status, Status::Checked(Preview::Conflicts(_))) {
+            panel = panel.child(muted("Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия."));
         }
         if let Status::Error { message, credentials } = status {
             panel = panel.child(muted(message.clone()));
@@ -956,12 +890,8 @@ impl Shell {
                             .into_any_element(),
                     );
                 }
-                if run.prefer {
-                    actions.push(button("cloud-prefer-remote", "Взять версии из облака", false, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(Some(Prefer::Remote), cx))).into_any_element());
-                    actions.push(button("cloud-prefer-local", "Оставить версии устройства", false, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(Some(Prefer::Local), cx))).into_any_element());
-                }
                 if run.confirm {
-                    actions.push(button("cloud-confirm", run.operation.confirm(), true, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(None, cx))).into_any_element());
+                    actions.push(button("cloud-confirm", run.operation.confirm(), true, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(cx))).into_any_element());
                 }
                 (run.operation.title(), fields, actions)
             }
@@ -1066,17 +996,13 @@ impl Shell {
 }
 
 /// Changes on both sides, the legacy `conflict` headline.
-fn status_both(status: &Status) -> bool {
-    matches!(status, Status::Checked(preview @ Preview::Changes(_)) if { let (up, down) = preview.counts(); up > 0 && down > 0 })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use termian_native::cloud::CloudConfig;
 
     fn run(operation: Operation) -> Run {
-        Run { operation, configured: true, panel: None, conflicts: None, checked_at: None, confirm: false, prefer: false, toggled: HashSet::new() }
+        Run { operation, configured: true, panel: None, checked_at: None, confirm: false, toggled: HashSet::new() }
     }
 
     #[test]
@@ -1111,19 +1037,15 @@ mod tests {
     }
 
     #[test]
-    fn a_run_offers_the_choice_only_after_conflicts() {
+    fn conflicting_preview_can_run_without_choosing_a_side() {
         let mut run = run(Operation::Sync);
-        run.checked(Status::Checked(Preview::Synced), 0);
-        assert!(run.confirm && !run.prefer);
+        run.checked(Status::Checked(Preview::Conflicts(vec![])), 0);
+        assert!(run.confirm);
         run.confirm = false;
-        let conflict = ConflictInfo { kind: "hosts".into(), label: "web".into(), detail: String::new(), text: String::new() };
-        assert_eq!(run.finished(&Ok(Report::Conflicts(vec![conflict]))), Out::Error(CONFLICT_ERROR.into()));
-        assert!(run.prefer && !run.confirm);
-        run.prefer = false;
-        assert_eq!(run.finished(&Ok(Report::Done("Готово".into()))), Out::Success("Готово".into()));
-        assert_eq!((run.conflicts.clone(), run.panel.clone()), (None, Some(Status::Checked(Preview::Synced))));
+        assert_eq!(run.finished(&Ok("Готово".into())), Out::Success("Готово".into()));
+        assert_eq!(run.panel, Some(Status::Checked(Preview::Synced)));
         assert_eq!(run.finished(&Err("сбой".into())), Out::Error("сбой".into()));
-        assert!(run.confirm, "a failed run can be repeated");
+        assert!(run.confirm);
     }
 
     #[test]

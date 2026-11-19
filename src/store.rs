@@ -449,8 +449,8 @@ mod tests {
 
         let before = server.lock().unwrap().clone();
         assert_eq!(
-            crate::self_cloud::sync(&mut loaded, None, &backups).unwrap(),
-            crate::self_cloud::Report::Done("Данные уже синхронизированы".into())
+            crate::self_cloud::sync(&mut loaded, &backups).unwrap(),
+            "Данные уже синхронизированы"
         );
         assert_eq!(*server.lock().unwrap(), before);
         reopened.save(&loaded).unwrap();
