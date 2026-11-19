@@ -899,7 +899,7 @@ impl Shell {
                     shell.sftp.actions.menu = None;
                     cx.notify();
                 }))
-                .child(
+                .child(super::motion::popover(
                     div()
                         .id("menu")
                         .absolute()
@@ -915,7 +915,8 @@ impl Shell {
                         // Clicks on the menu itself must not dismiss it before the item runs.
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .children(rows),
-                )
+                    "sftp-menu-enter",
+                ))
                 .into_any_element(),
         )
     }

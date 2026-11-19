@@ -336,7 +336,7 @@ impl Shell {
                 .child(dialog::button("keygen-generate", "Generate & save", Kind::Accent, false).w_full().on_click(cx.listener(|shell, _, _, cx| shell.generate_key(cx))))
         };
         div().id("key-generator").track_focus(&self.editor_focus).on_key_down(cx.listener(Self::on_key_editor_key))
-            .absolute().top_0().right_0().bottom_0().w(px(WIDTH)).occlude().flex().flex_col().bg(rgb(theme::BACKGROUND)).border_l_1().border_color(rgb(theme::TITLE_BAR)).shadow_lg()
+            .absolute().top_0().right(self.editor_inset()).bottom_0().w(px(WIDTH)).occlude().flex().flex_col().bg(rgb(theme::BACKGROUND)).border_l_1().border_color(rgb(theme::TITLE_BAR)).shadow_lg()
             .child(div().h(px(64.)).px(px(15.)).flex().items_center().gap_2().border_b_1().border_color(rgb(theme::TITLE_BAR))
                 .child(div().flex_1().text_lg().text_color(rgb(theme::TEXT)).child("Generate Key"))
                 .child(dialog::collapse_button("keygen-close").on_click(cx.listener(|shell, _, _, cx| { shell.key_editor = None; cx.notify(); }))))
@@ -457,7 +457,7 @@ impl Shell {
             .on_key_down(cx.listener(Self::on_key_editor_key))
             .absolute()
             .top_0()
-            .right_0()
+            .right(self.editor_inset())
             .bottom_0()
             .w(px(WIDTH))
             .occlude()

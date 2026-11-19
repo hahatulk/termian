@@ -52,7 +52,7 @@ impl Shell {
                         shell.keychain_menu = None;
                         cx.notify();
                     }))
-                    .child(gpui::anchored().position(at).child(items)),
+                    .child(gpui::anchored().position(at).child(super::motion::popover(items, "keychain-menu-enter"))),
             )
             .into_any_element(),
         )
@@ -245,7 +245,7 @@ impl Shell {
             .on_key_down(cx.listener(Self::on_identity_key))
             .absolute()
             .top_0()
-            .right_0()
+            .right(self.editor_inset())
             .bottom_0()
             .w(px(WIDTH))
             .occlude()

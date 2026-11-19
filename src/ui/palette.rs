@@ -1,7 +1,7 @@
 //! Command palette (⌘K): one search field over the window with Hosts, Tabs
 //! and Quick connect results; arrows choose, Enter runs, Escape closes.
 
-use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window};
+use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::palette::{flatten, sections, Item};
 use termian_native::session::parse_destination;
 use termian_native::tabs::TabKind;
@@ -170,9 +170,9 @@ impl Shell {
                 .justify_center()
                 .items_start()
                 .pt(px(80.))
-                .bg(rgba(0x00000066))
+                .child(super::motion::scrim(0x00000066))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|shell, _, window, cx| shell.close_palette(window, cx)))
-                .child(
+                .child(super::motion::modal(
                     div()
                         .id("palette")
                         .track_focus(&self.palette_focus)
@@ -192,7 +192,7 @@ impl Shell {
                         .shadow_lg()
                         .child(field)
                         .child(list),
-                )
+                ))
                 .into_any_element(),
         )
     }

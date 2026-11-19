@@ -199,6 +199,7 @@ impl Shell {
             Tab::Theme => self.render_panel_theme(panel, cx),
         };
         let menu = panel.menu.map(|(id, at)| self.render_panel_menu(id, at, cx));
+        let reveal = super::motion::page(body, ("side-panel-page", panel.tab as usize));
         Some(
             div()
                 .id("side-panel")
@@ -216,7 +217,7 @@ impl Shell {
                 .border_color(rgb(theme::TITLE_BAR))
                 .text_sm()
                 .child(tabs)
-                .child(body)
+                .child(reveal)
                 .children(menu)
                 .into_any_element(),
         )
@@ -409,7 +410,7 @@ impl Shell {
                     }
                     cx.notify();
                 }))
-                .child(gpui::anchored().position(at).child(items)),
+                .child(gpui::anchored().position(at).child(super::motion::popover(items, "side-menu-enter"))),
         )
         .into_any_element()
     }

@@ -751,6 +751,7 @@ impl Render for SettingsWindow {
             let selected = tab == self.tab;
             div()
                 .id(SharedString::from(format!("settings-tab-{tab:?}")))
+                .relative()
                 .h(px(36.))
                 .mx(px(10.))
                 .my(px(4.))
@@ -760,7 +761,7 @@ impl Render for SettingsWindow {
                 .rounded(px(10.))
                 .text_size(px(14.))
                 .text_color(rgb(theme::TEXT))
-                .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(super::motion::sidebar_marker(theme::ACCENT)))
                 .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
                 .child(tab.title())
                 .on_click(cx.listener(move |settings, _, _, cx| {
@@ -798,7 +799,9 @@ impl Render for SettingsWindow {
                     .min_h_0()
                     .flex()
                     .child(div().w(px(220.)).h_full().flex_none().py(px(4.)).border_r_1().border_color(rgb(BORDER)).children(tabs))
-                    .child(div().id("settings-content").flex_1().h_full().overflow_y_scroll().px(px(20.)).bg(rgb(theme::BACKGROUND)).children(content)),
+                    .child(div().id("settings-content").flex_1().h_full().overflow_y_scroll().px(px(20.)).bg(rgb(theme::BACKGROUND)).child(
+                        super::motion::page(div().children(content), ("settings-page", self.tab as usize)),
+                    )),
             )
     }
 }

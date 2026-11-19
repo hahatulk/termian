@@ -2,12 +2,11 @@
 //! close cross, 30 px of padding, text, then right-aligned buttons. Escape
 //! closes and Enter confirms, as in the legacy `MessageDialog`.
 
-use std::time::Duration;
-
-use gpui::{div, ease_out_quint, prelude::*, px, rgb, rgba, svg, Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, Stateful};
 use termian_native::theme;
 
 use super::assets::icon;
+use super::motion;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -110,20 +109,14 @@ pub fn backdrop(card: Div) -> Stateful<Div> {
         .flex()
         .items_center()
         .justify_center()
-        .bg(rgba(0x00000099))
-        .child(card.with_animation("dialog-in", Animation::new(Duration::from_millis(150)).with_easing(ease_out_quint()), |card, t| {
-            card.opacity(t).mt(px((1. - t) * 16.))
-        }))
+        .child(motion::scrim(0x00000099))
+        .child(motion::modal(card))
 }
 
 /// Slides a right-hand editor panel in from the window edge, like the legacy
 /// sliders. The animation runs once, when the panel first appears.
 pub fn slide_in(panel: Stateful<Div>, width: f32) -> AnyElement {
-    panel
-        .with_animation("slide-in", Animation::new(Duration::from_millis(200)).with_easing(ease_out_quint()), move |panel, t| {
-            panel.right(px(-(1. - t) * width))
-        })
-        .into_any_element()
+    motion::slide_in(panel, "slide-in", width)
 }
 
 /// Text with line breaks kept, like the legacy `pre-line` dialog text.

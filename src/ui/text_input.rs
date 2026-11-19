@@ -533,7 +533,7 @@ pub fn field<T: 'static>(
             );
         }
         field = field.child(
-            deferred(anchored().position(at).snap_to_window().child(panel)).with_priority(3),
+            deferred(anchored().position(at).snap_to_window().child(super::motion::popover(panel, "field-menu-enter"))).with_priority(3),
         );
     }
     field

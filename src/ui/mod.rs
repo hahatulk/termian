@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod cloud;
 pub mod dialog;
+pub mod motion;
 mod text_input;
 pub mod privacy;
 pub mod file_access;

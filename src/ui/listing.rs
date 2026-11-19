@@ -336,6 +336,13 @@ impl Shell {
                 }
             }
         }
+        let enter_id = match kind {
+            MenuKind::View(_) => "view-menu-enter",
+            MenuKind::Sort(_) => "sort-menu-enter",
+            MenuKind::Tags => "tags-menu-enter",
+            MenuKind::NewForwarding => "forwarding-menu-enter",
+        };
+        let menu = super::motion::popover(panel, enter_id);
         let corner = if kind == MenuKind::NewForwarding { Corner::TopLeft } else { Corner::TopRight };
         Some(
             div()
@@ -347,7 +354,7 @@ impl Shell {
                     shell.list.menu = None;
                     cx.notify();
                 }))
-                .child(anchored().position(at).anchor(corner).snap_to_window().child(panel))
+                .child(anchored().position(at).anchor(corner).snap_to_window().child(menu))
                 .into_any_element(),
         )
     }

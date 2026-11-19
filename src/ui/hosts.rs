@@ -1,13 +1,12 @@
 //! Vaults tab: navigation sidebar and the Hosts screen.
 
-use std::time::Duration;
-
-use gpui::{div, prelude::*, px, rgb, svg, Animation, AnimationExt, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
+use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::session;
 use termian_native::theme;
 use termian_native::vault::{Group, GroupId, Host};
 
 use super::assets::icon;
+use super::motion;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -38,15 +37,19 @@ fn glyph(name: &str, size: f32, color: u32) -> impl IntoElement {
 }
 
 pub(super) fn tile(name: &str, background: u32) -> Div {
+    sized_tile(name, background, 40., 20.)
+}
+
+fn sized_tile(name: &str, background: u32, size: f32, glyph_size: f32) -> Div {
     div()
-        .size(px(40.))
+        .size(px(size))
         .flex_none()
         .rounded_lg()
         .bg(rgb(background))
         .flex()
         .items_center()
         .justify_center()
-        .child(glyph(name, 20., 0xffffff))
+        .child(glyph(name, glyph_size, 0xffffff))
 }
 
 pub(super) fn host_tile(host: &Host) -> Div {
@@ -55,12 +58,17 @@ pub(super) fn host_tile(host: &Host) -> Div {
 
 /// Host icon tile for a distribution name; unknown systems get a generic icon.
 pub(super) fn os_tile(os: Option<&str>) -> Div {
-    match os {
-        Some("debian") => tile("debian", theme::TILE_DEBIAN),
-        Some("ubuntu") => tile("ubuntu", theme::TILE_UBUNTU),
-        Some(_) => tile("linux", theme::TILE_BLUE),
-        None => tile("new_host", theme::TILE_BLUE),
-    }
+    os_tile_sized(os, 40., 20.)
+}
+
+pub(super) fn os_tile_sized(os: Option<&str>, size: f32, glyph_size: f32) -> Div {
+    let (name, background) = match os {
+        Some("debian") => ("debian", theme::TILE_DEBIAN),
+        Some("ubuntu") => ("ubuntu", theme::TILE_UBUNTU),
+        Some(_) => ("linux", theme::TILE_BLUE),
+        None => ("new_host", theme::TILE_BLUE),
+    };
+    sized_tile(name, background, size, glyph_size)
 }
 
 pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String) -> Stateful<Div> {
@@ -126,10 +134,11 @@ pub(super) fn tool_button(id: &str, icon_name: &str, label: &str) -> Stateful<Di
 }
 
 impl Shell {
-    pub fn render_vaults(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let sliding = self.slider_open();
-        // Sidebar, body padding and an open slider leave this much for cards.
-        let width = f32::from(window.viewport_size().width) - 185. - 2. * super::sections::BODY_PADDING - if sliding { SLIDER } else { 0. };
+    pub fn render_vaults(&mut self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let target = if self.slider_open() { 1. } else { 0. };
+        self.editor_reveal = self.editor_motion.toward(target, 260, window);
+        let reserved = SLIDER * self.editor_reveal;
+        let width = f32::from(window.viewport_size().width) - 185. - 2. * super::sections::BODY_PADDING - reserved;
         self.cards_width.set(width);
         let content = match self.section {
             Section::Hosts => self.render_hosts(window, cx).into_any_element(),
@@ -147,25 +156,18 @@ impl Shell {
             Section::KnownHosts => self.render_known_menu(window, cx),
             _ => None,
         };
-        // Legacy sliders push the cards aside and slide in from the right.
-
-        // Host, group and rule editors slide in by themselves (`dialog::slide_in`).
-        let animate = sliding && matches!(self.section, Section::Keychain | Section::Snippets);
-        let editor = editor.map(|editor| {
-            if !animate {
-                return editor;
-            }
-            div()
-                .absolute()
-                .inset_0()
-                .child(editor)
-                .with_animation("slider-in", Animation::new(Duration::from_millis(200)).with_easing(gpui::ease_out_quint()), |d, t| {
-                    d.left(px(SLIDER * (1. - t))).right(px(-SLIDER * (1. - t)))
-                })
-                .into_any_element()
+        let page_id = SharedString::from(match self.section {
+            Section::Hosts => format!("hosts-enter-{:?}", self.group),
+            Section::Snippets => format!("snippets-enter-{:?}", self.snippet_package),
+            section => format!("section-enter-{}", section as usize),
         });
-        let content = div().flex_1().h_full().min_w_0().flex().when(sliding, |d| d.pr(px(SLIDER))).child(content);
+        let content = div().flex_1().h_full().min_w_0().pr(px(reserved)).flex()
+            .child(motion::page(div().size_full().flex().child(content), page_id));
         div().size_full().relative().flex().child(self.render_sidebar(cx)).child(content).children(editor).children(self.render_list_menu(window, cx)).into_any_element()
+    }
+
+    pub(super) fn editor_inset(&self) -> gpui::Pixels {
+        px(-SLIDER * (1. - self.editor_reveal))
     }
 
     /// A slider (editor or panel) is open on the right of the Vaults.
@@ -185,6 +187,7 @@ impl Shell {
                 let active = section == self.section;
                 div()
                     .id(SharedString::from(format!("section-{label}")))
+                    .relative()
                     // Legacy rows are a little taller.
                     .h(px(40.))
                     .px_3()
@@ -193,8 +196,8 @@ impl Shell {
                     .gap_3()
                     .rounded_md()
                     .text_color(rgb(theme::TEXT))
-                    .when(active, |s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                    .hover(|s| s.bg(rgb(theme::SURFACE)))
+                    .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(motion::sidebar_marker(theme::ACCENT)))
+                    .when(!active, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
                     .child(glyph(icon_name, 14., theme::TEXT))
                     .child(label)
                     .on_click(cx.listener(move |shell, _, _, cx| {

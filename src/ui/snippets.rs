@@ -127,12 +127,12 @@ fn dots(id: &str) -> Stateful<Div> {
         .child(svg().path(icon("dots")).w(px(16.)).h(px(4.)).text_color(rgb(theme::TEXT)))
 }
 
-fn slider(id: &str) -> Stateful<Div> {
+fn slider(id: &str, right: gpui::Pixels) -> Stateful<Div> {
     div()
         .id(SharedString::from(id.to_owned()))
         .absolute()
         .top_0()
-        .right_0()
+        .right(right)
         .bottom_0()
         .w(px(WIDTH))
         .occlude()
@@ -518,7 +518,7 @@ impl Shell {
             }));
             self.remove_card(&[], &[id], close, cx)
         });
-        let slider = slider("snippet-editor").track_focus(&self.editor_focus).on_key_down(cx.listener(Self::on_snippet_key)).child(body);
+        let slider = slider("snippet-editor", self.editor_inset()).track_focus(&self.editor_focus).on_key_down(cx.listener(Self::on_snippet_key)).child(body);
         Some(match confirm {
             Some(confirm) => div().absolute().inset_0().child(slider).child(confirm).into_any_element(),
             None => slider.into_any_element(),
@@ -932,7 +932,7 @@ impl Shell {
             }));
             self.remove_card(&[id], &[], close, cx)
         });
-        let slider = slider("package-editor")
+        let slider = slider("package-editor", self.editor_inset())
             .track_focus(&self.editor_focus)
             .on_key_down(cx.listener(Self::on_package_key))
             .child(head)
@@ -1029,7 +1029,7 @@ impl Shell {
                     .occlude()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::dismiss_snippet_menu))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::dismiss_snippet_menu))
-                    .child(gpui::anchored().position(Point { x: left, y: top }).child(items)),
+                    .child(gpui::anchored().position(Point { x: left, y: top }).child(super::motion::popover(items, "snippet-menu-enter"))),
             )
             .into_any_element(),
         )
@@ -1168,7 +1168,7 @@ impl Shell {
             }))))
         });
         Some(
-            slider("shell-history")
+            slider("shell-history", self.editor_inset())
                 .track_focus(&self.editor_focus)
                 .on_key_down(cx.listener(Self::on_shell_history_key))
                 .child(head)

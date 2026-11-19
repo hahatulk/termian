@@ -238,7 +238,7 @@ impl Shell {
             .on_key_down(cx.listener(Self::on_group_editor_key))
             .absolute()
             .top_0()
-            .right_0()
+            .right(self.editor_inset())
             .bottom_0()
             .w(px(WIDTH))
             .occlude()
@@ -251,10 +251,7 @@ impl Shell {
             .child(header)
             .child(div().flex_1().p(px(15.)).flex().flex_col().gap(px(15.)).child(general))
             .children(menu);
-        Some(match confirm {
-            Some(confirm) => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).child(confirm).into_any_element(),
-            None => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).into_any_element(),
-        })
+        Some(div().absolute().inset_0().child(slider).children(confirm).into_any_element())
     }
 
     pub fn open_group_menu(&mut self, group: Option<GroupId>, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -309,7 +306,7 @@ impl Shell {
                     shell.group_menu = None;
                     cx.notify();
                 }))
-                .child(div().absolute().left(left).top(top).child(items))
+                .child(div().absolute().left(left).top(top).child(super::motion::popover(items, "group-menu-enter")))
                 .into_any_element(),
         )
     }

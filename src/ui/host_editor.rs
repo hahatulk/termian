@@ -629,7 +629,7 @@ impl Shell {
                 .on_key_down(cx.listener(Self::on_editor_key))
                 .absolute()
                 .top_0()
-                .right_0()
+                .right(self.editor_inset())
                 .bottom_0()
                 .w(px(WIDTH))
                 .occlude()
@@ -650,7 +650,7 @@ impl Shell {
         )
         // The confirmation covers the whole window, above the slider; one
         // wrapper either way so opening it does not replay the slide.
-        .map(|slider| div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).children(confirm).into_any_element())
+        .map(|slider| div().absolute().inset_0().child(slider).children(confirm).into_any_element())
     }
 
     pub fn open_host_menu(&mut self, host: HostId, event: &MouseDownEvent, cx: &mut Context<Self>) {
@@ -718,7 +718,7 @@ impl Shell {
                     shell.host_menu = None;
                     cx.notify();
                 }))
-                .child(div().absolute().left(left).top(top).child(items))
+                .child(div().absolute().left(left).top(top).child(super::motion::popover(items, "host-menu-enter")))
                 .into_any_element(),
         )
     }

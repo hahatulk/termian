@@ -7,7 +7,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use gpui::{div, prelude::*, px, rgb, rgba, svg, AnimationExt, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
+use gpui::{div, prelude::*, px, rgb, svg, AnimationExt, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::log_backup;
 use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Status};
 use termian_native::theme;
@@ -988,9 +988,9 @@ impl Shell {
                 .flex()
                 .items_center()
                 .justify_center()
-                .bg(rgba(0x0000008a))
+                .child(super::motion::scrim(0x0000008a))
                 .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx)))
-                .child(card),
+                .child(super::motion::modal(card)),
         )
     }
 }

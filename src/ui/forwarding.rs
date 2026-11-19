@@ -605,7 +605,7 @@ impl Shell {
             .on_key_down(cx.listener(Self::on_rule_key))
             .absolute()
             .top_0()
-            .right_0()
+            .right(self.editor_inset())
             .bottom_0()
             .w(px(WIDTH))
             .occlude()
@@ -622,10 +622,7 @@ impl Shell {
             }))
             .children(footer);
         let confirm = editor.confirm_remove.then(|| self.remove_rule_dialog(id, cx));
-        Some(match confirm {
-            Some(confirm) => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).child(confirm).into_any_element(),
-            None => div().absolute().inset_0().child(dialog::slide_in(slider, WIDTH)).into_any_element(),
-        })
+        Some(div().absolute().inset_0().child(slider).children(confirm).into_any_element())
     }
 
     /// "Remove Port Forwarding rule", as in the legacy confirmation.

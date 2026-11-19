@@ -11,7 +11,7 @@ use termian_native::vault::HostId;
 use termian_native::workspace_template::{self as templates, Target, TemplateTerminal, WorkspaceTemplate};
 
 use super::dialog::{self, Key, Kind};
-use super::hosts::host_tile;
+use super::hosts::os_tile_sized;
 use super::text_input::{self, Mode};
 use crate::Shell;
 
@@ -145,7 +145,7 @@ impl Shell {
                 .when(selected, |d| d.bg(rgb(0x41455c)))
                 .when(!selected && striped, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
                 .when(!selected, |d| d.hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE))))
-                .child(host_tile(host).size(px(20.)).rounded(px(5.)))
+                .child(os_tile_sized(host.os.as_deref(), 24., 14.).rounded(px(5.)))
                 .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(host.display_label().to_owned()))
                 .child(div().flex_none().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(self.vault.host_location(host)))
                 .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {

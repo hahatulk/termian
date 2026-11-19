@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, App, Context, Div, FontWeight, SharedString, Stateful};
+use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, App, Bounds, Context, Div, Element, ElementId, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, SharedString, Stateful, Window};
 use termian_native::terminal_settings::{self as ts, TerminalSettings, EMULATION_TYPES, FONT_FAMILIES, HIGHLIGHT_GROUPS, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use termian_native::theme;
 
@@ -85,17 +85,83 @@ fn label(text: &str) -> Div {
     div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(text.to_owned())
 }
 
-pub(super) fn toggle(on: bool) -> Div {
-    div()
-        .w(px(36.))
-        .h(px(20.))
-        .flex_none()
-        .p(px(2.))
-        .rounded_full()
-        .flex()
-        .when(on, |d| d.justify_end())
-        .bg(rgb(if on { theme::ACCENT } else { 0x4a4e66 }))
-        .child(div().size(px(16.)).rounded_full().bg(rgb(0xffffff)))
+pub(super) fn toggle(on: bool) -> impl IntoElement {
+    Switch(on)
+}
+
+struct Switch(bool);
+
+impl IntoElement for Switch {
+    type Element = Self;
+
+    fn into_element(self) -> Self {
+        self
+    }
+}
+
+impl Element for Switch {
+    type RequestLayoutState = AnyElement;
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<ElementId> {
+        Some("switch-motion".into())
+    }
+
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
+        None
+    }
+
+    fn request_layout(
+        &mut self,
+        id: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> (LayoutId, AnyElement) {
+        let target = if self.0 { 1. } else { 0. };
+        let t = window.with_element_state(id.expect("switch element id"), |state, window| {
+            let mut tween = state.unwrap_or_else(|| super::motion::Tween::at(target));
+            (tween.toward(target, 190, window), tween)
+        });
+        let mut accent = rgb(theme::ACCENT);
+        accent.a = t;
+        let mut element = div()
+            .w(px(36.))
+            .h(px(20.))
+            .flex_none()
+            .p(px(2.))
+            .rounded_full()
+            .flex()
+            .bg(rgb(0x4a4e66).blend(accent))
+            .child(div().size(px(16.)).ml(px(t * 16.)).rounded_full().bg(rgb(0xffffff)))
+            .into_any_element();
+        (element.request_layout(window, cx), element)
+    }
+
+    fn prepaint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        element: &mut AnyElement,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.prepaint(window, cx);
+    }
+
+    fn paint(
+        &mut self,
+        _: Option<&GlobalElementId>,
+        _: Option<&InspectorElementId>,
+        _: Bounds<Pixels>,
+        element: &mut AnyElement,
+        _: &mut (),
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        element.paint(window, cx);
+    }
 }
 
 /// `SettingsSwitch`: the label on the left, the switch on the right.

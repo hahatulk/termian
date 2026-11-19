@@ -68,6 +68,8 @@ pub struct Shell {
     root_focus: FocusHandle,
     editor_focus: FocusHandle,
     section: Section,
+    editor_motion: ui::motion::Tween,
+    editor_reveal: f32,
     group: Option<GroupId>,
     /// Each terminal tab's panes (one unless split).
     workspaces: HashMap<TabId, ui::workspace::Workspace>,
@@ -261,6 +263,8 @@ impl Shell {
         // Logs older than 60 days are deleted at start (FR-L5).
         session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
         Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error: None, section: Section::Hosts,
+            editor_motion: ui::motion::Tween::at(0.),
+            editor_reveal: 0.,
             host_editor: None,
             host_menu: None,
             key_editor: None,
@@ -367,6 +371,7 @@ impl Shell {
                 (_, true, None) => theme::SURFACE_ACTIVE,
                 (_, false, None) => theme::SURFACE,
             }))
+            .when(!active && !connecting, |d| d.hover(|s| s.bg(rgb(chrome.map_or(theme::SURFACE_ACTIVE, |c| c.tab_active)))))
             .on_click(cx.listener(move |shell, _, window, cx| {
                 shell.tabs.activate(id);
                 if let Some(view) = shell.focused_view(id) {
@@ -570,12 +575,15 @@ impl Render for Shell {
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, chrome, cx)).collect();
         let content = match self.tabs.active().kind {
             TabKind::Vaults => self.render_vaults(window, cx),
-            TabKind::Sftp => self.render_sftp(window, cx).into_any_element(),
+            TabKind::Sftp => ui::motion::page(self.render_sftp(window, cx), "sftp-enter"),
             TabKind::Session { .. } => {
                 let tab = self.tabs.active().id;
                 div().size_full().flex().child(div().flex_1().min_w_0().h_full().child(self.render_workspace(tab, window, cx))).children(self.render_side_panel(window, cx)).into_any_element()
             }
-            TabKind::Launcher => self.render_launcher(window, cx),
+            TabKind::Launcher => ui::motion::page(
+                div().size_full().child(self.render_launcher(window, cx)),
+                SharedString::from(format!("launcher-enter-{:?}", self.tabs.active().id)),
+            ),
         };
 
         div()

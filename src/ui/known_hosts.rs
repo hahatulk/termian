@@ -138,7 +138,7 @@ impl Shell {
                         shell.known_menu = None;
                         cx.notify();
                     }))
-                    .child(gpui::anchored().position(at).child(items)),
+                    .child(gpui::anchored().position(at).child(super::motion::popover(items, "known-menu-enter"))),
             )
             .into_any_element(),
         )

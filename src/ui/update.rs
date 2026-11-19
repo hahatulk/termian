@@ -107,7 +107,7 @@ impl Shell {
         }
     }
 
-    pub fn render_update_notice(&mut self, cx: &mut Context<Self>) -> Option<Div> {
+    pub fn render_update_notice(&mut self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let status = &self.update.status;
         if self.update.dismissed || status.state != State::Installed {
             return None;
@@ -118,7 +118,7 @@ impl Shell {
             .restart_error
             .clone()
             .unwrap_or_else(|| "Новая версия запустится после перезапуска. Открытые SSH-сессии при перезапуске закроются.".into());
-        Some(
+        Some(super::motion::toast(
             div()
                 .absolute()
                 .right(px(16.))
@@ -149,7 +149,7 @@ impl Shell {
                         })))
                         .child(notice_button("update-restart", "Перезапустить", true).on_click(cx.listener(|shell, _, _, cx| shell.restart_for_update(cx)))),
                 ),
-        )
+        ))
     }
 }
 
