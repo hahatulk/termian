@@ -684,16 +684,15 @@ impl Shell {
 
     pub fn render_port_forwarding(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         // A split button, as legacy: the arrow chooses Local, Remote or Dynamic.
-        let split = div()
-            .id("new-forwarding-split")
-            .flex()
-            .items_center()
-            .gap(px(1.))
-            .child(tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_rule(window, cx))))
-            .child(super::hosts::split_arrow("new-forwarding-menu").on_click(cx.listener(|shell, event: &gpui::ClickEvent, _, cx| {
-                shell.list.menu = Some((super::listing::MenuKind::NewForwarding, event.position()));
-                cx.notify();
-            })));
+        let main = tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING")
+            .rounded_r_none()
+            .on_click(cx.listener(|shell, _, window, cx| shell.new_rule(window, cx)));
+        let split = self.list_menu_button(
+            super::listing::MenuKind::NewForwarding,
+            Some(main),
+            super::hosts::split_arrow("new-forwarding-menu"),
+            cx,
+        ).id("new-forwarding-split");
         let toolbar = vec![split];
         let controls = self.listing_controls("portForwarding", true, false, window, cx);
         if self.vault.rules.is_empty() {

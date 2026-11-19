@@ -2,7 +2,9 @@
 //! sorting menus, and on Hosts the tag filter; plus the New Forwarding
 //! split-button menu.
 
-use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, KeyDownEvent, MouseButton, Point, Pixels, SharedString, Stateful, Window};
+use std::{cell::Cell, rc::Rc};
+
+use gpui::{anchored, div, prelude::*, px, rgb, svg, AnyElement, Context, Corner, Div, KeyDownEvent, MouseButton, Point, Pixels, SharedString, Stateful, Window};
 use termian_native::listing::{self, Listing, SortOrder, ViewMode};
 use termian_native::theme;
 use termian_native::vault::RuleKind;
@@ -105,10 +107,37 @@ impl Shell {
         cx.notify();
     }
 
+    pub(super) fn list_menu_button(
+        &self,
+        kind: MenuKind,
+        leading: Option<Stateful<Div>>,
+        button: Stateful<Div>,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let anchor = Rc::new(Cell::new(None));
+        let click_anchor = anchor.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(1.))
+            .children(leading)
+            .child(button.on_click(cx.listener(move |shell, _, _, cx| {
+                if let Some(at) = click_anchor.get() {
+                    shell.open_list_menu(kind, at, cx);
+                }
+            })))
+            .on_children_prepainted(move |bounds, _, _| {
+                if let (Some(first), Some(last)) = (bounds.first(), bounds.last()) {
+                    let x = if kind == MenuKind::NewForwarding { first.left() } else { last.right() };
+                    anchor.set(Some(Point { x, y: last.bottom() + px(4.) }));
+                }
+            })
+    }
+
     fn dropdown(&self, id: String, kind: MenuKind, leading: AnyElement, active: bool, cx: &mut Context<Self>) -> AnyElement {
         let open = self.list.menu.is_some_and(|(k, _)| k == kind);
         let color = if active { theme::ACCENT } else { theme::TEXT };
-        div()
+        let button = div()
             .id(SharedString::from(id))
             .h(px(28.))
             .px_1()
@@ -118,9 +147,8 @@ impl Shell {
             .rounded_md()
             .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
             .child(leading)
-            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(color)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))))
-            .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| shell.open_list_menu(kind, event.position(), cx)))
-            .into_any_element()
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(color)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::PI)))));
+        self.list_menu_button(kind, None, button, cx).into_any_element()
     }
 
     /// Search, view and sort controls; `tags` adds the Hosts tag filter and
@@ -331,15 +359,7 @@ impl Shell {
                 }
             }
         }
-        // Menus of the right-hand buttons open leftwards from under them.
-        let viewport = window.viewport_size();
-        let left = match kind {
-            MenuKind::NewForwarding => at.x - px(20.),
-            _ => at.x - px(width - 20.),
-        }
-        .max(px(8.))
-        .min(viewport.width - px(width + 8.));
-        let top = at.y + px(16.);
+        let corner = if kind == MenuKind::NewForwarding { Corner::TopLeft } else { Corner::TopRight };
         Some(
             div()
                 .id("list-menu-dismiss")
@@ -350,7 +370,7 @@ impl Shell {
                     shell.list.menu = None;
                     cx.notify();
                 }))
-                .child(div().absolute().left(left).top(top).child(panel))
+                .child(anchored().position(at).anchor(corner).snap_to_window().child(panel))
                 .into_any_element(),
         )
     }

@@ -36,7 +36,7 @@ Termian содержит нативный SSH/SFTP-клиент на Rust и GPU
 
 ### 4.2. Проброс портов и SFTP
 
-- **FR-P1.** Local, remote и dynamic (SOCKS) forwarding поверх SSH (`src/forwarding.rs`). Для Local и Dynamic по умолчанию используется `127.0.0.1`.
+- **FR-P1.** Local, remote и dynamic (SOCKS) forwarding поверх SSH (`src/forwarding.rs`). Для Local и Dynamic по умолчанию используется `127.0.0.1`. Меню выбора типа открывается под кнопкой `NEW FORWARDING`.
 - **FR-S1.** SFTP использует `russh-sftp` (`src/remote_fs.rs`).
 - **FR-S2.** Панель Local читает и изменяет файлы через `src/files.rs`.
 
