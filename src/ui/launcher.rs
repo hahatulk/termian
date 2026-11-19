@@ -11,8 +11,8 @@ use termian_native::vault::HostId;
 use termian_native::workspace_template::{self as templates, Target, TemplateTerminal, WorkspaceTemplate};
 
 use super::dialog::{self, Key, Kind};
-use super::host_editor::caret;
 use super::hosts::host_tile;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 /// State of the New Tab screen; one is shared by every New Tab.
@@ -89,9 +89,8 @@ impl Shell {
     }
 
     fn on_launcher_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         if let Some((_, text)) = self.launcher.renaming.as_mut() {
-            match dialog::edit(Some(text), &event.keystroke, paste) {
+            match text_input::edit("workspace-label", Some(text), &event.keystroke, Mode::Line, cx) {
                 Key::Enter => {
                     if !text.trim().is_empty() {
                         self.finish_rename(true);
@@ -105,7 +104,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        match dialog::edit(Some(&mut self.launcher.query), &event.keystroke, paste) {
+        match text_input::edit("launcher-search", Some(&mut self.launcher.query), &event.keystroke, Mode::Line, cx) {
             // Typing goes to the command palette, as the legacy field does.
             Key::Edited => {
                 let query = std::mem::take(&mut self.launcher.query);
@@ -188,15 +187,12 @@ impl Shell {
                 .hover(move |s| s.text_color(rgb(if danger { theme::ERROR } else { theme::ACCENT })))
         };
         let label = match &renaming {
-            Some(text) => div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .text_color(rgb(if text.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-                .when(text.is_empty(), |d| d.child(caret()).child("New Workspace"))
-                .when(!text.is_empty(), |d| d.child(text.clone()).child(caret())),
-            None => div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(template.label.clone()),
+            Some(text) => {
+                let field = div().id("workspace-label").flex_1().min_w_0()
+                    .child(text_input::text("workspace-label", text, "New Workspace", true, Mode::Line, cx));
+                text_input::field(field, "workspace-label", Mode::Line, |shell, window, _| window.focus(&shell.launcher_focus), cx).into_any_element()
+            }
+            None => div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(template.label.clone()).into_any_element(),
         };
         div()
             .id(SharedString::from(format!("template-{id}")))
@@ -282,16 +278,7 @@ impl Shell {
             .bg(rgb(theme::TITLE_BAR))
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::DIALOG_ROW }))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if query.is_empty() { theme::TEXT_MUTED } else { theme::ACCENT }))
-                    .when(focused && query.is_empty(), |d| d.child(caret()))
-                    .child(if query.is_empty() { "Search hosts or tabs".to_owned() } else { query.clone() })
-                    .when(focused && !query.is_empty(), |d| d.child(caret())),
-            )
+            .child(div().flex_1().child(text_input::text("launcher-search", query, "Search hosts or tabs", focused, Mode::Line, cx)))
             .child(div().mx(px(5.)).text_color(rgb(theme::TEXT_MUTED)).child(PALETTE_SHORTCUT))
             .on_click(cx.listener(|shell, _, window, cx| shell.open_palette(String::new(), window, cx)));
 

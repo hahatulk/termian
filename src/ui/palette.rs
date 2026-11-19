@@ -8,9 +8,9 @@ use termian_native::tabs::TabKind;
 use termian_native::theme;
 
 use super::assets::icon;
-use super::dialog::{self, Key};
-use super::host_editor::caret;
+use super::dialog::Key;
 use super::hosts::os_tile;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 gpui::actions!(termian, [OpenPalette]);
@@ -24,6 +24,7 @@ pub struct Palette {
 
 impl Shell {
     pub fn open_palette(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         self.palette = Some(Palette { query, selected: 0 });
         window.focus(&self.palette_focus);
         cx.notify();
@@ -76,13 +77,12 @@ impl Shell {
     }
 
     fn on_palette_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(palette) = &mut self.palette else { return };
         let count = flatten(&sections(&self.vault, self.tabs.all(), &palette.query)).len();
         match event.keystroke.key.as_str() {
             "down" => palette.selected = (palette.selected + 1).min(count.saturating_sub(1)),
             "up" => palette.selected = palette.selected.saturating_sub(1),
-            _ => match dialog::edit(Some(&mut palette.query), &event.keystroke, paste) {
+            _ => match text_input::edit("palette", Some(&mut palette.query), &event.keystroke, Mode::Line, cx) {
                 Key::Edited => palette.selected = 0,
                 Key::Enter => {
                     let found = sections(&self.vault, self.tabs.all(), &palette.query);
@@ -102,8 +102,7 @@ impl Shell {
         let palette = self.palette.as_ref()?;
         let focused = self.palette_focus.is_focused(window);
         let found = sections(&self.vault, self.tabs.all(), &palette.query);
-        let empty = palette.query.is_empty();
-        let field = div()
+        let field = div().id("palette-input")
             .h(px(36.))
             .px(px(10.))
             .flex()
@@ -112,17 +111,10 @@ impl Shell {
             .rounded(px(10.))
             .bg(rgb(theme::INPUT))
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT)))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .when(focused && empty, |d| d.child(caret()))
-                    .child(if empty { "Search hosts or tabs".to_owned() } else { palette.query.clone() })
-                    .when(focused && !empty, |d| d.child(caret())),
-            )
+            .child(div().flex_1().child(text_input::text("palette", &palette.query, "Search hosts or tabs", focused, Mode::Line, cx)))
             .child(div().text_color(rgb(theme::TEXT_MUTED)).child(super::launcher::PALETTE_SHORTCUT));
+
+        let field = text_input::field(field, "palette", Mode::Line, |shell, window, _| window.focus(&shell.palette_focus), cx);
 
         let mut index = 0;
         let mut list = div().id("palette-results").max_h(px(420.)).overflow_y_scroll().flex().flex_col();

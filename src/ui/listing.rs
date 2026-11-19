@@ -10,8 +10,9 @@ use termian_native::theme;
 use termian_native::vault::RuleKind;
 
 use super::assets::icon;
-use super::dialog::{self, Key};
-use super::host_editor::{caret, menu_panel};
+use super::dialog::Key;
+use super::host_editor::menu_panel;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -160,7 +161,7 @@ impl Shell {
             out.push(match self.list.query.as_ref().filter(|(k, _)| *k == key) {
                 Some((_, text)) => {
                     let focused = self.list_focus.is_focused(window);
-                    div()
+                    let input = div()
                         .id("section-search")
                         .track_focus(&self.list_focus)
                         .on_key_down(cx.listener(Self::on_list_search_key))
@@ -175,17 +176,8 @@ impl Shell {
                         .border_1()
                         .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
                         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .items_center()
-                                .text_sm()
-                                .text_color(rgb(if text.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-                                .when(focused && text.is_empty(), |d| d.child(caret()))
-                                .child(if text.is_empty() { "Search".to_owned() } else { text.clone() })
-                                .when(focused && !text.is_empty(), |d| d.child(caret())),
-                        )
+                        .child(text_input::text("listing-search", text, "Search", focused, Mode::Line, cx));
+                    text_input::field(input, "listing-search", Mode::Line, |shell, window, _| window.focus(&shell.list_focus), cx)
                         .into_any_element()
                 }
                 None => div()
@@ -224,9 +216,8 @@ impl Shell {
     }
 
     fn on_list_search_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some((_, text)) = self.list.query.as_mut() else { return };
-        match dialog::edit(Some(text), &event.keystroke, paste) {
+        match text_input::edit("listing-search", Some(text), &event.keystroke, Mode::Line, cx) {
             Key::Escape => self.list.query = None,
             Key::Ignored => return,
             _ => {}
@@ -236,8 +227,7 @@ impl Shell {
     }
 
     fn on_tag_search_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
-        match dialog::edit(Some(&mut self.list.tag_query), &event.keystroke, paste) {
+        match text_input::edit("tag-search", Some(&mut self.list.tag_query), &event.keystroke, Mode::Line, cx) {
             Key::Escape => self.list.menu = None,
             Key::Ignored => return,
             _ => {}
@@ -284,15 +274,10 @@ impl Shell {
             MenuKind::Tags => {
                 let focused = self.tag_focus.is_focused(window);
                 let query = self.list.tag_query.to_lowercase();
-                panel = panel.child(
-                    div()
+                let input = div()
                         .id("tag-search")
                         .track_focus(&self.tag_focus)
                         .on_key_down(cx.listener(Self::on_tag_search_key))
-                        .on_click(cx.listener(|shell, _, window, cx| {
-                            window.focus(&shell.tag_focus);
-                            cx.notify();
-                        }))
                         .h(px(36.))
                         .px_3()
                         .mb_1()
@@ -304,16 +289,8 @@ impl Shell {
                         .border_1()
                         .border_color(rgb(if focused { theme::ACCENT } else { theme::SURFACE_ACTIVE }))
                         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .text_color(rgb(if query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-                                .when(focused && query.is_empty(), |d| d.child(caret()))
-                                .child(if query.is_empty() { "Search tags".to_owned() } else { self.list.tag_query.clone() })
-                                .when(focused && !query.is_empty(), |d| d.child(caret())),
-                        ),
-                );
+                        .child(text_input::text("tag-search", &self.list.tag_query, "Search tags", focused, Mode::Line, cx));
+                panel = panel.child(text_input::field(input, "tag-search", Mode::Line, |shell, window, _| window.focus(&shell.tag_focus), cx));
                 for tag in listing::all_tags(&self.vault.hosts).into_iter().filter(|t| t.to_lowercase().contains(&query)) {
                     let chosen = self.list.tags.contains(&tag);
                     let circle = div()

@@ -13,6 +13,7 @@ use termian_native::theme;
 use super::assets::icon;
 use super::hosts::{os_tile, tile};
 use super::sections::{bare_page, empty_state};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const DATE: f32 = 140.;
@@ -80,7 +81,7 @@ impl Shell {
         let Some(editor) = self.logs_view.editor.as_mut() else { return };
         let key = &event.keystroke;
         if editor.marked.is_some() { return; }
-        let command = key.modifiers.platform || (cfg!(not(target_os = "macos")) && key.modifiers.control);
+        let command = text_input::command(key);
         match key.key.as_str() {
             "escape" => {
                 self.finish_log_comment(false, cx);
@@ -111,6 +112,7 @@ impl Shell {
                     editor.draft.replace(None, &text.replace("\r\n", "\n").replace('\r', "\n"));
                 }
             }
+            "z" | "y" if command => editor.draft.undo_redo(key.key == "z" && !key.modifiers.shift),
             "left" | "right" => editor.draft.move_horizontal(key.key == "right", key.modifiers.shift),
             "home" => editor.draft.move_to(0, key.modifiers.shift),
             "end" => editor.draft.move_to(editor.draft.text().len(), key.modifiers.shift),
@@ -155,7 +157,7 @@ impl Shell {
         let cell = div().id(SharedString::from(format!("log-comment-{id}")))
             .flex_1().min_w(px(140.)).px(px(15.)).py(px(10.)).flex().gap(px(8.)).rounded_md()
             .when(editing.is_some(), |d| d.on_mouse_down_out(cx.listener(move |shell, _, window, cx| {
-                if shell.logs_view.editor.as_ref().is_some_and(|e| e.draft.id == id) {
+                if !text_input::menu_open("log-comment", cx) && shell.logs_view.editor.as_ref().is_some_and(|e| e.draft.id == id) {
                     shell.finish_log_comment(true, cx);
                     window.focus(&shell.root_focus);
                 }
@@ -246,6 +248,7 @@ impl Shell {
             .child(div().id("log-comment-scroll").min_h(px(24.)).max_h(px(96.)).overflow_y_scroll().track_scroll(&editor.scroll)
                 .child(div().relative().text_size(px(14.)).line_height(px(24.)).text_color(rgb(theme::TEXT)).child(text).child(paint)))
             .when(editor.draft.text().is_empty(), |d| d.child(div().absolute().top_0().left_0().text_color(rgb(theme::TEXT_MUTED)).child("Add a comment")));
+        let input = text_input::field(input, "log-comment", Mode::Multiline, |shell, window, _| window.focus(&shell.editor_focus), cx);
         cell.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)).child(input)
     }
 
@@ -386,8 +389,9 @@ impl EntityInputHandler for Shell {
 
     fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.logs_view.editor else { return };
+        let remember = editor.marked.is_none();
         let range = range.map(|r| editor.draft.byte_range(r)).or(editor.marked.take());
-        editor.draft.replace(range, text);
+        editor.draft.replace_with_history(range, text, remember);
         editor.marked = None;
         editor.reveal_cursor = true;
         cx.notify();
@@ -395,9 +399,10 @@ impl EntityInputHandler for Shell {
 
     fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selection: Option<Range<usize>>, _: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.logs_view.editor else { return };
+        let remember = editor.marked.is_none();
         let range = range.map(|r| editor.draft.byte_range(r)).or(editor.marked.take()).unwrap_or_else(|| editor.draft.selection());
         let start = range.start;
-        editor.draft.replace(Some(range), text);
+        editor.draft.replace_with_history(Some(range), text, remember);
         let end = editor.draft.cursor();
         editor.marked = (start != end).then_some(start..end);
         if let Some(selection) = selection {

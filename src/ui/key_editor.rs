@@ -8,6 +8,7 @@ use termian_native::theme;
 use termian_native::vault::SshKey;
 
 use super::dialog::{self, Kind};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
@@ -80,7 +81,7 @@ fn unique_label(base: &str, existing: &[&str]) -> String {
     unreachable!()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Label,
     Passphrase,
@@ -97,12 +98,18 @@ pub struct KeyEditor {
     generation: Option<Keygen>,
 }
 
-fn caret() -> Div {
-    div().w(px(1.5)).h(px(14.)).bg(rgb(theme::TEXT))
+fn key_mode(field: Field) -> Mode {
+    match field {
+        Field::Label => Mode::Line,
+        Field::Passphrase => Mode::Secret,
+        Field::PrivateKey => Mode::PrivateKey,
+        Field::Certificate => Mode::Multiline,
+    }
 }
 
 impl Shell {
     pub fn new_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let key = SshKey { id: self.vault.next_id(), ..SshKey::default() };
         self.identity_editor = None;
         self.keychain_menu = None;
@@ -112,6 +119,7 @@ impl Shell {
     }
 
     pub fn new_generated_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         self.new_key(window, cx);
         if let Some(editor) = &mut self.key_editor {
             editor.generation = Some(Keygen::default());
@@ -159,6 +167,7 @@ impl Shell {
     }
 
     pub fn edit_key(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(key) = self.vault.key(id).cloned() else { return };
         self.identity_editor = None;
         self.key_editor = Some(KeyEditor { key, is_new: false, created_here: false, field: Field::Label, confirm_remove: false, generation: None });
@@ -206,7 +215,6 @@ impl Shell {
     }
 
     fn on_key_editor_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.key_editor else { return };
         let keystroke = &event.keystroke;
         if keystroke.key == "escape" {
@@ -247,23 +255,9 @@ impl Shell {
             Field::PrivateKey => editor.key.private_key.get_or_insert_with(String::new),
             Field::Certificate => editor.key.certificate.get_or_insert_with(String::new),
         };
-        let multiline = matches!(editor.field, Field::PrivateKey | Field::Certificate);
-        match keystroke.key.as_str() {
-            _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-                let text = paste.unwrap_or_default();
-                // The private key keeps its lines; other fields take the first one.
-                value.push_str(if multiline { &text } else { text.lines().next().unwrap_or("") });
-            }
-            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-            "backspace" => {
-                value.pop();
-            }
-            "enter" if multiline => value.push('\n'),
-            "enter" => {}
-            _ => match keystroke.key_char.as_deref() {
-                Some(text) if !text.chars().any(char::is_control) => value.push_str(text),
-                _ => return,
-            },
+        let mode = key_mode(editor.field);
+        if !matches!(text_input::edit(("key-editor", editor.field), Some(value), keystroke, mode, cx), super::dialog::Key::Edited) {
+            return;
         }
         if editor.key.passphrase.as_deref() == Some("") {
             editor.key.passphrase = None;
@@ -279,51 +273,24 @@ impl Shell {
     fn key_field(&self, field: Field, label: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let focused = self.key_editor.as_ref().is_some_and(|e| e.field == field) && self.editor_focus.is_focused(window);
         let multiline = matches!(field, Field::PrivateKey | Field::Certificate);
-        let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        // Base64 lines have no spaces to wrap at, so the key is cut into rows that fit.
-        let width = if multiline { 46 } else { usize::MAX };
-        let lines: Vec<String> = if shown.is_empty() {
-            vec![String::new()]
-        } else {
-            shown
-                .lines()
-                .flat_map(|line| {
-                    let chars: Vec<char> = line.chars().collect();
-                    if chars.is_empty() { vec![String::new()] } else { chars.chunks(width).map(|c| c.iter().collect()).collect() }
-                })
-                .collect()
-        };
-        let last = lines.len() - 1;
-        div()
-            .id(SharedString::from(format!("key-field-{label}")))
-            .flex()
-            .flex_col()
-            .gap_1()
+        let key = ("key-editor", field);
+        let mode = if masked { Mode::Secret } else { key_mode(field) };
+        let input = div().id(SharedString::from(format!("key-input-{label}")))
+            .min_h(px(40.))
+            .when(multiline, |d| d.min_h(px(120.)).max_h(px(260.)).overflow_y_scroll())
+            .px_3().py_2().rounded_md().bg(rgb(theme::INPUT)).border_1()
+            .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
+            .when(multiline, |d| d.font_family("Menlo").text_xs())
+            .child(text_input::text(key, value, "", focused, mode, cx));
+        let input = text_input::field(input, key, mode, move |shell, window, _| {
+            if let Some(editor) = &mut shell.key_editor {
+                editor.field = field;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx);
+        div().id(SharedString::from(format!("key-field-{label}"))).flex().flex_col().gap_1()
             .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(label.to_owned()))
-            .child(
-                div()
-                    .id(SharedString::from(format!("key-input-{label}")))
-                    .min_h(px(40.))
-                    .when(multiline, |d| d.min_h(px(120.)).max_h(px(260.)).overflow_y_scroll())
-                    .px_3()
-                    .py_2()
-                    .rounded_md()
-                    .bg(rgb(theme::INPUT))
-                    .border_1()
-                    .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-                    .text_color(rgb(theme::TEXT))
-                    .when(multiline, |d| d.font_family("Menlo").text_xs())
-                    .children(lines.into_iter().enumerate().map(move |(i, line)| {
-                        div().flex().items_center().min_h(px(16.)).child(line).when(focused && i == last, |d| d.child(caret()))
-                    }))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if let Some(editor) = &mut shell.key_editor {
-                            editor.field = field;
-                        }
-                        window.focus(&shell.editor_focus);
-                        cx.notify();
-                    })),
-            )
+            .child(input)
     }
 
     fn render_key_generation(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {

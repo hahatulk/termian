@@ -12,9 +12,10 @@ use termian_native::theme;
 use termian_native::vault::{Snippet, ShellCommand};
 
 use super::assets::icon;
-use super::dialog::{self, Key};
-use super::host_editor::{caret, menu_panel, menu_row};
+use super::dialog::Key;
+use super::host_editor::{menu_panel, menu_row};
 use super::hosts::Section;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 pub const WIDTH: f32 = 340.;
@@ -117,7 +118,6 @@ impl Shell {
     }
 
     fn on_side_panel_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(panel) = &mut self.side_panel else { return };
         // ↑/↓ step through the themes, as in the legacy list.
         if panel.tab == Tab::Theme {
@@ -134,11 +134,12 @@ impl Shell {
             cx.stop_propagation();
             return;
         }
+        let key = if panel.saving.is_some() { "panel-label" } else { "panel-search" };
         let target = match &mut panel.saving {
             Some((_, label)) => label,
             None => &mut panel.search,
         };
-        match dialog::edit(Some(target), &event.keystroke, paste) {
+        match text_input::edit(key, Some(target), &event.keystroke, Mode::Line, cx) {
             Key::Enter => {
                 if let Some((row, label)) = panel.saving.take() {
                     self.save_panel_history(row, label);
@@ -253,21 +254,8 @@ impl Shell {
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
             .child(svg().path(icon("search")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .when(focused && empty, |d| d.child(caret()))
-                    .child(div().truncate().child(if empty { "Search".to_owned() } else { panel.search.clone() }))
-                    .when(focused && !empty, |d| d.child(caret())),
-            )
-            .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.panel_focus);
-                cx.notify();
-            }));
+            .child(text_input::text("panel-search", &panel.search, "Search", focused, Mode::Line, cx));
+        let search = text_input::field(search, "panel-search", Mode::Line, |shell, window, _| window.focus(&shell.panel_focus), cx);
         let header = div().flex().gap_2().when(empty, |d| d.child(new)).child(search);
 
         let mut list = div().id("panel-snippets").flex_1().overflow_y_scroll().flex().flex_col().gap(px(4.));
@@ -491,8 +479,11 @@ impl Shell {
                     .into_any_element()
             };
             let title = match saving {
-                Some(label) => div().flex().items_center().text_color(rgb(if label.is_empty() { theme::TEXT_MUTED } else { theme::TEXT })).child(if label.is_empty() { "Set a label".to_owned() } else { label }).child(caret()),
-                None => div().truncate().font_family("Menlo").text_xs().text_color(rgb(theme::TEXT)).child(command.script.clone()),
+                Some(label) => {
+                    let input = div().id("panel-label").child(text_input::text("panel-label", &label, "Set a label", true, Mode::Line, cx));
+                    text_input::field(input, "panel-label", Mode::Line, |shell, window, _| window.focus(&shell.panel_focus), cx).into_any_element()
+                }
+                None => div().truncate().font_family("Menlo").text_xs().text_color(rgb(theme::TEXT)).child(command.script.clone()).into_any_element(),
             };
             div().id(hover.clone()).group(hover).px_2().py(px(8.)).flex().items_center().gap_2().rounded_md().hover(|s| s.bg(rgb(theme::SURFACE))).child(div().flex_1().min_w_0().child(title)).child(actions)
         });

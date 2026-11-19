@@ -8,6 +8,7 @@ use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Context, Div, FontWeight,
 use termian_native::shortcuts::{self, ShortcutSettings, ACTIONS};
 use termian_native::theme;
 
+use super::text_input::{self, Mode};
 use super::settings::{action_button, Field, Menu, SettingsWindow, MUTED};
 
 const TAB_MOD: &str = "mod";
@@ -181,21 +182,20 @@ impl SettingsWindow {
             .text_size(px(16.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(theme::TEXT))
-            .child(typing.clone().unwrap_or_else(|| name.clone()))
-            .when(typing.is_some(), |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(18.)).bg(rgb(theme::TEXT))))
-            .when(editable, |d| {
-                let name = name.clone();
-                d.cursor_text().on_click(cx.listener(move |settings, _, window, cx| {
-                    if settings.editing.as_ref().is_some_and(|(f, _)| *f == Field::SchemeName) {
-                        return;
-                    }
+            .child(text_input::text(("settings", Field::SchemeName), typing.as_deref().unwrap_or(&name), "", typing.is_some(), Mode::Line, cx));
+        let name_field = if editable {
+            let name = name.clone();
+            text_input::field(name_field.cursor_text(), ("settings", Field::SchemeName), Mode::Line, move |settings, window, cx| {
+                if settings.editing.as_ref().is_none_or(|(field, _)| *field != Field::SchemeName) {
                     settings.submit_recording(cx);
                     settings.commit_edit(cx);
                     settings.editing = Some((Field::SchemeName, name.clone()));
-                    window.focus(&settings.focus);
-                    cx.notify();
-                }))
-            });
+                }
+                window.focus(&settings.focus);
+            }, cx)
+        } else {
+            name_field
+        };
         let arrow = div()
             .id("shortcut-scheme-menu")
             .ml(px(10.))

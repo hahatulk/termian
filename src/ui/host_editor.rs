@@ -13,12 +13,13 @@ use termian_native::vault::{GroupId, Host, HostId};
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::hosts::host_tile;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
 const MENU_WIDTH: f32 = 220.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     Address,
     Label,
@@ -76,10 +77,6 @@ pub(super) fn field_box(focused: bool) -> Div {
         .bg(rgb(theme::INPUT))
         .border_1()
         .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-}
-
-pub(super) fn caret() -> Div {
-    div().w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))
 }
 
 pub(super) fn card(title: &str) -> Div {
@@ -171,6 +168,7 @@ impl Shell {
     }
 
     fn open_editor(&mut self, host: Host, is_new: bool, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let port = host.port.map(|p| p.to_string()).unwrap_or_default();
         self.host_menu = None;
         self.group_editor = None;
@@ -264,7 +262,6 @@ impl Shell {
     }
 
     fn on_editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.host_editor else { return };
         if editor.confirm_discard {
             if event.keystroke.key == "escape" {
@@ -305,7 +302,7 @@ impl Shell {
             }
         };
         let before = value.clone();
-        let key = dialog::edit(Some(value), &event.keystroke, paste);
+        let key = text_input::edit(("host", editor.field), Some(value), &event.keystroke, if editor.field == Field::Password { Mode::Secret } else { Mode::Line }, cx);
         if editor.field == Field::Port {
             editor.port.retain(|c| c.is_ascii_digit());
             editor.port.truncate(5);
@@ -359,28 +356,18 @@ impl Shell {
     pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(editor) = &self.host_editor else { return div().id("none") };
         let focused = editor.field == field && self.editor_focus.is_focused(window);
-        let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        let empty = shown.is_empty();
-        field_box(focused)
+        let mode = if masked { Mode::Secret } else { Mode::Line };
+        let key = ("host", field);
+        let input = field_box(focused)
             .id(SharedString::from(format!("editor-{placeholder}")))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .when(focused && empty, |d| d.child(caret()))
-                    .child(if empty { placeholder.to_owned() } else { shown })
-                    .when(focused && !empty, |d| d.child(caret())),
-            )
-            .on_click(cx.listener(move |shell, _, window, cx| {
-                if let Some(editor) = &mut shell.host_editor {
-                    editor.field = field;
-                    editor.groups_open = false;
-                }
-                window.focus(&shell.editor_focus);
-                cx.notify();
-            }))
+            .child(text_input::text(key, value, placeholder, focused, mode, cx));
+        text_input::field(input, key, mode, move |shell, window, _| {
+            if let Some(editor) = &mut shell.host_editor {
+                editor.field = field;
+                editor.groups_open = false;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx)
     }
 
     /// The slider over the right side of the Hosts screen.
@@ -497,21 +484,13 @@ impl Shell {
                         cx.notify();
                     }))
             }))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if editor.tag.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .child(if editor.tag.is_empty() && host.tags.is_empty() { "Tags".to_owned() } else { editor.tag.clone() })
-                    .when(tags_focused, |d| d.child(caret())),
-            )
-            .on_click(cx.listener(|shell, _, window, cx| {
-                if let Some(editor) = &mut shell.host_editor {
-                    editor.field = Field::Tags;
-                }
-                window.focus(&shell.editor_focus);
-                cx.notify();
-            }));
+            .child(text_input::text(("host", Field::Tags), &editor.tag, if host.tags.is_empty() { "Tags" } else { "" }, tags_focused, Mode::Line, cx));
+        let tags = text_input::field(tags, ("host", Field::Tags), Mode::Line, |shell, window, _| {
+            if let Some(editor) = &mut shell.host_editor {
+                editor.field = Field::Tags;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx);
         // Existing tags that match what is typed, as the legacy select suggests.
         let suggestions: Vec<String> = if tags_focused {
             let typed = editor.tag.to_lowercase();

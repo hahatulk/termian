@@ -27,13 +27,15 @@ pub struct Draft {
     text: String,
     anchor: usize,
     cursor: usize,
+    undo: Vec<(String, usize, usize)>,
+    redo: Vec<(String, usize, usize)>,
 }
 
 impl Draft {
     pub fn new(entry: &HistoryEntry, bookmark: bool) -> Self {
         let text = bounded_log_comment(&entry.comment).to_owned();
         let cursor = text.len();
-        Self { id: entry.id, log: entry.log.clone(), original: text.clone(), bookmark, text, anchor: cursor, cursor }
+        Self { id: entry.id, log: entry.log.clone(), original: text.clone(), bookmark, text, anchor: cursor, cursor, undo: Vec::new(), redo: Vec::new() }
     }
 
     pub fn text(&self) -> &str { &self.text }
@@ -84,9 +86,22 @@ impl Draft {
         byte(range.start)..byte(range.end)
     }
 
+    pub fn undo_redo(&mut self, undo: bool) {
+        let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        if let Some((text, anchor, cursor)) = from.pop() {
+            to.push((std::mem::replace(&mut self.text, text), self.anchor, self.cursor));
+            self.anchor = anchor;
+            self.cursor = cursor;
+        }
+    }
+
     /// Replaces a UTF-8 range (or the current selection) and leaves the cursor
     /// after the insertion. The suffix is preserved even at the length limit.
     pub fn replace(&mut self, range: Option<Range<usize>>, text: &str) {
+        self.replace_with_history(range, text, true);
+    }
+
+    pub fn replace_with_history(&mut self, range: Option<Range<usize>>, text: &str, remember: bool) {
         let range = range.unwrap_or_else(|| self.selection());
         let remaining = crate::vault::LOG_COMMENT_LIMIT.saturating_sub(self.text[..range.start].encode_utf16().count() + self.text[range.end..].encode_utf16().count());
         let mut units = 0;
@@ -94,6 +109,13 @@ impl Draft {
             units += ch.len_utf16();
             (units > remaining).then_some(i)
         }).unwrap_or(text.len());
+        if remember && self.text[range.clone()] != text[..end] {
+            if self.undo.len() == 24 {
+                self.undo.remove(0);
+            }
+            self.undo.push((self.text.clone(), self.anchor, self.cursor));
+            self.redo.clear();
+        }
         self.text.replace_range(range.clone(), &text[..end]);
         self.cursor = range.start + end;
         self.anchor = self.cursor;

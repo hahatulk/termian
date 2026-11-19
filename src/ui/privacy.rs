@@ -9,8 +9,9 @@ use zeroize::{Zeroize, Zeroizing};
 use super::{
     assets::icon,
     cloud::Tooltip,
-    dialog::{edit, Key},
+    dialog::Key,
 };
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const TRANSITION: Duration = Duration::from_millis(180);
@@ -87,10 +88,7 @@ impl Shell {
                     return;
                 }
                 let key = &event.keystroke;
-                let paste = (key.modifiers.platform && key.key == "v")
-                    .then(|| cx.read_from_clipboard().and_then(|clip| clip.text()))
-                    .flatten();
-                match edit(Some(&mut shell.privacy.input), key, paste) {
+                match text_input::edit("privacy-password", Some(&mut shell.privacy.input), key, Mode::Secret, cx) {
                     Key::Enter => shell.check_privacy_password(window, cx),
                     Key::Edited => cx.notify(),
                     _ => {}
@@ -273,11 +271,6 @@ impl Shell {
         let opening = self.privacy.opening;
         let busy = opening || self.privacy.auth_pending;
         let has_password = self.privacy_password().is_some();
-        let password = if self.privacy.input.is_empty() {
-            "Encryption password".into()
-        } else {
-            "•".repeat(self.privacy.input.chars().count())
-        };
         let tile = |id: &'static str, label: &'static str| {
             div()
                 .id(id)
@@ -324,22 +317,10 @@ impl Shell {
             .child(glyph)
             .child(div().text_xl().child("Termian is locked"))
             .when(has_password, |d| {
-                d.child(
-                    div()
-                        .id("privacy-password")
-                        .w(px(290.))
-                        .h(px(38.))
-                        .px_3()
-                        .flex()
-                        .items_center()
-                        .border_1()
-                        .rounded_md()
-                        .border_color(rgb(theme::ACCENT))
-                        .bg(rgb(theme::SURFACE_ACTIVE))
-                        .overflow_hidden()
-                        .child(password)
-                        .on_click(cx.listener(|shell, _, window, _| shell.privacy_focus(window))),
-                )
+                let field = div().id("privacy-password").w(px(290.)).h(px(38.)).px_3().flex().items_center()
+                    .border_1().rounded_md().border_color(rgb(theme::ACCENT)).bg(rgb(theme::SURFACE_ACTIVE)).overflow_hidden()
+                    .child(text_input::text("privacy-password", &self.privacy.input, "Encryption password", !busy, Mode::Secret, cx));
+                d.child(text_input::field(field, "privacy-password", Mode::Secret, |shell, window, _| shell.privacy_focus(window), cx))
                 .child(tile("privacy-unlock", "Unlock").on_click(cx.listener(
                     |shell, _, window, cx| {
                         shell.check_privacy_password(window, cx);

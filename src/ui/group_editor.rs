@@ -8,8 +8,9 @@ use termian_native::vault::{Group, GroupId};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_editor::{caret, card, field_box, menu_panel, menu_row};
+use super::host_editor::{card, field_box, menu_panel, menu_row};
 use super::hosts::{host_tile, tile};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
@@ -32,6 +33,7 @@ pub struct GroupMenu {
 
 impl Shell {
     pub fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let group = Group { id: self.vault.next_id(), label: String::new(), parent: self.group };
         self.group_menu = None;
         self.host_editor = None;
@@ -41,6 +43,7 @@ impl Shell {
     }
 
     pub fn edit_group(&mut self, id: GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(group) = self.vault.group(id).cloned() else { return };
         self.group_menu = None;
         self.host_editor = None;
@@ -72,7 +75,6 @@ impl Shell {
     }
 
     fn on_group_editor_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.group_editor else { return };
         if editor.confirm_remove {
             if event.keystroke.key == "escape" {
@@ -81,7 +83,7 @@ impl Shell {
             }
             return;
         }
-        match dialog::edit(Some(&mut editor.group.label), &event.keystroke, paste) {
+        match text_input::edit("group-label", Some(&mut editor.group.label), &event.keystroke, Mode::Line, cx) {
             Key::Edited => self.save_group_draft(),
             Key::Enter => {}
             Key::Escape => self.group_editor = None,
@@ -166,23 +168,9 @@ impl Shell {
                 cx.notify();
             })));
 
-        let empty = group.label.is_empty();
-        let label = field_box(focused)
-            .id("group-label")
-            .flex_1()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .when(focused && empty, |d| d.child(caret()))
-                    .child(if empty { "Label".to_owned() } else { group.label.clone() })
-                    .when(focused && !empty, |d| d.child(caret())),
-            )
-            .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.editor_focus);
-                cx.notify();
-            }));
+        let label = field_box(focused).id("group-label").flex_1()
+            .child(text_input::text("group-label", &group.label, "Label", focused, Mode::Line, cx));
+        let label = text_input::field(label, "group-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx);
 
         let parent = group.parent.map(|p| self.vault.group_path(p));
         let picker = div()

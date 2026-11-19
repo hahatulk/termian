@@ -16,13 +16,14 @@ use termian_native::vault::HostId;
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_editor::{caret, field_box, menu_row};
+use super::host_editor::{field_box, menu_row};
 use super::login_view::{self, LoginActions, LoginTarget};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Location,
     Filename,
@@ -47,6 +48,7 @@ pub struct ExportForm {
 impl Shell {
     /// "Export to host" in the key editor.
     pub fn export_key(&mut self, key: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         self.key_export = Some(ExportForm {
             key,
             host: None,
@@ -151,17 +153,15 @@ impl Shell {
     }
 
     fn on_export_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(form) = &mut self.key_export else { return };
         let text = match form.field {
             Field::Location => &mut form.location,
             Field::Filename => &mut form.filename,
             Field::Script => &mut form.script,
         };
-        match dialog::edit(Some(text), &event.keystroke, paste) {
+        match text_input::edit(("export", form.field), Some(text), &event.keystroke, if form.field == Field::Script { Mode::Multiline } else { Mode::Line }, cx) {
             Key::Edited => {}
             Key::Escape => self.key_export = None,
-            Key::Enter if form.field == Field::Script => text.push('\n'),
             Key::Enter => return self.start_key_export(window, cx),
             Key::Ignored => {
                 if event.keystroke.key != "tab" {
@@ -186,25 +186,19 @@ impl Shell {
             Field::Script => &form.script,
         };
         let focused = form.field == field && self.editor_focus.is_focused(window);
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(label.to_owned()))
-            .child(
-                field_box(focused)
-                    .id(SharedString::from(format!("export-{label}")))
-                    .when(field == Field::Script, |d| d.h_auto().min_h(px(110.)).py_2().items_start().font_family("Menlo").text_xs())
-                    .child(div().flex().flex_wrap().text_color(rgb(theme::TEXT)).child(value.clone()).when(focused, |d| d.child(caret())))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if let Some(form) = &mut shell.key_export {
-                            form.field = field;
-                            form.hosts_open = false;
-                        }
-                        window.focus(&shell.editor_focus);
-                        cx.notify();
-                    })),
-            )
+        let key = ("export", field);
+        let mode = if field == Field::Script { Mode::Multiline } else { Mode::Line };
+        let input = field_box(focused).id(SharedString::from(format!("export-{label}")))
+            .when(field == Field::Script, |d| d.h_auto().min_h(px(110.)).py_2().items_start().font_family("Menlo").text_xs())
+            .child(text_input::text(key, value, "", focused, mode, cx));
+        let input = text_input::field(input, key, mode, move |shell, window, _| {
+            if let Some(form) = &mut shell.key_export {
+                form.field = field;
+                form.hosts_open = false;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx);
+        div().flex().flex_col().gap_1().child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(label.to_owned())).child(input)
     }
 
     pub fn render_key_export(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -356,9 +350,8 @@ impl Shell {
                         cx.notify();
                     },
                     key: |shell: &mut Shell, event, _, cx| {
-                        let paste = cx.read_from_clipboard().and_then(|item| item.text());
                         let Some((_, login)) = shell.key_export.as_mut().and_then(|f| f.running.as_mut()) else { return };
-                        if let Some(answer) = login_view::edit(login, event, paste) {
+                        if let Some(answer) = login_view::edit(login, event, cx) {
                             if let Some(answer) = answer {
                                 shell.export_answer(answer);
                             }

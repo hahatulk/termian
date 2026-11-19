@@ -17,6 +17,7 @@ use super::assets::icon;
 use super::hosts::{host_tile, os_tile};
 use super::login_view::{self, LoginActions, LoginTarget};
 use super::sftp_actions::{Actions, DraggedRows, MenuKind};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 /// Folder blue from the legacy file icons.
@@ -457,23 +458,12 @@ impl Shell {
         if keystroke.key == "enter" {
             self.pick_query(side, window, cx);
         } else {
-            let paste = cx.read_from_clipboard().and_then(|item| item.text());
             if keystroke.key == "escape" {
                 self.cancel_pick(side);
             } else {
                 let RemoteState::Picking { query, .. } = &mut self.sftp.side_mut(side).state else { return };
-                match keystroke.key.as_str() {
-                    _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-                        query.push_str(paste.as_deref().and_then(|p| p.lines().next()).unwrap_or(""));
-                    }
-                    _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-                    "backspace" => {
-                        query.pop();
-                    }
-                    _ => match keystroke.key_char.as_deref() {
-                        Some(text) if !text.chars().any(char::is_control) => query.push_str(text),
-                        _ => return,
-                    },
+                if matches!(text_input::edit(("sftp-picker", side.key()), Some(query), keystroke, Mode::Line, cx), super::dialog::Key::Ignored) {
+                    return;
                 }
             }
         }
@@ -550,10 +540,6 @@ impl Shell {
             .id(SharedString::from(format!("pick-query-{key}")))
             .track_focus(&self.sftp_answer_focus)
             .on_key_down(cx.listener(move |shell, event: &KeyDownEvent, window, cx| shell.on_pick_key(side, event, window, cx)))
-            .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.sftp_answer_focus);
-                cx.notify();
-            }))
             .h(px(44.))
             .flex_none()
             .px_4()
@@ -564,15 +550,8 @@ impl Shell {
             .border_t_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if query.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .child(if query.is_empty() { "Search".to_owned() } else { query.to_owned() })
-                    .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT)))),
-            );
+            .child(text_input::text(("sftp-picker", key), query, "Search", focused, Mode::Line, cx));
+        let field = text_input::field(field, ("sftp-picker", key), Mode::Line, |shell, window, _| window.focus(&shell.sftp_answer_focus), cx);
         let row = |id: String, tile: Div, title: String, subtitle: String| {
             div()
                 .id(SharedString::from(id))
@@ -672,9 +651,8 @@ impl Shell {
                 },
                 key: |shell: &mut Shell, event, _, cx| {
                     let side = if LEFT { Side::Left } else { Side::Right };
-                    let paste = cx.read_from_clipboard().and_then(|item| item.text());
                     let RemoteState::Connecting(login) = &mut shell.sftp.side_mut(side).state else { return };
-                    if let Some(answer) = login_view::edit(login, event, paste) {
+                    if let Some(answer) = login_view::edit(login, event, cx) {
                         if let Some(answer) = answer {
                             shell.sftp_login_answer(side, answer);
                         }
@@ -775,6 +753,17 @@ impl Shell {
     fn render_panel(&self, side: Side, panel: &Panel, error: Option<&str>, window: &Window, cx: &mut Context<Self>) -> Div {
         let key = side.key();
         let filtering = self.sftp.filtering == Some(side) && self.sftp_filter_focus.is_focused(window);
+        let input = div().id(SharedString::from(format!("filter-{key}")))
+            .when(self.sftp.filtering == Some(side), |d| d.track_focus(&self.sftp_filter_focus))
+            .on_key_down(cx.listener(move |shell, event: &KeyDownEvent, _, cx| shell.on_filter_key(side, event, cx)))
+            .min_w(px(80.)).h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
+            .when(filtering, |d| d.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)))
+            .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT)))
+            .child(text_input::text(("sftp-filter", key), &panel.filter, if filtering { "" } else { "Filter" }, filtering, Mode::Line, cx));
+        let filter = text_input::field(input, ("sftp-filter", key), Mode::Line, move |shell, window, _| {
+            shell.sftp.filtering = Some(side);
+            window.focus(&shell.sftp_filter_focus);
+        }, cx);
         let header = div()
             .h(px(56.))
             .flex_none()
@@ -785,31 +774,7 @@ impl Shell {
             .bg(rgb(theme::SIDEBAR))
             .child(self.render_panel_title(side, cx))
             .child(div().flex_1())
-            .child(
-                div()
-                    .id(SharedString::from(format!("filter-{key}")))
-                    .when(self.sftp.filtering == Some(side), |d| d.track_focus(&self.sftp_filter_focus))
-                    .on_key_down(cx.listener(move |shell, event: &KeyDownEvent, _, cx| shell.on_filter_key(side, event, cx)))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        shell.sftp.filtering = Some(side);
-                        window.focus(&shell.sftp_filter_focus);
-                        cx.notify();
-                    }))
-                    .min_w(px(80.))
-                    .h(px(28.))
-                    .px_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .when(filtering, |d| d.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)))
-                    .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT)))
-                    .child(
-                        div()
-                            .text_color(rgb(if panel.filter.is_empty() { theme::TEXT } else { theme::ACCENT }))
-                            .child(if panel.filter.is_empty() && !filtering { "Filter".to_owned() } else { panel.filter.clone() }),
-                    ),
-            )
+            .child(filter)
             .child(self.render_actions_button(side, cx));
 
         let navigation = div()
@@ -1051,21 +1016,15 @@ impl Shell {
     fn on_filter_key(&mut self, side: Side, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let Some(panel) = self.sftp.panel_mut(side) else { return };
-        match keystroke.key.as_str() {
-            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return,
-            "backspace" => {
-                panel.filter.pop();
-            }
-            "escape" | "enter" => {
-                if keystroke.key == "escape" {
-                    panel.filter.clear();
-                }
+        use super::dialog::Key;
+        match text_input::edit(("sftp-filter", side.key()), Some(&mut panel.filter), keystroke, Mode::Line, cx) {
+            Key::Escape => {
+                panel.filter.clear();
                 self.sftp.filtering = None;
             }
-            _ => match keystroke.key_char.as_deref() {
-                Some(text) if !text.chars().any(char::is_control) => panel.filter.push_str(text),
-                _ => return,
-            },
+            Key::Enter => self.sftp.filtering = None,
+            Key::Edited => {}
+            Key::Ignored => return,
         }
         cx.stop_propagation();
         cx.notify();

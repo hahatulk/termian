@@ -11,13 +11,14 @@ use termian_native::session_log::SessionLog;
 use termian_native::theme;
 
 use super::{TerminalEvent, TerminalView};
+use super::text_input::{self, Mode};
 use crate::ui::assets::icon;
 use crate::ui::dialog::{self, Key, Kind};
-use crate::ui::host_editor::{caret, menu_row};
+use crate::ui::host_editor::menu_row;
 
 const WIDTH: f32 = 420.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Path,
     Baud,
@@ -114,14 +115,13 @@ impl TerminalView {
     }
 
     pub(super) fn on_serial_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(form) = self.serial_form.as_mut() else { return };
         let value = match form.field {
             Field::Path => &mut form.options.path,
             Field::Baud => &mut form.baud_text,
             Field::Charset => &mut form.charset_text,
         };
-        match dialog::edit(Some(value), &event.keystroke, paste) {
+        match text_input::edit(("serial", form.field), Some(value), &event.keystroke, Mode::Line, cx) {
             Key::Enter => self.serial_connect(window, cx),
             Key::Escape => cx.emit(TerminalEvent::Close),
             Key::Edited => {
@@ -142,35 +142,21 @@ impl TerminalView {
     fn serial_field(&self, field: Field, label: &str, value: &str, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let form = self.serial_form.as_ref().expect("form is shown");
         let focused = form.field == field && self.login_focus.is_focused(window);
-        div()
-            .id(SharedString::from(format!("serial-{label}")))
-            .w_full()
-            .flex()
-            .flex_col()
-            .gap_1()
+        let key = ("serial", field);
+        let input = div().id(SharedString::from(format!("serial-input-{label}")))
+            .w(px(WIDTH)).h(px(40.)).px_3().flex().items_center().rounded_md()
+            .bg(rgb(theme::INPUT)).border_1().border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
+            .child(div().flex_1().child(text_input::text(key, value, "", focused, Mode::Line, cx)))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)));
+        let input = text_input::field(input, key, Mode::Line, move |view, window, _| {
+            if let Some(form) = view.serial_form.as_mut() {
+                form.field = field;
+            }
+            window.focus(&view.login_focus);
+        }, cx);
+        div().id(SharedString::from(format!("serial-{label}"))).flex().flex_col().gap_1()
             .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(label.to_owned()))
-            .child(
-                div()
-                    .w(px(WIDTH))
-                    .h(px(40.))
-                    .px_3()
-                    .flex()
-                    .items_center()
-                    .rounded_md()
-                    .bg(rgb(theme::INPUT))
-                    .border_1()
-                    .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-                    .text_color(rgb(theme::TEXT))
-                    .child(div().flex_1().flex().items_center().child(value.to_owned()).when(focused, |d| d.child(caret())))
-                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
-            )
-            .on_click(cx.listener(move |view, _, window, cx| {
-                if let Some(form) = view.serial_form.as_mut() {
-                    form.field = field;
-                }
-                window.focus(&view.login_focus);
-                cx.notify();
-            }))
+            .child(input)
     }
 
     /// Suggestions under the focused field.

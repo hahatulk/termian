@@ -15,7 +15,8 @@ use termian_native::theme;
 use termian_native::vault::Vault;
 
 use super::assets::icon;
-use super::dialog::{edit, Key};
+use super::dialog::Key;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -309,6 +310,7 @@ fn muted(text: impl Into<SharedString>) -> Div {
 impl Shell {
     /// `None` opens the settings, as the legacy `open()` without an operation.
     pub fn open_cloud(&mut self, operation: Option<Operation>, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         if self.cloud.dialog.is_some() {
             return;
         }
@@ -647,9 +649,10 @@ impl Shell {
                     cx.notify();
                     return;
                 }
-                let paste = cx.read_from_clipboard().and_then(|c| c.text());
-                let value = form.field.and_then(|f| form.value(f));
-                match edit(value, keystroke, paste) {
+                let field = form.field;
+                let mode = if matches!(field, Some(Field::Token | Field::Passphrase | Field::BasicPassword)) { Mode::Secret } else { Mode::Line };
+                let value = field.and_then(|f| form.value(f));
+                match text_input::edit(("cloud", field), value, keystroke, mode, cx) {
                     Key::Enter => self.save_cloud_config(window, cx),
                     Key::Edited => cx.notify(),
                     _ => {}
@@ -730,41 +733,27 @@ impl Shell {
     fn cloud_input(&self, field: Field, label: &str, value: &str, secret: bool, placeholder: &str, hint: Option<&str>, enabled: bool, cx: &mut Context<Self>) -> Div {
         let Some(CloudDialog { body: Body::Config(form), busy, .. }) = &self.cloud.dialog else { return div() };
         let focused = form.field == Some(field) && enabled && !busy;
-        let shown = if secret { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(7.))
-            .text_xs()
-            .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(theme::TEXT))
-            .child(label.to_owned())
-            .child(
-                div()
-                    .id(SharedString::from(format!("cloud-field-{field:?}")))
-                    .h(px(36.))
-                    .px(px(11.))
-                    .flex()
-                    .items_center()
-                    .rounded(px(6.))
-                    .border_1()
-                    .border_color(rgb(if focused { theme::ACCENT } else { BORDER }))
-                    .bg(rgb(theme::SURFACE_ACTIVE))
-                    .text_size(px(13.))
-                    .font_weight(FontWeight::NORMAL)
-                    .when(!enabled || *busy, |d| d.opacity(0.5))
-                    .when(shown.is_empty() && !placeholder.is_empty(), |d| d.child(div().text_color(rgb(theme::TEXT_MUTED)).child(placeholder.to_owned())))
-                    .when(!shown.is_empty(), |d| d.child(div().truncate().child(shown)))
-                    .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))))
-                    .when(enabled, |d| {
-                        d.on_click(cx.listener(move |shell, _, _, cx| {
-                            if let Some(CloudDialog { body: Body::Config(form), .. }) = &mut shell.cloud.dialog {
-                                form.field = Some(field);
-                            }
-                            cx.notify();
-                        }))
-                    }),
-            )
+        let key = ("cloud", Some(field));
+        let mode = if secret { Mode::Secret } else { Mode::Line };
+        let input = div()
+            .id(SharedString::from(format!("cloud-field-{field:?}")))
+            .h(px(36.)).px(px(11.)).flex().items_center().rounded(px(6.)).border_1()
+            .border_color(rgb(if focused { theme::ACCENT } else { BORDER }))
+            .bg(rgb(theme::SURFACE_ACTIVE)).text_size(px(13.)).font_weight(FontWeight::NORMAL)
+            .when(!enabled || *busy, |d| d.opacity(0.5))
+            .child(text_input::text(key, value, placeholder, focused, mode, cx));
+        let input = if enabled && !busy {
+            text_input::field(input, key, mode, move |shell, window, _| {
+                if let Some(CloudDialog { body: Body::Config(form), .. }) = &mut shell.cloud.dialog {
+                    form.field = Some(field);
+                }
+                window.focus(&shell.cloud_focus);
+            }, cx)
+        } else {
+            input
+        };
+        div().flex().flex_col().gap(px(7.)).text_xs().font_weight(FontWeight::MEDIUM)
+            .text_color(rgb(theme::TEXT)).child(label.to_owned()).child(input)
             .children(hint.map(|hint| div().text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(rgb(theme::TEXT_MUTED)).child(hint.to_owned())))
     }
 

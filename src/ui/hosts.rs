@@ -8,6 +8,7 @@ use termian_native::theme;
 use termian_native::vault::{Group, GroupId, Host};
 
 use super::assets::icon;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -88,10 +89,6 @@ pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String)
                     d.child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).truncate().child(subtitle))
                 }),
         )
-}
-
-fn caret() -> Div {
-    div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))
 }
 
 pub(super) fn section_title(title: &str) -> Div {
@@ -211,25 +208,11 @@ impl Shell {
     /// Typing in the search field. Enter opens the first match, or connects
     /// to the typed `user@host` when nothing matches; Escape clears.
     fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let keystroke = &event.keystroke;
-        if keystroke.modifiers.platform || keystroke.modifiers.control {
-            if keystroke.modifiers.platform && keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.query.push_str(text.lines().next().unwrap_or(""));
-                }
-            }
-        } else {
-            match keystroke.key.as_str() {
-                "backspace" => {
-                    self.query.pop();
-                }
-                "escape" => self.query.clear(),
-                "enter" => self.connect_query(window, cx),
-                _ => match keystroke.key_char.as_deref() {
-                    Some(text) if !text.chars().any(char::is_control) => self.query.push_str(text),
-                    _ => return,
-                },
-            }
+        match text_input::edit("hosts-search", Some(&mut self.query), &event.keystroke, Mode::Line, cx) {
+            super::dialog::Key::Escape => self.query.clear(),
+            super::dialog::Key::Enter => self.connect_query(window, cx),
+            super::dialog::Key::Edited => {}
+            super::dialog::Key::Ignored => return,
         }
         cx.stop_propagation();
         cx.notify();
@@ -251,19 +234,10 @@ impl Shell {
 
     fn render_hosts(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let focused = self.search_focus.is_focused(window);
-        let (text, color) = if self.query.is_empty() {
-            ("Find a host or ssh user@hostname...".to_owned(), theme::TEXT_MUTED)
-        } else {
-            (self.query.clone(), theme::TEXT)
-        };
         let search = div()
             .id("search")
             .track_focus(&self.search_focus)
             .on_key_down(cx.listener(Self::on_search_key))
-            .on_click(cx.listener(|shell, _, window, cx| {
-                window.focus(&shell.search_focus);
-                cx.notify();
-            }))
             .m_2()
             .h(px(36.))
             .px_3()
@@ -273,16 +247,7 @@ impl Shell {
             .bg(rgb(theme::INPUT))
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(color))
-                    .when(focused && self.query.is_empty(), |d| d.child(caret()))
-                    .child(text)
-                    .when(focused && !self.query.is_empty(), |d| d.child(caret())),
-            )
+            .child(div().flex_1().child(text_input::text("hosts-search", &self.query, "Find a host or ssh user@hostname...", focused, Mode::Line, cx)))
             .child(
                 div()
                     .id("connect")
@@ -295,6 +260,8 @@ impl Shell {
                     .child("CONNECT")
                     .on_click(cx.listener(|shell, _, window, cx| shell.connect_query(window, cx))),
             );
+
+        let search = text_input::field(search, "hosts-search", Mode::Line, |shell, window, _| window.focus(&shell.search_focus), cx);
 
         let toolbar = div()
             .px_3()

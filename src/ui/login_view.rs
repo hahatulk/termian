@@ -13,6 +13,7 @@ use gpui::{
 use termian_native::login::{Answer, HostKeyDecision, IdentityChoice, LoginState, LoginUi, Question, Stage};
 use termian_native::theme;
 
+use super::text_input::{self, Mode};
 use super::assets::icon;
 use super::hosts::os_tile;
 
@@ -106,54 +107,32 @@ fn log_line(line: &str) -> Div {
 }
 
 /// Text field for passwords and other typed answers.
-pub fn input_field(id: &str, shown: String, focused: bool, focus: &FocusHandle) -> Stateful<Div> {
-    div()
-        .id(SharedString::from(id.to_owned()))
-        .track_focus(focus)
-        .w_full()
-        .h(px(40.))
-        .px_3()
-        .flex()
-        .items_center()
-        .rounded_md()
-        .bg(rgb(theme::INPUT))
-        .border_1()
+fn input_field(id: &str, focus: &FocusHandle, focused: bool) -> Stateful<Div> {
+    div().id(SharedString::from(id.to_owned())).track_focus(focus).w_full().h(px(40.)).px_3()
+        .flex().items_center().rounded_md().bg(rgb(theme::INPUT)).border_1()
         .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-        .text_color(rgb(theme::TEXT))
-        .child(shown)
-        .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))))
 }
 
-/// Applies a key press to the typed answer; returns an answer to send on Enter/Escape.
-pub fn edit(state: &mut LoginState, event: &KeyDownEvent, paste: Option<String>) -> Option<Option<Answer>> {
-    let keystroke = &event.keystroke;
-    if !matches!(state.question, Some(Question::Text { .. })) {
-        return None;
-    }
+pub fn edit<V: 'static>(state: &mut LoginState, event: &KeyDownEvent, cx: &mut Context<V>) -> Option<Option<Answer>> {
+    use super::dialog::Key;
+    let Some(Question::Text { echo, .. }) = state.question.as_ref() else { return None };
     if state.searching_identities {
-        match keystroke.key.as_str() {
-            _ if keystroke.modifiers.platform || keystroke.modifiers.control => return None,
-            "backspace" => {
-                state.identity_query.pop();
+        return match text_input::edit("login-identities", Some(&mut state.identity_query), &event.keystroke, Mode::Line, cx) {
+            Key::Enter | Key::Escape => {
+                state.searching_identities = false;
+                Some(None)
             }
-            "escape" | "enter" => state.searching_identities = false,
-            _ => state.identity_query.push_str(keystroke.key_char.as_deref().filter(|t| !t.chars().any(char::is_control))?),
-        }
-        return Some(None);
+            Key::Edited => Some(None),
+            Key::Ignored => None,
+        };
     }
-    match keystroke.key.as_str() {
-        _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-            state.input.push_str(paste?.lines().next().unwrap_or(""));
-        }
-        _ if keystroke.modifiers.platform || keystroke.modifiers.control => return None,
-        "backspace" => {
-            state.input.pop();
-        }
-        "enter" => return Some(state.submit_text()),
-        "escape" => return Some(state.answer(Answer::Text(None))),
-        _ => state.input.push_str(keystroke.key_char.as_deref().filter(|t| !t.chars().any(char::is_control))?),
+    let mode = if *echo { Mode::Line } else { Mode::Secret };
+    match text_input::edit("login-input", Some(&mut state.input), &event.keystroke, mode, cx) {
+        Key::Enter => Some(state.submit_text()),
+        Key::Escape => Some(state.answer(Answer::Text(None))),
+        Key::Edited => Some(None),
+        Key::Ignored => None,
     }
-    Some(None)
 }
 
 /// The progress bar. Past the connect stage a point (the fingerprint while
@@ -359,17 +338,14 @@ pub fn render<V: 'static>(
             Some(Question::Text { .. }) if state.asks_username() && actions.ui.is_some() => {
                 body = body.child(username_question(state, &target, focus, window, actions, cx));
             }
-            Some(Question::Text { prompt, .. }) => {
+            Some(Question::Text { prompt, echo }) => {
                 let focused = focus.is_focused(window);
-                let field = input_field("login-input", state.shown_input(), focused, focus)
-                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| key(view, event, window, cx)))
-                    .on_click({
-                        let focus = focus.clone();
-                        cx.listener(move |_, _, window, cx| {
-                            window.focus(&focus);
-                            cx.notify();
-                        })
-                    });
+                let mode = if *echo { Mode::Line } else { Mode::Secret };
+                let field = input_field("login-input", focus, focused)
+                    .child(text_input::text("login-input", &state.input, "", focused, mode, cx))
+                    .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| key(view, event, window, cx)));
+                let handle = focus.clone();
+                let field = text_input::field(field, "login-input", mode, move |_, window, _| window.focus(&handle), cx);
                 body = body.child(title(prompt)).child(field).child(
                     div()
                         .flex()
@@ -421,19 +397,11 @@ fn username_question<V: 'static>(
     let ui = actions.ui.expect("username question needs the ui action");
     let focused = focus.is_focused(window);
     let typing = focused && !state.searching_identities;
-    let caret = || div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT));
 
     let field = div()
         .id("login-username")
         .track_focus(focus)
         .on_key_down(cx.listener(move |view, event: &KeyDownEvent, window, cx| key(view, event, window, cx)))
-        .on_click({
-            let focus = focus.clone();
-            cx.listener(move |view, _, window, cx| {
-                ui(view, LoginUi::TypeUsername, cx);
-                window.focus(&focus);
-            })
-        })
         .relative()
         .w_full()
         .h(px(40.))
@@ -455,31 +423,28 @@ fn username_question<V: 'static>(
                 .text_color(rgb(if typing { theme::ACCENT } else { theme::TEXT_MUTED }))
                 .child("Username"),
         )
-        .child(state.input.clone())
-        .when(typing, |d| d.child(caret()));
+        .child(text_input::text("login-input", &state.input, "", typing, Mode::Line, cx));
+    let handle = focus.clone();
+    let field = text_input::field(field, "login-input", Mode::Line, move |view, window, cx| {
+        ui(view, LoginUi::TypeUsername, cx);
+        window.focus(&handle);
+    }, cx);
 
     let searching = focused && state.searching_identities;
     let search = div()
         .id("login-identity-search")
-        .on_click({
-            let focus = focus.clone();
-            cx.listener(move |view, _, window, cx| {
-                ui(view, LoginUi::SearchIdentities, cx);
-                window.focus(&focus);
-            })
-        })
         .h(px(32.))
         .flex()
         .items_center()
         .gap_2()
         .text_sm()
         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-        .child(if state.identity_query.is_empty() && !searching {
-            div().text_color(rgb(theme::TEXT_MUTED)).child("Search identities")
-        } else {
-            div().text_color(rgb(theme::TEXT)).child(state.identity_query.clone())
-        })
-        .when(searching, |d| d.child(caret()));
+        .child(text_input::text("login-identities", &state.identity_query, "Search identities", searching, Mode::Line, cx));
+    let handle = focus.clone();
+    let search = text_input::field(search, "login-identities", Mode::Line, move |view, window, cx| {
+        ui(view, LoginUi::SearchIdentities, cx);
+        window.focus(&handle);
+    }, cx);
 
     let cards = target.identities.iter().enumerate().filter(|(_, choice)| choice.matches(&state.identity_query)).map(|(index, choice)| {
         let picked = choice.answer.clone();

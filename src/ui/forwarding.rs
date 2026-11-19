@@ -16,15 +16,16 @@ use termian_native::vault::{ForwardingRule, RuleKind};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_editor::{caret, card, field_box, menu_panel, menu_row};
+use super::host_editor::{card, field_box, menu_panel, menu_row};
 use super::hosts::{card as entity_card, tile, tool_button};
 use super::login_view::{self, LoginActions, LoginTarget};
 use super::sections::{empty_state, page};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Label,
     Port,
@@ -72,6 +73,7 @@ fn kind_name(kind: RuleKind) -> &'static str {
 impl Shell {
     /// The NEW FORWARDING button: a Local rule in the wizard, as in legacy.
     pub fn new_rule(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         self.new_rule_of(RuleKind::Local, window, cx);
         if let Some(editor) = &mut self.rules.editor {
             editor.wizard = Some(Step::Kind);
@@ -80,6 +82,7 @@ impl Shell {
 
     /// The New Forwarding menu: a rule of the chosen kind.
     pub fn new_rule_of(&mut self, kind: RuleKind, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let rule = ForwardingRule::new(self.vault.next_id(), kind);
         self.rules.editor = Some(RuleEditor { rule, created_here: true, field: Field::Label, hosts_open: false, confirm_remove: false, wizard: None });
         window.focus(&self.editor_focus);
@@ -87,6 +90,7 @@ impl Shell {
     }
 
     fn edit_rule(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(rule) = self.vault.rule(id).cloned() else { return };
         self.rules.menu = None;
         self.rules.editor = Some(RuleEditor { rule, created_here: false, field: Field::Label, hosts_open: false, confirm_remove: false, wizard: None });
@@ -253,7 +257,6 @@ impl Shell {
     }
 
     fn on_rule_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.rules.editor else { return };
         if editor.confirm_remove {
             if event.keystroke.key == "escape" {
@@ -270,7 +273,7 @@ impl Shell {
             Field::Port => (port_text(editor.rule.port), true),
             Field::DestinationPort => (port_text(editor.rule.destination_port), true),
         };
-        match dialog::edit(Some(&mut text), &event.keystroke, paste) {
+        match text_input::edit(("rule", editor.field), Some(&mut text), &event.keystroke, Mode::Line, cx) {
             Key::Edited => {
                 if numeric {
                     text.retain(|c| c.is_ascii_digit());
@@ -310,24 +313,20 @@ impl Shell {
 
     fn rule_input(&self, field: Field, label: &str, value: String, window: &Window, cx: &mut Context<Self>) -> Div {
         let focused = self.rules.editor.as_ref().is_some_and(|e| e.field == field) && self.editor_focus.is_focused(window);
-        div()
-            .flex()
-            .flex_col()
-            .gap_1()
+        let key = ("rule", field);
+        let input = field_box(focused)
+            .id(SharedString::from(format!("rule-{label}")))
+            .child(text_input::text(key, &value, "", focused, Mode::Line, cx));
+        let input = text_input::field(input, key, Mode::Line, move |shell, window, _| {
+            if let Some(editor) = &mut shell.rules.editor {
+                editor.field = field;
+                editor.hosts_open = false;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx);
+        div().flex().flex_col().gap_1()
             .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(label.to_owned()))
-            .child(
-                field_box(focused)
-                    .id(SharedString::from(format!("rule-{label}")))
-                    .child(div().flex().items_center().text_color(rgb(theme::TEXT)).child(value).when(focused, |d| d.child(caret())))
-                    .on_click(cx.listener(move |shell, _, window, cx| {
-                        if let Some(editor) = &mut shell.rules.editor {
-                            editor.field = field;
-                            editor.hosts_open = false;
-                        }
-                        window.focus(&shell.editor_focus);
-                        cx.notify();
-                    })),
-            )
+            .child(input)
     }
 
     fn host_field(&self, label: &str, cx: &mut Context<Self>) -> Div {
@@ -744,10 +743,9 @@ impl Shell {
                         cx.notify();
                     },
                     key: |shell: &mut Shell, event, _, cx| {
-                        let paste = cx.read_from_clipboard().and_then(|item| item.text());
                         let Some(id) = shell.rules.login else { return };
                         let Some(RuleStatus::Connecting(login)) = shell.rules.status.get_mut(&id) else { return };
-                        if let Some(answer) = login_view::edit(login, event, paste) {
+                        if let Some(answer) = login_view::edit(login, event, cx) {
                             if let Some(answer) = answer {
                                 shell.forward_answer(answer);
                             }

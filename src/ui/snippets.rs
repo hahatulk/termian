@@ -11,14 +11,15 @@ use termian_native::vault::{GroupId, HostId, Snippet, SnippetPackage};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_editor::{caret, field_box, menu_panel, menu_row};
+use super::host_editor::{field_box, menu_panel, menu_row};
 use super::hosts::{card, host_tile, section_title, tile, tool_button};
 use super::sections::{empty_state, page};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Label,
     Package,
@@ -141,21 +142,6 @@ fn slider(id: &str) -> Stateful<Div> {
         .border_l_1()
         .border_color(rgb(theme::TITLE_BAR))
         .shadow_lg()
-}
-
-/// Text with a caret at the end, or the placeholder when empty.
-fn input_text(value: &str, placeholder: &str, focused: bool) -> Div {
-    let empty = value.is_empty();
-    div()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .overflow_hidden()
-        .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-        .when(focused && empty, |d| d.child(caret()))
-        .child(div().truncate().child(if empty { placeholder.to_owned() } else { value.to_owned() }))
-        .when(focused && !empty, |d| d.child(caret()))
 }
 
 fn checkbox(state: Coverage) -> Div {
@@ -359,6 +345,7 @@ impl Shell {
     // ── Snippet slider ──────────────────────────────────────────────────
 
     pub fn new_snippet(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let snippet = Snippet { id: self.vault.next_id(), package: self.snippet_package, ..Snippet::default() };
         self.package_editor = None;
         self.snippet_menu = None;
@@ -369,6 +356,7 @@ impl Shell {
     }
 
     pub fn edit_snippet(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(snippet) = self.vault.snippet(id).cloned() else { return };
         self.package_editor = None;
         self.snippet_menu = None;
@@ -415,7 +403,6 @@ impl Shell {
 
     fn on_snippet_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.snippet_editor else { return };
         if editor.confirm_remove {
             if keystroke.key == "escape" {
@@ -460,33 +447,8 @@ impl Shell {
             Field::Script => &mut editor.snippet.script,
             Field::Search => &mut editor.search,
         };
-        let edited = if field == Field::Script {
-            // The script keeps its lines; Enter starts a new one.
-            match keystroke.key.as_str() {
-                _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-                    value.push_str(&paste.unwrap_or_default());
-                    true
-                }
-                _ if keystroke.modifiers.platform || keystroke.modifiers.control => false,
-                "backspace" => {
-                    value.pop();
-                    true
-                }
-                "enter" => {
-                    value.push('\n');
-                    true
-                }
-                _ => match keystroke.key_char.as_deref() {
-                    Some(text) if !text.chars().any(char::is_control) => {
-                        value.push_str(text);
-                        true
-                    }
-                    _ => false,
-                },
-            }
-        } else {
-            matches!(dialog::edit(Some(value), keystroke, paste), Key::Edited)
-        };
+        let mode = if field == Field::Script { Mode::Multiline } else { Mode::Line };
+        let edited = matches!(text_input::edit(("snippet", field), Some(value), keystroke, mode, cx), Key::Edited);
         if !edited {
             return;
         }
@@ -584,8 +546,8 @@ impl Shell {
         let label = field_box(on(Field::Label))
             .id("snippet-label")
             .flex_1()
-            .child(input_text(&snippet.label, "Action description", on(Field::Label)))
-            .on_click(cx.listener(|shell, _, window, cx| shell.focus_snippet_field(Field::Label, window, cx)));
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Label), &snippet.label, "Action description", on(Field::Label), Mode::Line, cx)));
+        let label = text_input::field(label, ("snippet", Field::Label), Mode::Line, |shell, window, cx| shell.focus_snippet_field(Field::Label, window, cx), cx);
 
         // Package: a typed name filters the list or creates a package.
         let chosen = editor.new_package.clone().or_else(|| snippet.package.and_then(|p| self.vault.package(p)).map(|p| p.label.clone()));
@@ -593,7 +555,7 @@ impl Shell {
         let package = field_box(on(Field::Package))
             .id("snippet-package")
             .child(svg().path(icon("snippets_package")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(input_text(&package_text, if chosen.is_some() && on(Field::Package) { chosen.as_deref().unwrap_or_default() } else { "Add a Package" }, on(Field::Package)))
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Package), &package_text, if chosen.is_some() && on(Field::Package) { chosen.as_deref().unwrap_or_default() } else { "Add a Package" }, on(Field::Package), Mode::Line, cx)))
             .when(chosen.is_some(), |d| {
                 d.child(
                     div()
@@ -608,8 +570,8 @@ impl Shell {
                             cx.notify();
                         })),
                 )
-            })
-            .on_click(cx.listener(|shell, _, window, cx| shell.focus_snippet_field(Field::Package, window, cx)));
+            });
+        let package = text_input::field(package, ("snippet", Field::Package), Mode::Line, |shell, window, cx| shell.focus_snippet_field(Field::Package, window, cx), cx);
         let packages = (editor.packages_open && on(Field::Package)).then(|| {
             let choices = snippets::package_choices(&self.vault, &editor.package_query);
             let mut list = div().id("snippet-package-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::SURFACE)).border_1().border_color(rgb(theme::SURFACE_ACTIVE)).shadow_lg();
@@ -629,8 +591,6 @@ impl Shell {
             gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list))
         });
 
-        let lines: Vec<String> = if snippet.script.is_empty() { vec![String::new()] } else { snippet.script.split('\n').map(str::to_owned).collect() };
-        let last = lines.len() - 1;
         let script_on = on(Field::Script);
         let script = div()
             .id("snippet-script")
@@ -646,17 +606,8 @@ impl Shell {
             .font_family("Menlo")
             .text_sm()
             .text_color(rgb(if snippet.script.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-            .children(lines.into_iter().enumerate().map(move |(i, line)| {
-                let placeholder = i == 0 && line.is_empty() && last == 0;
-                div()
-                    .flex()
-                    .items_center()
-                    .min_h(px(18.))
-                    .when(placeholder && script_on, |d| d.child(caret()))
-                    .child(if placeholder { "Script *".to_owned() } else { line })
-                    .when(script_on && i == last && !placeholder, |d| d.child(caret()))
-            }))
-            .on_click(cx.listener(|shell, _, window, cx| shell.focus_snippet_field(Field::Script, window, cx)));
+            .child(text_input::text(("snippet", Field::Script), &snippet.script, "Script *", script_on, Mode::Multiline, cx));
+        let script = text_input::field(script, ("snippet", Field::Script), Mode::Multiline, |shell, window, cx| shell.focus_snippet_field(Field::Script, window, cx), cx);
 
         let form = div()
             .p(px(15.))
@@ -757,8 +708,8 @@ impl Shell {
         let search = field_box(focused && editor.field == Field::Search)
             .id("targets-search")
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(input_text(&editor.search, "Search", focused && editor.field == Field::Search))
-            .on_click(cx.listener(|shell, _, window, cx| shell.focus_snippet_field(Field::Search, window, cx)));
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Search), &editor.search, "Search", focused && editor.field == Field::Search, Mode::Line, cx)));
+        let search = text_input::field(search, ("snippet", Field::Search), Mode::Line, |shell, window, cx| shell.focus_snippet_field(Field::Search, window, cx), cx);
 
         let mut list = div().flex().flex_col();
         if !searching {
@@ -891,6 +842,7 @@ impl Shell {
     // ── Package slider ──────────────────────────────────────────────────
 
     pub fn new_package(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let package = SnippetPackage { id: self.vault.next_id(), label: String::new() };
         self.snippet_editor = None;
         self.snippet_menu = None;
@@ -901,6 +853,7 @@ impl Shell {
     }
 
     pub fn edit_package(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(package) = self.vault.package(id).cloned() else { return };
         self.snippet_editor = None;
         self.snippet_menu = None;
@@ -911,7 +864,6 @@ impl Shell {
     }
 
     fn on_package_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.package_editor else { return };
         if editor.confirm_remove {
             if event.keystroke.key == "escape" {
@@ -920,7 +872,7 @@ impl Shell {
             }
             return;
         }
-        match dialog::edit(Some(&mut editor.package.label), &event.keystroke, paste) {
+        match text_input::edit("package-label", Some(&mut editor.package.label), &event.keystroke, Mode::Line, cx) {
             // Saved as typed once it has a label (the legacy form requires one).
             Key::Edited if !editor.package.label.trim().is_empty() => {
                 self.vault.save_package(editor.package.clone());
@@ -951,10 +903,9 @@ impl Shell {
                 shell.package_editor = None;
                 cx.notify();
             })));
-        let label = field_box(focused).id("package-label").flex_1().child(input_text(&editor.package.label, "Label *", focused)).on_click(cx.listener(|shell, _, window, cx| {
-            window.focus(&shell.editor_focus);
-            cx.notify();
-        }));
+        let label = field_box(focused).id("package-label").flex_1()
+            .child(text_input::text("package-label", &editor.package.label, "Label *", focused, Mode::Line, cx));
+        let label = text_input::field(label, "package-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx);
         let form = div()
             .p(px(15.))
             .pb(px(20.))
@@ -1096,7 +1047,6 @@ impl Shell {
     // ── Shell History ───────────────────────────────────────────────────
 
     fn on_shell_history_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(panel) = &mut self.shell_history else { return };
         let Some((row, label)) = &mut panel.editing else {
             if event.keystroke.key == "escape" {
@@ -1105,7 +1055,7 @@ impl Shell {
             }
             return;
         };
-        match dialog::edit(Some(label), &event.keystroke, paste) {
+        match text_input::edit("history-label", Some(label), &event.keystroke, Mode::Line, cx) {
             Key::Enter => {
                 let row = *row;
                 self.save_history_command(row);
@@ -1173,8 +1123,11 @@ impl Shell {
                     }))).into_any_element())
                 };
                 let title = match &editing {
-                    Some(label) => input_text(label, "Set a label", true),
-                    None => div().text_color(rgb(theme::TEXT)).font_family("Menlo").text_sm().when(!expanded, |d| d.truncate()).child(command.script.clone()),
+                    Some(label) => {
+                        let input = div().id("history-label").child(text_input::text("history-label", label, "Set a label", true, Mode::Line, cx));
+                        text_input::field(input, "history-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx).into_any_element()
+                    }
+                    None => div().text_color(rgb(theme::TEXT)).font_family("Menlo").text_sm().when(!expanded, |d| d.truncate()).child(command.script.clone()).into_any_element(),
                 };
                 div()
                     .id(hover.clone())

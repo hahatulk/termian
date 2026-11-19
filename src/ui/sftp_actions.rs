@@ -21,6 +21,7 @@ use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, I
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::sftp::{Side, SftpState};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const MENU_WIDTH: f32 = 230.;
@@ -621,12 +622,11 @@ impl Shell {
     }
 
     fn on_dialog_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let input = match &mut self.sftp.actions.dialog {
             Some(Dialog::Rename { input, .. } | Dialog::NewFolder { input, .. }) => Some(input),
             _ => None,
         };
-        match dialog::edit(input, &event.keystroke, paste) {
+        match text_input::edit("dialog-input", input, &event.keystroke, Mode::Line, cx) {
             Key::Edited => {}
             Key::Enter => self.confirm_dialog(window, cx),
             Key::Escape => self.close_dialog(cx),
@@ -931,14 +931,14 @@ impl Shell {
             Dialog::Rename { side, from, input } => {
                 let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
                 let error = name_error(input, &taken, Some(from));
-                dialog::card("Rename", false, close, dialog::field("New filename *", input, error, focused), vec![
+                dialog::card("Rename", false, close, dialog::field("New filename *", input, error, &self.sftp_dialog_focus, focused, cx), vec![
                     confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
                 ])
             }
             Dialog::NewFolder { side, input } => {
                 let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
                 let error = name_error(input, &taken, None);
-                dialog::card("New folder", false, close, dialog::field("Foldername *", input, error, focused), vec![
+                dialog::card("New folder", false, close, dialog::field("Foldername *", input, error, &self.sftp_dialog_focus, focused, cx), vec![
                     confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
                 ])
             }

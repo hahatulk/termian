@@ -7,13 +7,14 @@ use termian_native::vault::Identity;
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_editor::{caret, field_box, menu_row};
+use super::host_editor::{field_box, menu_row};
 use super::hosts::tile;
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 const WIDTH: f32 = 420.;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Field {
     Label,
     Username,
@@ -58,6 +59,7 @@ impl Shell {
     }
 
     pub fn new_identity(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let identity = Identity { id: self.vault.next_id(), ..Identity::default() };
         self.key_editor = None;
         self.keychain_menu = None;
@@ -67,6 +69,7 @@ impl Shell {
     }
 
     pub fn edit_identity(&mut self, id: u64, window: &mut Window, cx: &mut Context<Self>) {
+        text_input::reset(cx);
         let Some(identity) = self.vault.identity(id).cloned() else { return };
         self.key_editor = None;
         self.identity_editor = Some(IdentityEditor { identity, created_here: false, field: Field::Label, keys_open: false, confirm_remove: false });
@@ -89,7 +92,6 @@ impl Shell {
     }
 
     fn on_identity_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(editor) = &mut self.identity_editor else { return };
         if editor.confirm_remove {
             if event.keystroke.key == "escape" {
@@ -113,7 +115,7 @@ impl Shell {
             Field::Username => &mut editor.identity.username,
             Field::Password => editor.identity.password.get_or_insert_with(String::new),
         };
-        match dialog::edit(Some(value), &event.keystroke, paste) {
+        match text_input::edit(("identity", editor.field), Some(value), &event.keystroke, if editor.field == Field::Password { Mode::Secret } else { Mode::Line }, cx) {
             Key::Edited => {
                 if editor.identity.password.as_deref() == Some("") {
                     editor.identity.password = None;
@@ -129,28 +131,18 @@ impl Shell {
 
     fn identity_input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
         let focused = self.identity_editor.as_ref().is_some_and(|e| e.field == field) && self.editor_focus.is_focused(window);
-        let shown = if masked { "•".repeat(value.chars().count()) } else { value.to_owned() };
-        let empty = shown.is_empty();
-        field_box(focused)
+        let mode = if masked { Mode::Secret } else { Mode::Line };
+        let key = ("identity", field);
+        let input = field_box(focused)
             .id(SharedString::from(format!("identity-{placeholder}")))
-            .child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .items_center()
-                    .text_color(rgb(if empty { theme::TEXT_MUTED } else { theme::TEXT }))
-                    .when(focused && empty, |d| d.child(caret()))
-                    .child(if empty { placeholder.to_owned() } else { shown })
-                    .when(focused && !empty, |d| d.child(caret())),
-            )
-            .on_click(cx.listener(move |shell, _, window, cx| {
-                if let Some(editor) = &mut shell.identity_editor {
-                    editor.field = field;
-                    editor.keys_open = false;
-                }
-                window.focus(&shell.editor_focus);
-                cx.notify();
-            }))
+            .child(text_input::text(key, value, placeholder, focused, mode, cx));
+        text_input::field(input, key, mode, move |shell, window, _| {
+            if let Some(editor) = &mut shell.identity_editor {
+                editor.field = field;
+                editor.keys_open = false;
+            }
+            window.focus(&shell.editor_focus);
+        }, cx)
     }
 
     pub fn render_identity_editor(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {

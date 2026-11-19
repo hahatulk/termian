@@ -16,7 +16,8 @@ use termian_native::theme;
 use termian_native::updater::State;
 
 use super::cloud::Operation;
-use super::dialog::{checkbox, edit, Key};
+use super::dialog::{checkbox, Key};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 gpui::actions!(termian, [OpenSettings, OpenVaults, OpenSftp, OpenFileAccess, Quit]);
@@ -303,8 +304,8 @@ impl SettingsWindow {
         if self.editing.is_none() {
             return;
         }
-        let paste = cx.read_from_clipboard().and_then(|c| c.text());
-        match edit(self.editing.as_mut().map(|(_, text)| text), keystroke, paste) {
+        let Some((field, text)) = &mut self.editing else { return };
+        match text_input::edit(("settings", &*field), Some(text), keystroke, Mode::Line, cx) {
             Key::Enter => self.commit_edit(cx),
             Key::Escape => self.editing = None,
             Key::Edited => self.live_edit(cx),
@@ -514,30 +515,21 @@ impl SettingsWindow {
                 .rounded(px(10.))
                 .bg(rgb(0x353950))
                 .child(div().w(px(150.)).flex_none().truncate().child(format!(".{ext}")))
-                .child(
-                    div()
-                        .id(SharedString::from(format!("settings-app-{ext}")))
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(30.))
-                        .px(px(8.))
-                        .flex()
-                        .items_center()
-                        .rounded(px(6.))
-                        .border_1()
+                .child({
+                    let key = ("settings", Field::App(field_ext.clone()));
+                    let input = div().id(SharedString::from(format!("settings-app-{ext}")))
+                        .flex_1().min_w_0().h(px(30.)).px(px(8.)).flex().items_center().rounded(px(6.)).border_1()
                         .border_color(rgb(if editing.is_some() { theme::ACCENT } else { 0x353950 }))
-                        .child(div().truncate().child(editing.clone().unwrap_or(path.clone())))
-                        .when(editing.is_some(), |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))))
-                        .on_click(cx.listener(move |settings, _, window, cx| {
-                            if settings.editing.as_ref().is_some_and(|(e, _)| *e == Field::App(field_ext.clone())) {
-                                return;
-                            }
+                        .child(text_input::text(&key, editing.as_deref().unwrap_or(&path), "", editing.is_some(), Mode::Line, cx));
+                    text_input::field(input, &key, Mode::Line, move |settings, window, cx| {
+                        let field = Field::App(field_ext.clone());
+                        if settings.editing.as_ref().is_none_or(|(active, _)| *active != field) {
                             settings.commit_edit(cx);
-                            settings.editing = Some((Field::App(field_ext.clone()), path.clone()));
-                            window.focus(&settings.focus);
-                            cx.notify();
-                        })),
-                )
+                            settings.editing = Some((field, path.clone()));
+                        }
+                        window.focus(&settings.focus);
+                    }, cx)
+                })
                 .child(action_button(SharedString::from(format!("settings-app-edit-{ext}")), "Изменить…", false, false).on_click(cx.listener(move |_, _, window, cx| {
                     let answer = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Choose application".into()) });
                     let ext = pick_ext.clone();

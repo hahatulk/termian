@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use gpui::{div, ease_out_quint, prelude::*, px, rgb, rgba, svg, Animation, AnimationExt, AnyElement, Div, FontWeight, Keystroke, SharedString, Stateful};
+use gpui::{div, ease_out_quint, prelude::*, px, rgb, rgba, svg, Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, FontWeight, SharedString, Stateful};
 use termian_native::theme;
 
 use super::assets::icon;
@@ -153,30 +153,20 @@ pub fn checkbox(id: &str, label: &str, checked: bool) -> Stateful<Div> {
 }
 
 /// Labelled text field with the validation message under it.
-pub fn field(label: &str, value: &str, error: Option<&str>, focused: bool) -> Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
+pub fn field<T: 'static>(label: &str, value: &str, error: Option<&str>, focus: &FocusHandle, focused: bool, cx: &Context<T>) -> Div {
+    use super::text_input::{self, Mode};
+    let input = div().id("dialog-input").h(px(40.)).px_3().flex().items_center()
+        .rounded_md().bg(rgb(theme::INPUT)).border_1()
+        .border_color(rgb(match (error.is_some(), focused) {
+            (true, _) => theme::ERROR,
+            (false, true) => theme::ACCENT,
+            (false, false) => theme::INPUT,
+        }))
+        .child(text_input::text("dialog-input", value, "", focused, Mode::Line, cx));
+    let focus = focus.clone();
+    div().flex().flex_col().gap_1()
         .child(div().text_xs().text_color(rgb(if error.is_some() { theme::ERROR } else { theme::TEXT_MUTED })).child(label.to_owned()))
-        .child(
-            div()
-                .h(px(40.))
-                .px_3()
-                .flex()
-                .items_center()
-                .rounded_md()
-                .bg(rgb(theme::INPUT))
-                .border_1()
-                .border_color(rgb(match (error.is_some(), focused) {
-                    (true, _) => theme::ERROR,
-                    (false, true) => theme::ACCENT,
-                    (false, false) => theme::INPUT,
-                }))
-                .child(value.to_owned())
-                .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT)))),
-        )
-        // A blank line keeps the height steady, like MUI's `helperText: " "`.
+        .child(text_input::field(input, "dialog-input", Mode::Line, move |_, window, _| window.focus(&focus), cx))
         .child(div().h(px(18.)).text_xs().text_color(rgb(theme::ERROR)).child(error.unwrap_or("").to_owned()))
 }
 
@@ -185,28 +175,4 @@ pub enum Key {
     Enter,
     Escape,
     Ignored,
-}
-
-/// Applies a key press to a single-line text value.
-pub fn edit(value: Option<&mut String>, keystroke: &Keystroke, paste: Option<String>) -> Key {
-    match keystroke.key.as_str() {
-        "enter" => return Key::Enter,
-        "escape" => return Key::Escape,
-        _ => {}
-    }
-    let Some(value) = value else { return Key::Ignored };
-    match keystroke.key.as_str() {
-        _ if keystroke.modifiers.platform && keystroke.key == "v" => {
-            value.push_str(paste.as_deref().and_then(|p| p.lines().next()).unwrap_or(""));
-        }
-        _ if keystroke.modifiers.platform || keystroke.modifiers.control => return Key::Ignored,
-        "backspace" => {
-            value.pop();
-        }
-        _ => match keystroke.key_char.as_deref() {
-            Some(text) if !text.chars().any(char::is_control) => value.push_str(text),
-            _ => return Key::Ignored,
-        },
-    }
-    Key::Edited
 }

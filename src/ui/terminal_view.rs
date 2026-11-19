@@ -10,6 +10,7 @@ use termian_native::session::{self, Session, SessionEvent, SshTarget};
 use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
+use super::text_input::{self, Mode};
 use super::login_view::{self, LoginActions, LoginTarget};
 #[path = "serial_form.rs"]
 mod serial_form;
@@ -455,39 +456,18 @@ impl TerminalView {
     fn on_search_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let Some(query) = self.search.as_mut() else { return };
-        if keystroke.modifiers.platform || keystroke.modifiers.control {
-            if keystroke.modifiers.platform && keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    query.push_str(text.lines().next().unwrap_or(""));
-                    let query = query.clone();
-                    self.search_found = self.terminal.find(&query, true, true);
-                }
-                cx.stop_propagation();
-                cx.notify();
-            }
-            return;
-        }
-        match keystroke.key.as_str() {
-            "escape" => {
-                self.close_search(window);
-            }
-            "enter" => {
+        use super::dialog::Key;
+        match text_input::edit("terminal-search", Some(query), keystroke, Mode::Line, cx) {
+            Key::Escape => self.close_search(window),
+            Key::Enter => {
                 let query = query.clone();
                 self.search_found = self.terminal.find(&query, !keystroke.modifiers.shift, false);
             }
-            "backspace" => {
-                query.pop();
+            Key::Edited => {
                 let query = query.clone();
                 self.search_found = self.terminal.find(&query, true, true) || query.is_empty();
             }
-            _ => match keystroke.key_char.as_deref() {
-                Some(text) if !text.chars().any(char::is_control) => {
-                    query.push_str(text);
-                    let query = query.clone();
-                    self.search_found = self.terminal.find(&query, true, true);
-                }
-                _ => return,
-            },
+            Key::Ignored => return,
         }
         cx.stop_propagation();
         cx.notify();
@@ -542,8 +522,7 @@ impl TerminalView {
                 )
         };
         let empty = query.is_empty();
-        Some(
-            div()
+        let field = div()
                 .id("terminal-search")
                 .track_focus(&self.search_focus)
                 .on_key_down(cx.listener(Self::on_search_key))
@@ -567,21 +546,10 @@ impl TerminalView {
                 .font_family(".SystemUIFont")
                 .text_xs()
                 .child(gpui::svg().path(icon("search")).size(px(12.)).text_color(rgb(if focused || !empty { termian_native::theme::TEXT } else { termian_native::theme::TEXT_MUTED })))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .overflow_hidden()
-                        .text_color(rgb(if empty { termian_native::theme::TEXT_MUTED } else { termian_native::theme::TEXT }))
-                        .when(focused && empty, |d| d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(termian_native::theme::TEXT))))
-                        .child(div().truncate().child(if empty { "Search terminal".to_owned() } else { query.clone() }))
-                        .when(focused && !empty, |d| d.child(div().w(px(1.5)).h(px(14.)).bg(rgb(termian_native::theme::TEXT)))),
-                )
+                .child(div().flex_1().min_w_0().child(text_input::text("terminal-search", query, "Search terminal", focused, Mode::Line, cx)))
                 .child(arrow("terminal-search-prev", true).on_click(cx.listener(|view, _, _, cx| view.step_search(true, cx))))
-                .child(arrow("terminal-search-next", false).on_click(cx.listener(|view, _, _, cx| view.step_search(false, cx)))),
-        )
+                .child(arrow("terminal-search-next", false).on_click(cx.listener(|view, _, _, cx| view.step_search(false, cx))));
+        Some(text_input::field(field, "terminal-search", Mode::Line, |view, window, _| window.focus(&view.search_focus), cx))
     }
 
     fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -951,9 +919,8 @@ impl TerminalView {
     }
 
     fn login_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let paste = cx.read_from_clipboard().and_then(|item| item.text());
         let Some(login) = self.login.as_mut() else { return };
-        if let Some(answer) = login_view::edit(login, event, paste) {
+        if let Some(answer) = login_view::edit(login, event, cx) {
             if let Some(answer) = answer {
                 self.login_answer(answer, window, cx);
             }

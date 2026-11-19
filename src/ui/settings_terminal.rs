@@ -10,6 +10,7 @@ use termian_native::terminal_settings::{self as ts, TerminalSettings, EMULATION_
 use termian_native::theme;
 
 use super::settings::{body_text, section, Field, Menu, SettingsWindow, MUTED};
+use super::text_input::{self, Mode};
 use crate::Shell;
 
 /// The legacy «Detect OS Script», shown read-only.
@@ -158,32 +159,27 @@ impl SettingsWindow {
         let typing = self.editing.as_ref().filter(|(f, _)| *f == field).map(|(_, text)| text.clone());
         let focused = typing.is_some();
         let text = typing.unwrap_or(shown.clone());
-        div()
+        let key = ("settings", &field);
+        let input = div()
             .id(SharedString::from(id.to_owned()))
-            .h(px(36.))
-            .px(px(10.))
-            .flex()
-            .items_center()
-            .rounded(px(6.))
-            .border_1()
+            .h(px(36.)).px(px(10.)).flex().items_center().rounded(px(6.)).border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { 0x4a4e66 }))
-            .bg(rgb(theme::INPUT))
-            .text_size(px(14.))
-            .text_color(rgb(theme::TEXT))
+            .bg(rgb(theme::INPUT)).text_size(px(14.)).text_color(rgb(theme::TEXT))
             .when_some(width, |d, w| d.w(px(w)).justify_center())
             .when(width.is_none(), |d| d.w_full())
-            .child(div().truncate().child(text))
-            .when(focused, |d| d.child(div().mx(px(1.)).w(px(1.5)).h(px(16.)).bg(rgb(theme::TEXT))))
-            .when_some(suffix, |d, suffix| d.child(div().ml(px(3.)).text_color(rgb(MUTED)).child(suffix)))
-            .on_click(cx.listener(move |settings, _, window, cx| {
-                if settings.editing.as_ref().is_some_and(|(f, _)| *f == field) {
-                    return;
+            .child(text_input::text(key, &text, "", focused, Mode::Line, cx))
+            .when_some(suffix, |d, suffix| d.child(div().ml(px(3.)).text_color(rgb(MUTED)).child(suffix)));
+        text_input::field(input, key, Mode::Line, {
+            let field = field.clone();
+            move |settings: &mut Self, window, cx| {
+                if settings.editing.as_ref().is_none_or(|(active, _)| *active != field) {
+                    settings.commit_edit(cx);
+                    settings.editing = Some((field.clone(), shown.clone()));
                 }
-                settings.commit_edit(cx);
-                settings.editing = Some((field.clone(), shown.clone()));
                 window.focus(&settings.focus);
-                cx.notify();
-            }))
+            }
+        }, cx)
+
     }
 
     /// Typing changes Text Size and Keepalive at once, as the legacy fields do.
