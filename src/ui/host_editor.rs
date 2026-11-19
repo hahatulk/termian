@@ -198,10 +198,8 @@ impl Shell {
 
     /// Writes the vault file; a failure is shown above the hosts.
     pub fn save_vault(&mut self) {
-        if let Some(store) = &self.store {
-            if let Err(error) = store.save(&self.vault) {
-                self.vault_error = Some(format!("changes were not saved: {error}"));
-            }
+        if let Err(error) = self.store.save(&self.vault) {
+            self.vault_error = Some(format!("changes were not saved: {error}"));
         }
     }
 

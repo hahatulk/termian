@@ -32,7 +32,7 @@ const WINDOW_CONTROLS_INSET: f32 = 12.;
 pub struct Shell {
     tabs: Tabs,
     vault: Vault,
-    store: Option<Store>,
+    store: Store,
     /// Encrypted session logs (`session-logs-v2`).
     logs_dir: std::path::PathBuf,
     vault_error: Option<String>,
@@ -86,6 +86,7 @@ pub struct Shell {
     sftp_answer_focus: FocusHandle,
     sftp_dialog_focus: FocusHandle,
     cloud: ui::cloud::CloudState,
+    privacy: ui::privacy::Privacy,
     update: ui::update::UpdateState,
     main_window: Option<gpui::WindowHandle<Shell>>,
     /// Bundled terminal fonts already given to the text system.
@@ -190,45 +191,36 @@ fn import_legacy_templates(vault: &mut Vault) {
 
 /// The native vault (ADR 0002), imported from the legacy profile on first run.
 /// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
-fn open_vault() -> (Vault, Option<Store>, Option<String>) {
-    let (store, import): (Result<Store, String>, fn() -> Result<Vault, String>) = if std::env::var_os("TERMIAN_DEMO").is_some() {
-        (Ok(Store::demo()), || Ok(termian_native::vault::demo()))
-    } else {
-        (Store::open_default(), load_legacy_vault)
-    };
-    match store {
-        Ok(store) => match store.load_or_import(import) {
-            Ok(vault) => (vault, Some(store), None),
-            Err(error) => (Vault::default(), None, Some(error)),
-        },
-        // Without a store the legacy hosts are still shown, read-only.
-        Err(error) => (import().unwrap_or_default(), None, Some(format!("changes cannot be saved: {error}"))),
+fn open_vault() -> Result<(Store, Vault), String> {
+    if std::env::var_os("TERMIAN_DEMO").is_some() {
+        let store = Store::demo();
+        let vault = store.load_or_import(|| Ok(termian_native::vault::demo()))?;
+        return Ok((store, vault));
     }
+    Store::load_default(|| match load_legacy_vault() {
+        Err(error) if error == "legacy profile not found" => Ok(Vault::default()),
+        result => result,
+    })
 }
 
 impl Shell {
-    fn new(cx: &mut Context<Self>) -> Self {
-        let (mut vault, store, vault_error) = open_vault();
+    fn new(store: Store, mut vault: Vault, cx: &mut Context<Self>) -> Self {
         let demo = std::env::var_os("TERMIAN_DEMO").is_some();
         let logs_dir = if demo { std::env::temp_dir().join("termian-native-demo").join("session-logs-v2") } else { session_log::default_dir() };
-        if !demo && store.is_some() && !vault.legacy_shell_history_imported {
+        if !demo && !vault.legacy_shell_history_imported {
             import_legacy_shell_history(&mut vault);
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && vault.secrets_missing {
+        if !demo && vault.secrets_missing {
             // Imported before legacy passwords and keys were read; a locked
             // keychain is tried again at the next start.
             match load_legacy_vault() {
                 Ok(legacy) => vault.import_legacy_secrets(&legacy),
                 Err(error) => eprintln!("[Termian] Legacy passwords and keys were not imported: {error}"),
             }
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && !vault.legacy_hidden_identities_folded {
+        if !demo && !vault.legacy_hidden_identities_folded {
             // Hosts' own credentials imported as Keychain identities; a
             // locked keychain is tried again at the next start.
             match load_legacy_vault() {
@@ -237,11 +229,9 @@ impl Shell {
                 Err(error) if error == "legacy profile not found" => vault.legacy_hidden_identities_folded = true,
                 Err(error) => eprintln!("[Termian] Host credentials were not separated from identities: {error}"),
             }
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && vault.legacy_hidden_identities_folded && !vault.legacy_unused_hidden_identities_dropped {
+        if !demo && vault.legacy_hidden_identities_folded && !vault.legacy_unused_hidden_identities_dropped {
             // Hosts' own legacy credentials left in the Keychain with no host using them.
             match load_legacy_vault() {
                 Ok(legacy) => {
@@ -252,31 +242,23 @@ impl Shell {
                 Err(error) if error == "legacy profile not found" => vault.legacy_unused_hidden_identities_dropped = true,
                 Err(error) => eprintln!("[Termian] Unused host credentials were not removed: {error}"),
             }
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && !vault.legacy_templates_imported {
+        if !demo && !vault.legacy_templates_imported {
             import_legacy_templates(&mut vault);
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && !vault.legacy_history_imported {
+        if !demo && !vault.legacy_history_imported {
             import_legacy_history(&mut vault, &logs_dir);
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
-        if !demo && store.is_some() && vault.legacy_history_imported && !vault.legacy_bookmarks_imported {
+        if !demo && vault.legacy_history_imported && !vault.legacy_bookmarks_imported {
             import_legacy_bookmarks(&mut vault);
-            if let Some(store) = &store {
-                let _ = store.save(&vault);
-            }
+            let _ = store.save(&vault);
         }
         // Logs older than 60 days are deleted at start (FR-L5).
         session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
-        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error, section: Section::Hosts,
+        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error: None, section: Section::Hosts,
             host_editor: None,
             host_menu: None,
             key_editor: None,
@@ -318,6 +300,7 @@ impl Shell {
             sftp_answer_focus: cx.focus_handle(),
             sftp_dialog_focus: cx.focus_handle(),
             cloud: Default::default(),
+            privacy: Default::default(),
             update: Default::default(),
             main_window: None,
             loaded_fonts: Default::default(),
@@ -578,6 +561,9 @@ impl Shell {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.privacy_locked() {
+            return self.render_privacy(cx);
+        }
         let chrome = self.chrome(cx);
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, chrome, cx)).collect();
         let toolbar = self.render_cloud_buttons(cx);
@@ -622,6 +608,7 @@ impl Render for Shell {
                             })),
                     )
                     .child(div().flex_1())
+                    .child(self.render_privacy_button(cx))
                     .children(toolbar)
                     .children(self.render_broadcast_button(cx))
                     .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx))),
@@ -640,6 +627,7 @@ impl Render for Shell {
             .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
             .map(|root| self.on_shortcut_actions(root, cx))
+            .into_any_element()
     }
 }
 
@@ -653,36 +641,103 @@ fn main() {
         if let Err(error) = cx.text_system().add_fonts(fonts.into_iter().map(std::borrow::Cow::Borrowed).collect()) {
             eprintln!("[Termian] Interface font could not be loaded: {error}");
         }
-        let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
-        let main = cx.open_window(
+        let bounds = Bounds::centered(None, size(px(420.), px(220.)), cx);
+        cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Termian".into()),
-                    appears_transparent: cfg!(target_os = "macos"),
-                    // Centred in the 44 px tab strip: the buttons are 12 px tall.
-                    traffic_light_position: Some(gpui::point(px(14.), px(16.))),
-                }),
+                titlebar: Some(TitlebarOptions { title: Some("Termian".into()), ..Default::default() }),
+                is_resizable: false,
                 ..Default::default()
             },
-            |window, cx| {
-                let shell = cx.new(Shell::new);
-                shell.update(cx, |shell, cx| {
-                    shell.start_cloud(cx);
-                    shell.start_updates(cx);
-                    shell.load_terminal_font(cx);
-                });
-                let focus = shell.read(cx).root_focus.clone();
-                window.focus(&focus);
-                shell
-            },
-        )
-        .expect("failed to open the main window");
-        let _ = main.update(cx, |shell, _, _| shell.main_window = Some(main));
-        ui::settings::install_menus(main, cx);
-        if let Ok(settings) = main.read(cx).map(|shell| shell.vault.shortcuts.clone()) {
-            ui::shortcut_actions::bind(&settings, cx);
-        }
+            |window, cx| cx.new(|cx| {
+                let mut startup = VaultStartup::default();
+                startup.open(window, cx);
+                startup
+            }),
+        ).expect("failed to open the vault window");
         cx.activate(true);
     });
+}
+
+#[derive(Default)]
+struct VaultStartup {
+    opening: bool,
+    error: Option<String>,
+}
+
+impl VaultStartup {
+    fn open(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.opening {
+            return;
+        }
+        self.opening = true;
+        self.error = None;
+        let task = cx.background_spawn(async { open_vault() });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = cx.update(|window, cx| match result {
+                Ok((store, vault)) => {
+                    open_main_window(store, vault, cx);
+                    window.remove_window();
+                }
+                Err(error) => {
+                    let _ = this.update(cx, |startup, cx| {
+                        startup.opening = false;
+                        startup.error = Some(error);
+                        cx.notify();
+                    });
+                }
+            });
+        }).detach();
+        cx.notify();
+    }
+}
+
+impl Render for VaultStartup {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div().size_full().flex().flex_col().justify_center().items_center().gap_3().px_6()
+            .bg(rgb(0x202228)).text_color(rgb(0xf0f0f0))
+            .child(div().text_lg().child(if self.opening { "Opening vault…" } else { "Vault locked" }))
+            .children(self.error.as_ref().map(|error| div().text_sm().child(error.clone())))
+            .when(!self.opening, |view| view.child(
+                div().id("retry-vault").cursor_pointer().px_4().py_2().rounded_md().bg(rgb(0x3c454a))
+                    .on_click(cx.listener(|startup, _, window, cx| startup.open(window, cx)))
+                    .child("Try Again"),
+            ))
+    }
+}
+
+fn open_main_window(store: Store, vault: Vault, cx: &mut App) {
+    let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
+    let main = cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Termian".into()),
+                appears_transparent: cfg!(target_os = "macos"),
+                // Centred in the 44 px tab strip: the buttons are 12 px tall.
+                traffic_light_position: Some(gpui::point(px(14.), px(16.))),
+            }),
+            ..Default::default()
+        },
+        |window, cx| {
+            let shell = cx.new(|cx| Shell::new(store, vault, cx));
+            shell.update(cx, |shell, cx| {
+                shell.install_privacy(window, cx);
+                shell.start_cloud(cx);
+                shell.start_updates(cx);
+                shell.load_terminal_font(cx);
+            });
+            let focus = shell.read(cx).root_focus.clone();
+            window.focus(&focus);
+            shell
+        },
+    )
+    .expect("failed to open the main window");
+    let _ = main.update(cx, |shell, _, _| shell.main_window = Some(main));
+    ui::settings::install_menus(main, cx);
+    if let Ok(settings) = main.read(cx).map(|shell| shell.vault.shortcuts.clone()) {
+        ui::shortcut_actions::bind(&settings, cx);
+    }
+    cx.activate(true);
 }

@@ -27,7 +27,7 @@ The default bind address is `0.0.0.0:8080` (`SYNC_BIND`); the maximum request bo
 
 ### Web panel
 
-The web panel listens on `SYNC_PANEL_BIND` (default `127.0.0.1:8081`; `off` disables it). By default it answers only to `127.0.0.1`/`localhost`; `SYNC_PANEL_ALLOWED_HOSTS` adds comma-separated names or IPs (e.g. `192.168.1.5,sync.example.com`) or `*` for any host. Docker Compose binds `0.0.0.0:8081` with `SYNC_PANEL_ALLOWED_HOSTS=*` unless you override it in `.env`. Open <http://127.0.0.1:8081> (or `http://<server>:8081`) and enter the **encryption password** from Termian's «Своё облако» settings. The server decrypts the snapshot in memory to verify it; the password is never stored or logged.
+The web panel listens on `SYNC_PANEL_BIND` (default `127.0.0.1:8081`; `off` disables it). By default it answers only to `127.0.0.1`/`localhost`; `SYNC_PANEL_ALLOWED_HOSTS` adds comma-separated names or IPs (e.g. `192.168.1.5,sync.example.com`) or `*` for any host. Docker Compose binds `0.0.0.0:8081` with `SYNC_PANEL_ALLOWED_HOSTS=*` unless you override it in `.env`. Open <http://127.0.0.1:8081> (or `http://<server>:8081`) and enter the **encryption password** from Termian's «Своё облако» settings. The panel has no password length or character rules. Leave the field blank if the snapshot was encrypted with an empty password. The server decrypts the snapshot in memory to verify it; the password is never stored or logged.
 
 After unlocking the panel shows:
 
@@ -38,6 +38,12 @@ After unlocking the panel shows:
 **Выгрузить данные (JSON)** downloads the decrypted snapshot — the same JSON the client imports. It contains passwords and private keys in plain text.
 
 Protection: requests with a `Host` outside the allow-list are rejected (DNS rebinding; `*` turns this check off), the API accepts only JSON with an `X-Termian-Panel` header (no cross-site form posts), a strict CSP is sent, and wrong passwords use the same lockout as wrong tokens. The panel speaks plain HTTP: over an untrusted network the encryption password travels unencrypted, so prefer listing exact hosts behind an HTTPS reverse proxy, a VPN, or an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 server`).
+
+### Change the encryption password
+
+Pause cloud sync and log backups on every client before rotating. Open the web panel with the current password, enter the sync token and the new password twice, then confirm. The new password must have at least 12 characters and at most 4096 UTF-8 bytes. The server re-encrypts the current snapshot and session logs together. If a log still uses another password, rotation stops without changing the active files.
+
+In each native client, enter the new password in «Своё облако» and choose «Сменить пароль». The client verifies that the new password opens the snapshot before saving it. Future uploads use the new password. Historical revisions and earlier client backups still require their original passwords. Rotation does not erase old copies outside the live storage. After rotation, keep `.active-storage` and its `sealed-*` storage directory together when backing up the server. Older server binaries cannot read that layout.
 
 ### Failed authorization limit
 
@@ -76,6 +82,6 @@ Session logs are encrypted by the client (sealed with the encryption password, l
 
 ## Security
 
-Use HTTPS through a reverse proxy outside a trusted local network. Keep the bearer token secret and back up the data volume. The **encryption password belongs only in the client** — never on the server. Clients merge changes of several devices themselves (the server only stores ciphertext); conflicting edits of the same record are resolved by the user.
+Use HTTPS through a reverse proxy outside a trusted local network. Keep the bearer token secret and back up the data volume. The sync API never receives the encryption password. The web panel uses it in memory when opening, exporting, or re-encrypting data. Clients merge changes from multiple devices; the user resolves conflicting edits of the same record.
 
 See the [Termian client](../README.md).

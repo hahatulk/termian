@@ -77,6 +77,7 @@ pub fn make_panel_with_hosts(state: Shared, hosts: AllowedHosts) -> Router {
         .route("/", get(page))
         .route("/api/unlock", post(unlock))
         .route("/api/export", post(export))
+        .route("/api/rotate-password", post(rotate_password))
         .layer(middleware::from_fn(move |request: Request, next: Next| {
             let hosts = hosts.clone();
             async move { host_guard(&hosts, request, next).await }
@@ -141,7 +142,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 
 /// JSON body plus `X-Termian-Panel: 1`: browsers cannot send either from a
 /// cross-site HTML form without a CORS preflight, which is never granted.
-fn read_request(headers: &HeaderMap, body: &Bytes) -> Result<Unlock, Response> {
+fn read_request<T: serde::de::DeserializeOwned>(headers: &HeaderMap, body: &Bytes) -> Result<T, Response> {
     let json_body = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
@@ -149,16 +150,12 @@ fn read_request(headers: &HeaderMap, body: &Bytes) -> Result<Unlock, Response> {
     if !json_body || headers.get("x-termian-panel").map(|v| v.as_bytes()) != Some(b"1") {
         return Err(error(StatusCode::BAD_REQUEST, "Неверный запрос"));
     }
-    let request: Unlock = serde_json::from_slice(body).map_err(|_| error(StatusCode::BAD_REQUEST, "Неверный запрос"))?;
-    if request.passphrase.is_empty() || request.passphrase.len() > 4096 {
-        return Err(error(StatusCode::BAD_REQUEST, "Введите пароль шифрования"));
-    }
-    Ok(request)
+    serde_json::from_slice(body).map_err(|_| error(StatusCode::BAD_REQUEST, "Неверный запрос"))
 }
 
 enum Opened {
     Missing,
-    Decrypted { snapshot: Value, bytes: usize },
+    Decrypted { snapshot: Value, bytes: usize, revision: String },
 }
 
 /// Decrypt the stored snapshot with the limiter applied. The client's wrong
@@ -168,13 +165,13 @@ async fn open_with_limit(state: &Shared, passphrase: String) -> Result<Opened, R
     if let Some(left) = state.panel_limiter.locked(ip) {
         return Err(too_many_attempts(left));
     }
-    let cfg = state.cfg.clone();
+    let storage = state.clone();
     let result = tokio::task::spawn_blocking(move || -> Result<Opened, &'static str> {
-        let Some(data) = current(&cfg).map_err(|_| "storage")? else {
+        let Some(data) = crate::with_storage(&storage, current).map_err(|_| "storage")? else {
             return Ok(Opened::Missing);
         };
         let snapshot = open_envelope(&data, &passphrase)?;
-        Ok(Opened::Decrypted { snapshot, bytes: data.len() })
+        Ok(Opened::Decrypted { snapshot, bytes: data.len(), revision: crate::digest(&data) })
     })
     .await
     .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Внутренняя ошибка"))?;
@@ -232,8 +229,13 @@ fn unix_ms(time: SystemTime) -> Option<u64> {
     time.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64)
 }
 
-fn server_info(state: &Shared) -> Value {
-    let cfg = &state.cfg;
+async fn server_info(state: &Shared) -> Value {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || crate::with_storage(&state, |cfg| Ok(server_info_at(&state, cfg))))
+        .await.ok().and_then(Result::ok).unwrap_or_else(|| json!({}))
+}
+
+fn server_info_at(state: &Shared, cfg: &crate::Config) -> Value {
     let snapshot = fs::metadata(snapshot_path(cfg)).ok();
     let mut revisions: Vec<(u64, u64)> = fs::read_dir(cfg.dir.join("revisions"))
         .map(|entries| {
@@ -257,7 +259,7 @@ fn server_info(state: &Shared) -> Value {
         "snapshotBytes": snapshot.as_ref().map(|meta| meta.len()),
         "lastUploadAt": snapshot.as_ref().and_then(|meta| meta.modified().ok()).and_then(unix_ms),
         "lastDownloadAt": last_download,
-        "revision": current(cfg).ok().flatten().map(|data| crate::digest(&data)[..12].to_string()),
+        "revision": null,
         "revisions": revisions.iter().map(|(at, size)| json!({"at": at, "bytes": size})).collect::<Vec<_>>(),
         "maxRevisions": MAX_BACKUPS,
         "maxBodyBytes": cfg.limit,
@@ -289,21 +291,23 @@ fn snapshot_summary(snapshot: &Value, bytes: usize) -> Value {
 }
 
 async fn unlock(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    let request = match read_request(&headers, &body) {
+    let request: Unlock = match read_request(&headers, &body) {
         Ok(request) => request,
         Err(response) => return response,
     };
     match open_with_limit(&state, request.passphrase).await {
-        Ok(Opened::Missing) => Json(json!({"server": server_info(&state), "snapshot": null})).into_response(),
-        Ok(Opened::Decrypted { snapshot, bytes }) => {
-            Json(json!({"server": server_info(&state), "snapshot": snapshot_summary(&snapshot, bytes)})).into_response()
+        Ok(Opened::Missing) => Json(json!({"server": server_info(&state).await, "snapshot": null})).into_response(),
+        Ok(Opened::Decrypted { snapshot, bytes, revision }) => {
+            let mut server = server_info(&state).await;
+            server["revision"] = revision.into();
+            Json(json!({"server": server, "snapshot": snapshot_summary(&snapshot, bytes)})).into_response()
         }
         Err(response) => response,
     }
 }
 
 async fn export(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    let request = match read_request(&headers, &body) {
+    let request: Unlock = match read_request(&headers, &body) {
         Ok(request) => request,
         Err(response) => return response,
     };
@@ -322,6 +326,140 @@ async fn export(State(state): State<Shared>, headers: HeaderMap, body: Bytes) ->
         }
         Err(response) => response,
     }
+}
+
+#[derive(Deserialize)]
+struct Rotation {
+    passphrase: String,
+    new_passphrase: String,
+    revision: String,
+    confirmed: bool,
+}
+
+async fn rotate_password(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+    let request: Rotation = match read_request(&headers, &body) {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
+    if !request.confirmed || request.new_passphrase.chars().count() < 12
+        || request.new_passphrase.len() > 4096 || request.new_passphrase == request.passphrase
+    {
+        return error(StatusCode::BAD_REQUEST, "Подтвердите замену и введите новый пароль длиной от 12 символов (до 4096 байт).");
+    }
+    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    if let Some(left) = state.panel_limiter.locked(ip) {
+        return too_many_attempts(left);
+    }
+    let wrong_credentials = || match state.panel_limiter.fail(ip) {
+        Some(lockout) => too_many_attempts(lockout),
+        None => error(StatusCode::UNAUTHORIZED, "Неверный токен или текущий пароль шифрования"),
+    };
+    if !crate::authorized(&headers, &state) {
+        return wrong_credentials();
+    }
+    let working = state.clone();
+    match tokio::task::spawn_blocking(move || rotate(&working, &request)).await {
+        Ok(Ok(revision)) => {
+            state.panel_limiter.succeed(ip);
+            Json(json!({"revision": revision})).into_response()
+        }
+        Ok(Err("passphrase")) => wrong_credentials(),
+        Ok(Err("revision")) => error(StatusCode::CONFLICT, "Снимок изменился. Обновите панель и повторите."),
+        Ok(Err("missing")) => error(StatusCode::NOT_FOUND, "На сервере ещё нет снимка"),
+        Ok(Err("format" | "log")) => error(StatusCode::UNPROCESSABLE_ENTITY, "Снимок или журнал нельзя расшифровать текущим паролем. Данные не изменены."),
+        _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось завершить смену пароля. Проверьте снимок перед повтором."),
+    }
+}
+
+fn rotate(state: &Shared, request: &Rotation) -> Result<String, &'static str> {
+    use crate::{active_config, durable_replace, logs_dir, sync_directory, ACTIVE_STORAGE, GENERATION_PREFIX};
+    let _guard = state.write_lock.lock().map_err(|_| "storage")?;
+    let cfg = active_config(&state.cfg).map_err(|_| "storage")?;
+    let original = current(&cfg).map_err(|_| "storage")?.ok_or("missing")?;
+    if crate::digest(&original) != request.revision {
+        return Err("revision");
+    }
+    let snapshot = reencrypt(&original, request, cfg.limit)?;
+    let stage = tempfile::Builder::new().prefix(GENERATION_PREFIX)
+        .tempdir_in(&state.cfg.dir).map_err(|_| "storage")?;
+    durable_replace(stage.path(), &stage.path().join("snapshot.bin"), &snapshot).map_err(|_| "storage")?;
+    let mut replaced_files = vec![snapshot_path(&cfg)];
+    let source_logs = logs_dir(&cfg);
+    if source_logs.is_dir() {
+        let dest = stage.path().join("logs");
+        fs::create_dir(&dest).map_err(|_| "storage")?;
+        for entry in fs::read_dir(&source_logs).map_err(|_| "storage")? {
+            let entry = entry.map_err(|_| "storage")?;
+            if !crate::valid_log_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let blob = fs::read(entry.path()).map_err(|_| "storage")?;
+            let encrypted = reencrypt(&blob, request, cfg.limit).map_err(|_| "log")?;
+            let path = dest.join(entry.file_name());
+            durable_replace(&dest, &path, &encrypted).map_err(|_| "storage")?;
+            preserve_modified(&entry, path).map_err(|_| "storage")?;
+            replaced_files.push(entry.path());
+        }
+        sync_directory(&dest).map_err(|_| "storage")?;
+    }
+    let old_revisions = cfg.dir.join("revisions");
+    if old_revisions.is_dir() {
+        let dest = stage.path().join("revisions");
+        fs::create_dir(&dest).map_err(|_| "storage")?;
+        for entry in fs::read_dir(old_revisions).map_err(|_| "storage")? {
+            let entry = entry.map_err(|_| "storage")?;
+            if entry.path().extension().is_some_and(|ext| ext == "snapshot") {
+                let path = dest.join(entry.file_name());
+                fs::copy(entry.path(), &path).map_err(|_| "storage")?;
+                preserve_modified(&entry, path).map_err(|_| "storage")?;
+            }
+        }
+        sync_directory(&dest).map_err(|_| "storage")?;
+    }
+    sync_directory(stage.path()).map_err(|_| "storage")?;
+    sync_directory(&state.cfg.dir).map_err(|_| "storage")?;
+    let staged = stage.keep();
+    let name = staged.file_name().and_then(|name| name.to_str()).ok_or("storage")?;
+    durable_replace(&state.cfg.dir, &state.cfg.dir.join(ACTIVE_STORAGE), name.as_bytes()).map_err(|_| "storage")?;
+    for file in replaced_files {
+        if fs::remove_file(&file).is_err() {
+            eprintln!("Could not remove superseded encrypted data after password rotation");
+        }
+    }
+    if source_logs.is_dir() {
+        let _ = sync_directory(&source_logs);
+    }
+    let _ = sync_directory(&cfg.dir);
+    Ok(crate::digest(&snapshot))
+}
+
+fn preserve_modified(entry: &fs::DirEntry, path: std::path::PathBuf) -> std::io::Result<()> {
+    let file = fs::File::options().write(true).open(path)?;
+    file.set_times(fs::FileTimes::new().set_modified(entry.metadata()?.modified()?))?;
+    file.sync_all()
+}
+
+fn reencrypt(data: &[u8], request: &Rotation, limit: usize) -> Result<Vec<u8>, &'static str> {
+    let snapshot = open_envelope(data, &request.passphrase)?;
+    let mut salt = [0; 16];
+    let mut iv = [0; 12];
+    getrandom::getrandom(&mut salt).map_err(|_| "storage")?;
+    getrandom::getrandom(&mut iv).map_err(|_| "storage")?;
+    let mut key = [0; 32];
+    let params = scrypt::Params::new(14, 8, 1, 32).map_err(|_| "storage")?;
+    scrypt::scrypt(request.new_passphrase.as_bytes(), &salt, &params, &mut key).map_err(|_| "storage")?;
+    let cipher = Aes256Gcm::new_from_slice(&key).map_err(|_| "storage")?;
+    let plain = serde_json::to_vec(&snapshot).map_err(|_| "storage")?;
+    let mut ciphertext = cipher.encrypt(Nonce::from_slice(&iv), plain.as_slice()).map_err(|_| "storage")?;
+    let tag = ciphertext.split_off(ciphertext.len() - 16);
+    let envelope = serde_json::to_vec(&json!({
+        "version": ENVELOPE_VERSION, "salt": STANDARD.encode(salt), "iv": STANDARD.encode(iv),
+        "ciphertext": STANDARD.encode(ciphertext), "tag": STANDARD.encode(tag),
+    })).map_err(|_| "storage")?;
+    if envelope.len() > limit {
+        return Err("storage");
+    }
+    Ok(envelope)
 }
 
 impl AuthLimiter {

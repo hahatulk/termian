@@ -1,6 +1,7 @@
 pub mod assets;
 pub mod cloud;
 pub mod dialog;
+pub mod privacy;
 pub mod file_access;
 pub mod host_editor;
 pub mod host_settings;
