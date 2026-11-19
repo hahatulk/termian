@@ -96,12 +96,12 @@ jobs:
         if: matrix.platform == 'mac-arm64'
         shell: bash
         env:
-          APPLE_SIGNING_IDENTITY: .event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
-          APPLE_CERTIFICATE: .event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
-          APPLE_CERTIFICATE_PASSWORD: .event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-          APPLE_ID: .event_name != 'pull_request' && secrets.APPLE_ID || '' }}
-          APPLE_PASSWORD: .event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
-          APPLE_TEAM_ID: .event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event_name != 'pull_request' && secrets.APPLE_SIGNING_IDENTITY || '' }}
+          APPLE_CERTIFICATE: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE || '' }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
+          APPLE_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ github.event_name != 'pull_request' && secrets.APPLE_TEAM_ID || '' }}
         run: |
           set -euo pipefail
           if [[ -n "$APPLE_SIGNING_IDENTITY" && "$APPLE_SIGNING_IDENTITY" != '-' ]]; then
@@ -110,9 +110,12 @@ jobs:
             done
             scratch="$(mktemp -d)"
             export APPLE_KEYCHAIN="$scratch/termian.keychain-db"
-            trap 'security delete-keychain "$APPLE_KEYCHAIN" || true; rm -rf "$scratch"' EXIT
+            trap 'if [[ -f "$APPLE_KEYCHAIN" ]]; then security delete-keychain "$APPLE_KEYCHAIN" || true; fi; rm -rf "$scratch"' EXIT
+            if ! printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$scratch/cert.p12" || [[ ! -s "$scratch/cert.p12" ]]; then
+              echo '::error::APPLE_CERTIFICATE must contain a Base64-encoded PKCS#12 certificate.'
+              exit 1
+            fi
             keychain_password="$(openssl rand -hex 32)"
-            printf '%s' "$APPLE_CERTIFICATE" | base64 -D > "$scratch/cert.p12"
             security create-keychain -p "$keychain_password" "$APPLE_KEYCHAIN"
             security set-keychain-settings -lut 21600 "$APPLE_KEYCHAIN"
             security unlock-keychain -p "$keychain_password" "$APPLE_KEYCHAIN"

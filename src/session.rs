@@ -514,6 +514,7 @@ pub(crate) struct Verifier {
     /// The server's version line, recorded once a channel opens.
     server_id: Arc<std::sync::Mutex<Option<String>>>,
     /// «Agent Forwarding»: agent channels the server opens go to `SSH_AUTH_SOCK`.
+    #[cfg(unix)]
     agent: bool,
 }
 
@@ -557,9 +558,8 @@ impl client::Handler for Verifier {
     }
 
     async fn server_channel_open_agent_forward(&mut self, channel: russh::Channel<client::Msg>, reply: client::ChannelOpenHandle, _: &mut client::Session) -> Result<(), Self::Error> {
-        let socket = std::env::var_os("SSH_AUTH_SOCK").filter(|_| self.agent);
         #[cfg(unix)]
-        if let Some(socket) = socket {
+        if let Some(socket) = std::env::var_os("SSH_AUTH_SOCK").filter(|_| self.agent) {
             reply.accept().await;
             tokio::spawn(async move {
                 if let Ok(mut local) = tokio::net::UnixStream::connect(socket).await {
@@ -570,7 +570,8 @@ impl client::Handler for Verifier {
             return Ok(());
         }
         // Without a local agent (or on Windows, where it is a named pipe) the request is refused.
-        let _ = socket;
+        #[cfg(not(unix))]
+        let _ = channel;
         reply.reject(russh::ChannelOpenFailure::AdministrativelyProhibited).await;
         Ok(())
     }
@@ -851,7 +852,16 @@ async fn open(
     }
 
     let config = target.options.config();
-    let verifier = Verifier { host: target.host.clone(), port: target.port, known_hosts: target.known_hosts.clone(), io: io.clone(), forward_to, server_id, agent: target.options.agent_forwarding };
+    let verifier = Verifier {
+        host: target.host.clone(),
+        port: target.port,
+        known_hosts: target.known_hosts.clone(),
+        io: io.clone(),
+        forward_to,
+        server_id,
+        #[cfg(unix)]
+        agent: target.options.agent_forwarding,
+    };
     let mut handle = client::connect_stream(Arc::new(config), stream, verifier).await.map_err(|error| match error {
         russh::Error::UnknownKey => "Host key verification failed.".to_string(),
         other => format!("SSH handshake failed: {other}"),
@@ -1131,6 +1141,7 @@ pub(crate) mod tests {
         let _ = rx.await;
     }
 
+    #[cfg(unix)]
     #[test]
     fn local_command_output_reaches_the_terminal() {
         let mut command = portable_pty::CommandBuilder::new("/bin/sh");
@@ -1143,6 +1154,7 @@ pub(crate) mod tests {
 
     pub(crate) mod server {
         use super::*;
+        use std::io::{Read, Seek, SeekFrom, Write};
         use russh::keys::ssh_key::private::Ed25519Keypair;
         use russh::keys::PrivateKey;
         use russh::server::{self, Auth, Msg, Session as ServerSession};
@@ -1244,9 +1256,10 @@ pub(crate) mod tests {
             }
 
             async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, StatusCode> {
-                use std::os::unix::fs::FileExt;
                 let mut data = vec![0; len as usize];
-                let read = self.file(&handle)?.read_at(&mut data, offset).map_err(failed)?;
+                let file = self.file(&handle)?;
+                file.seek(SeekFrom::Start(offset)).map_err(failed)?;
+                let read = file.read(&mut data).map_err(failed)?;
                 if read == 0 {
                     return Err(StatusCode::Eof);
                 }
@@ -1255,8 +1268,9 @@ pub(crate) mod tests {
             }
 
             async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, StatusCode> {
-                use std::os::unix::fs::FileExt;
-                self.file(&handle)?.write_all_at(&data, offset).map_err(failed)?;
+                let file = self.file(&handle)?;
+                file.seek(SeekFrom::Start(offset)).map_err(failed)?;
+                file.write_all(&data).map_err(failed)?;
                 Ok(ok(id))
             }
 
@@ -1266,9 +1280,17 @@ pub(crate) mod tests {
             }
 
             async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, StatusCode> {
-                use std::os::unix::fs::PermissionsExt;
+                #[cfg(unix)]
                 if let Some(mode) = attrs.permissions {
+                    use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(self.local(&path), std::fs::Permissions::from_mode(mode & 0o7777)).map_err(failed)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = path;
+                    if attrs.permissions.is_some() {
+                        return Err(StatusCode::OpUnsupported);
+                    }
                 }
                 Ok(ok(id))
             }

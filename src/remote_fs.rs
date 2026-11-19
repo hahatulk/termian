@@ -517,6 +517,7 @@ mod tests {
             Operation::Rename { from: "/notes.txt".into(), to: "/todo.txt".into() },
             Operation::MakeDir("/new".into()),
             Operation::Remove { path: "/logs".into(), is_dir: true },
+            #[cfg(unix)]
             Operation::Chmod { path: "/todo.txt".into(), mode: 0o640 },
         ]);
         assert_eq!(next(&mut events), RemoteEvent::Changed(Ok(())));
