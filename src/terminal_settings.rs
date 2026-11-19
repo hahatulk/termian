@@ -417,6 +417,7 @@ pub struct FontFace {
 
 const SAUCE: &str = "SauceCodePro Nerd Font Mono";
 const OPERATOR: &str = "Operator Mono";
+const OPERATOR_BOLD_WEIGHT: u16 = if cfg!(windows) { 700 } else { 400 };
 const FIRA_MONO: &str = "FiraMono Nerd Font Mono";
 
 macro_rules! terminal_fonts {
@@ -428,8 +429,8 @@ macro_rules! terminal_fonts {
 pub const FONT_FACES: [FontFace; 17] = [
     FontFace { label: "Source Code Pro", regular: (SAUCE, 400), bold: (SAUCE, 700), files: terminal_fonts!["SauceCodeProNerdFontMono-Regular-a075caa1.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
     FontFace { label: "Source Code Pro Medium", regular: (SAUCE, 500), bold: (SAUCE, 700), files: terminal_fonts!["SauceCodeProNerdFontMono-Medium-cc62f20a.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
-    FontFace { label: "Operator Mono Book", regular: (OPERATOR, 325), bold: (OPERATOR, 400), files: terminal_fonts!["OperatorMono-Book-8b7c2d70.otf", "OperatorMono-Bold-9efd8643.otf"] },
-    FontFace { label: "Operator Mono Medium", regular: (OPERATOR, 350), bold: (OPERATOR, 400), files: terminal_fonts!["OperatorMono-Medium-67ac1792.otf", "OperatorMono-Bold-9efd8643.otf"] },
+    FontFace { label: "Operator Mono Book", regular: (OPERATOR, 325), bold: (OPERATOR, OPERATOR_BOLD_WEIGHT), files: terminal_fonts!["OperatorMono-Book-8b7c2d70.otf", "OperatorMono-Bold-9efd8643.otf"] },
+    FontFace { label: "Operator Mono Medium", regular: (OPERATOR, 350), bold: (OPERATOR, OPERATOR_BOLD_WEIGHT), files: terminal_fonts!["OperatorMono-Medium-67ac1792.otf", "OperatorMono-Bold-9efd8643.otf"] },
     FontFace { label: "Fira Mono", regular: (FIRA_MONO, 400), bold: (FIRA_MONO, 700), files: terminal_fonts!["FiraMonoNerdFontMono-Regular-8f953740.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
     FontFace { label: "Fira Mono Medium", regular: (FIRA_MONO, 500), bold: (FIRA_MONO, 700), files: terminal_fonts!["FiraMonoNerdFontMono-Medium-0aa28652.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
     FontFace { label: "Inconsolata-g", regular: ("Inconsolata Nerd Font Mono", 400), bold: ("Inconsolata Nerd Font Mono", 700), files: terminal_fonts!["InconsolataNerdFontMono-Regular-8e959977.ttf", "InconsolataNerdFontMono-Bold-ef7f1722.ttf"] },
