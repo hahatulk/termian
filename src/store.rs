@@ -225,6 +225,7 @@ impl Store {
         temporary
             .persist(&self.path)
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
+        #[cfg(unix)]
         if verify {
             std::fs::File::open(dir)
                 .and_then(|file| file.sync_all())
