@@ -69,7 +69,7 @@ fn kind_label(kind: &str) -> &'static str {
 }
 
 /// `number:5` / `string:abc`, the legacy id token.
-fn token(id: &Value) -> String {
+pub(crate) fn token(id: &Value) -> String {
     match id {
         Value::String(s) => format!("string:{s}"),
         Value::Number(n) => format!("number:{n}"),
@@ -86,7 +86,7 @@ fn key_of(kind: &str, id: &Value) -> String {
 }
 
 /// Replaces the record's own local_id and every reference with `id_of`.
-fn map_ids(value: &Value, kind: &str, id_of: &mut dyn FnMut(&str, &Value) -> Value) -> Value {
+pub(crate) fn map_ids(value: &Value, kind: &str, id_of: &mut dyn FnMut(&str, &Value) -> Value) -> Value {
     fn walk(item: &Value, item_kind: Option<&str>, id_of: &mut dyn FnMut(&str, &Value) -> Value) -> Value {
         match item {
             Value::Array(items) => Value::Array(items.iter().map(|child| walk(child, None, id_of)).collect()),
@@ -575,20 +575,20 @@ pub fn server_key(url: &str) -> String {
 pub trait Device {
     fn export(&mut self) -> Result<Value, String>;
     /// Replaces the portable data; returns `[sync ID, new local_id]` pairs per collection.
-    fn import(&mut self, snapshot: &Value) -> Result<Value, String>;
+    fn import(&mut self, snapshot: &Value, ids: &Ids) -> Result<Value, String>;
     /// Encrypted copy of the local data, taken before an import replaces it.
     fn backup(&mut self, snapshot: &Value) -> Result<(), String>;
 }
 
 /// The server side: fetch the decrypted snapshot, upload a new one.
 pub trait Server {
-    fn fetch(&self) -> Result<Option<Remote>, String>;
+    fn fetch_for_sync(&self) -> Result<(Option<Remote>, bool), String>;
     fn upload(&self, snapshot: &Value, condition: Condition) -> Result<Option<String>, String>;
 }
 
 impl Server for crate::cloud::Cloud {
-    fn fetch(&self) -> Result<Option<Remote>, String> {
-        crate::cloud::Cloud::fetch(self)
+    fn fetch_for_sync(&self) -> Result<(Option<Remote>, bool), String> {
+        crate::cloud::Cloud::fetch_for_sync(self)
     }
 
     fn upload(&self, snapshot: &Value, condition: Condition) -> Result<Option<String>, String> {
@@ -611,7 +611,7 @@ pub struct Outcome {
 pub fn sync_once(saved: Option<State>, server_id: &str, prefer: Option<Prefer>, device: &mut dyn Device, server: &dyn Server, now: &str) -> Result<Outcome, String> {
     let saved = saved.filter(|s| s.server == server_id);
     let mut ids = saved.as_ref().map(|s| s.ids.clone()).unwrap_or_default();
-    let fetched = server.fetch()?;
+    let (fetched, can_create) = server.fetch_for_sync()?;
     let remote = match &fetched {
         Some(found) => Some(validate_snapshot(&found.snapshot)?),
         None => None,
@@ -630,22 +630,30 @@ pub fn sync_once(saved: Option<State>, server_id: &str, prefer: Option<Prefer>, 
         let state = saved.map(|s| State { ids, ..s });
         return Ok(Outcome { conflicts: merged.conflicts, state, uploaded: false, imported: false, from_local: merged.from_local, from_remote: merged.from_remote });
     }
-    let mut cloud = remote.clone();
-    if merged.upload_needed {
-        let upload = validate_snapshot(&merged.remote)?;
+    let outgoing = if merged.upload_needed {
         let condition = match (&fetched, &remote) {
             (Some(Remote { revision: Some(revision), .. }), Some(_)) => Condition::Revision(revision.clone()),
-            (_, None) => Condition::Create,
-            _ => Condition::Any,
+            (_, None) if can_create => Condition::Create,
+            (_, None) => return Err("Сервер не подтвердил безопасное создание снимка.".into()),
+            _ => return Err("Сервер не вернул ревизию снимка. Запись отменена.".into()),
         };
-        server.upload(&upload, condition)?;
-        cloud = Some(upload);
-    }
-    let mut settled_local = local;
-    if merged.import_needed {
+        Some((validate_snapshot(&merged.remote)?, condition))
+    } else {
+        None
+    };
+    let incoming = merged.import_needed.then(|| validate_snapshot(&merged.local)).transpose()?;
+    if incoming.is_some() {
         device.backup(&exported)?;
-        let incoming = validate_snapshot(&merged.local)?;
-        let pairs = device.import(&incoming)?;
+    }
+    let cloud = if let Some((upload, condition)) = outgoing {
+        server.upload(&upload, condition)?;
+        Some(upload)
+    } else {
+        remote
+    };
+    let mut settled_local = local;
+    if let Some(incoming) = incoming {
+        let pairs = device.import(&incoming, &ids)?;
         ids = ids_from_import(&pairs);
         let exported = device.export()?;
         match_ids(&exported, Some(&incoming), &mut ids);
@@ -913,7 +921,7 @@ mod tests {
         fn export(&mut self) -> Result<Value, String> {
             validate_snapshot(&self.data)
         }
-        fn import(&mut self, snapshot: &Value) -> Result<Value, String> {
+        fn import(&mut self, snapshot: &Value, _: &Ids) -> Result<Value, String> {
             let mut pairs = json!({});
             let mut table = Ids::new();
             for kind in KINDS {
@@ -944,8 +952,8 @@ mod tests {
     }
 
     impl Server for TestServer {
-        fn fetch(&self) -> Result<Option<Remote>, String> {
-            Ok(self.snapshot.borrow().clone().map(|snapshot| Remote { snapshot, revision: Some(format!("r{}", self.revision.borrow())) }))
+        fn fetch_for_sync(&self) -> Result<(Option<Remote>, bool), String> {
+            Ok((self.snapshot.borrow().clone().map(|snapshot| Remote { snapshot, revision: Some(format!("r{}", self.revision.borrow())) }), true))
         }
         fn upload(&self, snapshot: &Value, condition: Condition) -> Result<Option<String>, String> {
             if self.race {

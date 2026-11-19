@@ -15,6 +15,8 @@ const ENVELOPE_VERSION: u32 = 1;
 pub const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PLAINTEXT_BYTES: usize = 47 * 1024 * 1024;
 const MAX_SECRET_LENGTH: usize = 4096;
+const CONDITIONAL_CREATE: &str = "x-termian-conditional-create";
+const LOG_GENERATION: &str = "x-termian-key-generation";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub const WRONG_PASSPHRASE: &str = "Не удалось расшифровать снимок: неверный пароль шифрования";
@@ -233,12 +235,20 @@ fn status_error(context: &str, code: u16, retry_after: Option<&str>) -> String {
     }
 }
 
+fn strong_etag(response: &ureq::Response) -> Option<String> {
+    let value = response.header("etag")?;
+    let opaque = value.strip_prefix('"')?.strip_suffix('"')?;
+    opaque.bytes().all(|b| b == b'!' || (b'#'..=b'~').contains(&b)).then(|| value.to_owned())
+}
+
 impl Cloud {
     fn request(&self, method: &str) -> ureq::Request {
-        self.authorize(ureq::request(method, self.endpoint.as_str()).timeout(REQUEST_TIMEOUT))
+        self.request_to(method, &self.endpoint)
     }
 
-    fn authorize(&self, request: ureq::Request) -> ureq::Request {
+    fn request_to(&self, method: &str, endpoint: &url::Url) -> ureq::Request {
+        let request = ureq::AgentBuilder::new().redirects(0).build()
+            .request(method, endpoint.as_str()).timeout(REQUEST_TIMEOUT);
         // With Basic auth the proxy owns Authorization; the token moves to X-Termian-Token.
         match &self.basic {
             Some(basic) => request.set("authorization", &format!("Basic {basic}")).set("x-termian-token", &self.token),
@@ -246,7 +256,7 @@ impl Cloud {
         }
     }
 
-    fn call(&self, method: &str, body: Option<Vec<u8>>, condition: &Condition) -> Result<Option<(Vec<u8>, Option<String>)>, String> {
+    fn call(&self, method: &str, body: Option<Vec<u8>>, condition: &Condition) -> Result<ureq::Response, String> {
         let mut request = self.request(method);
         request = match condition {
             Condition::Any => request,
@@ -257,34 +267,55 @@ impl Cloud {
             Some(body) => request.set("content-type", "application/octet-stream").send_bytes(&body),
             None => request.call(),
         };
-        let response = match response {
-            Ok(response) => response,
-            Err(ureq::Error::Status(404, _)) if method != "PUT" => return Ok(None),
-            Err(ureq::Error::Status(412, _)) => return Err(format!("{REVISION_CHANGED} (HTTP 412)")),
-            Err(ureq::Error::Status(code, response)) => {
+        match response {
+            Ok(response) if (200..300).contains(&response.status()) || (method != "PUT" && response.status() == 404) => Ok(response),
+            Err(ureq::Error::Status(404, response)) if method != "PUT" => Ok(response),
+            Err(ureq::Error::Status(412, _)) => Err(format!("{REVISION_CHANGED} (HTTP 412)")),
+            other => {
+                let response = match other {
+                    Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+                    Err(error) => return Err(error.to_string()),
+                };
                 let context = if method == "PUT" { "Отправка в облако" } else { "Загрузка из облака" };
-                return Err(status_error(context, code, response.header("retry-after")));
+                Err(status_error(context, response.status(), response.header("retry-after")))
             }
-            Err(error) => return Err(error.to_string()),
-        };
-        let revision = response.header("etag").map(str::to_owned);
-        let mut bytes = Vec::new();
-        response.into_reader().take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-        if bytes.len() > MAX_BYTES {
+        }
+    }
+
+    pub fn probe(&self) -> Result<Option<String>, String> {
+        let response = self.call("HEAD", None, &Condition::Any)?;
+        Ok((response.status() != 404).then(|| strong_etag(&response).unwrap_or_default()))
+    }
+
+    pub fn fetch(&self) -> Result<Option<Remote>, String> {
+        self.fetch_with_headers().map(|(remote, _, _)| remote)
+    }
+
+    pub(crate) fn fetch_for_sync(&self) -> Result<(Option<Remote>, bool), String> {
+        self.fetch_with_headers().map(|(remote, can_create, _)| (remote, can_create))
+    }
+
+    fn fetch_with_headers(&self) -> Result<(Option<Remote>, bool, Option<String>), String> {
+        let response = self.call("GET", None, &Condition::Any)?;
+        let generation = response.header(LOG_GENERATION).map(str::to_owned);
+        if response.status() == 404 {
+            return Ok((None, response.header(CONDITIONAL_CREATE) == Some("v1"), generation));
+        }
+        let revision = strong_etag(&response);
+        let mut body = Vec::new();
+        response.into_reader().take(MAX_BYTES as u64 + 1).read_to_end(&mut body).map_err(|e| e.to_string())?;
+        if body.len() > MAX_BYTES {
             return Err("response exceeds 64 MiB".into());
         }
-        Ok(Some((bytes, revision)))
+        Ok((Some(Remote { snapshot: open(&body, &self.passphrase)?, revision }), false, generation))
     }
 
-    /// Whether a snapshot exists, and its revision, without downloading it.
-    pub fn probe(&self) -> Result<Option<String>, String> {
-        Ok(self.call("HEAD", None, &Condition::Any)?.map(|(_, revision)| revision.unwrap_or_default()))
+    pub(crate) fn log_generation(&self) -> Result<String, String> {
+        self.fetch_with_headers()?.2.ok_or_else(|| "Сервер не поддерживает проверку пароля при отправке журналов. Обновите сервер.".into())
     }
 
-    /// The decrypted snapshot, or `None` when the server has none yet.
-    pub fn fetch(&self) -> Result<Option<Remote>, String> {
-        let Some((body, revision)) = self.call("GET", None, &Condition::Any)? else { return Ok(None) };
-        Ok(Some(Remote { snapshot: open(&body, &self.passphrase)?, revision }))
+    pub(crate) fn storage_key(&self) -> String {
+        crate::sync::server_key(self.endpoint.as_str())
     }
 
     /// `DELETE /v1/logs?since=` (Unix ms, 0 = all): the cloud copies of session logs.
@@ -293,12 +324,13 @@ impl Cloud {
         let path = endpoint.path().trim_end_matches("/snapshot").to_owned();
         endpoint.set_path(&format!("{path}/logs"));
         endpoint.set_query(Some(&format!("since={since}")));
-        match self.authorize(ureq::request("DELETE", endpoint.as_str()).timeout(REQUEST_TIMEOUT)).call() {
-            Ok(response) => {
+        match self.request_to("DELETE", &endpoint).call() {
+            Ok(response) if (200..300).contains(&response.status()) => {
                 let body: Value = response.into_string().ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
                 Ok(LogsRemoved::Removed(body["removed"].as_u64().unwrap_or(0)))
             }
             Err(ureq::Error::Status(404 | 405, _)) => Ok(LogsRemoved::Unsupported),
+            Ok(response) => Err(status_error("Очистка логов в облаке", response.status(), None)),
             Err(ureq::Error::Status(code, response)) => Err(status_error("Очистка логов в облаке", code, response.header("retry-after"))),
             Err(error) => Err(error.to_string()),
         }
@@ -314,12 +346,13 @@ impl Cloud {
 
     /// Stores a session log backup sealed like a snapshot. `Ok(false)`: the
     /// server is older than the logs API (404/405).
-    pub fn put_log(&self, name: &str, payload: &Value) -> Result<bool, String> {
+    pub(crate) fn put_log(&self, name: &str, payload: &Value, generation: &str) -> Result<bool, String> {
         let body = seal(payload, &self.passphrase)?;
-        let request = self.authorize(ureq::request("PUT", self.log_endpoint(name).as_str()).timeout(REQUEST_TIMEOUT));
+        let request = self.request_to("PUT", &self.log_endpoint(name)).set(LOG_GENERATION, generation);
         match request.set("content-type", "application/octet-stream").send_bytes(&body) {
-            Ok(_) => Ok(true),
+            Ok(response) if (200..300).contains(&response.status()) => Ok(true),
             Err(ureq::Error::Status(404 | 405, _)) => Ok(false),
+            Ok(response) => Err(status_error("Отправка лога сессии", response.status(), None)),
             Err(ureq::Error::Status(code, response)) => Err(status_error("Отправка лога сессии", code, response.header("retry-after"))),
             Err(error) => Err(error.to_string()),
         }
@@ -327,9 +360,10 @@ impl Cloud {
 
     /// The decrypted log backup, or `None` when the cloud has none.
     pub fn get_log(&self, name: &str) -> Result<Option<Value>, String> {
-        let response = match self.authorize(ureq::request("GET", self.log_endpoint(name).as_str()).timeout(REQUEST_TIMEOUT)).call() {
-            Ok(response) => response,
+        let response = match self.request_to("GET", &self.log_endpoint(name)).call() {
+            Ok(response) if (200..300).contains(&response.status()) => response,
             Err(ureq::Error::Status(404 | 405, _)) => return Ok(None),
+            Ok(response) => return Err(status_error("Загрузка лога сессии", response.status(), None)),
             Err(ureq::Error::Status(code, response)) => return Err(status_error("Загрузка лога сессии", code, response.header("retry-after"))),
             Err(error) => return Err(error.to_string()),
         };
@@ -341,7 +375,7 @@ impl Cloud {
     /// Seals and stores a snapshot; returns the new revision.
     pub fn upload(&self, snapshot: &Value, condition: Condition) -> Result<Option<String>, String> {
         let body = seal(snapshot, &self.passphrase)?;
-        Ok(self.call("PUT", Some(body), &condition)?.and_then(|(_, revision)| revision))
+        Ok(strong_etag(&self.call("PUT", Some(body), &condition)?))
     }
 }
 
@@ -473,7 +507,7 @@ pub(crate) mod tests {
                 let mut out = stream;
                 let tag = tag.map(|t| format!("ETag: {t}\r\n")).unwrap_or_default();
                 let length = if method == "HEAD" { 0 } else { reply.len() };
-                let _ = write!(out, "HTTP/1.1 {status}\r\n{tag}Content-Length: {length}\r\nConnection: close\r\n\r\n");
+                let _ = write!(out, "HTTP/1.1 {status}\r\n{tag}X-Termian-Conditional-Create: v1\r\nX-Termian-Key-Generation: initial\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n");
                 let _ = out.write_all(&reply);
             }
         });

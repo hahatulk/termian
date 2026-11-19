@@ -498,21 +498,31 @@ impl Shell {
             let (vault, result) = task.await;
             let _ = this.update(cx, |shell, cx| {
                 shell.cloud.running = false;
+                let mut result = result;
+                if result.is_ok() {
+                    let mut candidate = shell.vault.clone();
+                    let applied = match &result {
+                        Ok(Report::Done(_)) => adopt(&mut candidate, &started, vault),
+                        Ok(Report::Conflicts(_)) if candidate.cloud == started.cloud => {
+                            candidate.sync_state = vault.sync_state;
+                            true
+                        }
+                        _ => false,
+                    };
+                    if !applied {
+                        result = Err("Конфигурация изменилась во время операции. Проверьте изменения и повторите.".into());
+                    } else if let Err(error) = shell.store.save(&candidate) {
+                        result = Err(format!("Не удалось сохранить результат операции в Vault: {error}"));
+                    } else {
+                        shell.vault = candidate;
+                    }
+                }
                 match &result {
                     Ok(Report::Done(_)) => {
-                        if adopt(&mut shell.vault, &started, vault) {
-                            shell.save_vault();
-                            shell.cloud.header.synced_at = Some(now());
-                            shell.cloud.header.set(Status::Checked(Preview::Synced));
-                        } else {
-                            // `running` is already off: compare again with the edit in place.
-                            shell.check_cloud(false, cx);
-                        }
+                        shell.cloud.header.synced_at = Some(now());
+                        shell.cloud.header.set(Status::Checked(Preview::Synced));
                     }
                     Ok(Report::Conflicts(conflicts)) => {
-                        // The saved merge state is kept so the choice can follow.
-                        shell.vault.sync_state = vault.sync_state;
-                        shell.save_vault();
                         shell.cloud.header.set(Status::Checked(Preview::Conflicts(conflicts.clone())));
                     }
                     Err(message) => {

@@ -35,8 +35,7 @@ pub struct Store {
     path: PathBuf,
     cipher: XSalsa20Poly1305,
     header: Vec<u8>,
-    #[cfg(target_os = "macos")]
-    lock: Option<std::fs::File>,
+    _lock: Option<std::fs::File>,
 }
 
 impl Store {
@@ -49,37 +48,40 @@ impl Store {
             path,
             cipher: XSalsa20Poly1305::new((&**key).into()),
             header,
-            #[cfg(target_os = "macos")]
-            lock: None,
+            _lock: None,
         }
     }
 
     pub fn load_default(
         import: impl FnOnce() -> Result<Vault, String>,
     ) -> Result<(Self, Vault), String> {
-        let dir = dirs::data_dir()
-            .ok_or("no data directory")?
-            .join("termian-native");
-        let path = dir.join("vault.bin");
+        #[cfg(not(any(target_os = "macos", windows)))]
+        {
+            let _ = import;
+            Err("Persistent vault storage is only supported on macOS and Windows.".into())
+        }
+        #[cfg(any(target_os = "macos", windows))]
+        {
+            let dir = dirs::data_dir()
+                .ok_or("no data directory")?
+                .join("termian-native");
+            let path = dir.join("vault.bin");
+            let lock = lock_vault(&dir)?;
+            Self::load_locked(path, lock, import)
+        }
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    fn load_locked(
+        path: PathBuf,
+        lock: std::fs::File,
+        import: impl FnOnce() -> Result<Vault, String>,
+    ) -> Result<(Self, Vault), String> {
         #[cfg(target_os = "macos")]
         {
-            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-            let lock = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(dir.join("vault.lock"))
-                .map_err(|e| e.to_string())?;
-            lock.try_lock().map_err(|e| match e {
-                std::fs::TryLockError::WouldBlock => {
-                    "Close the other Termian window before opening this vault.".into()
-                }
-                std::fs::TryLockError::Error(error) => error.to_string(),
-            })?;
             let (mut store, vault, migrated) =
                 Self::load_protected(path, &macos::SecureEnclave, read_legacy_key, import)?;
-            store.lock = Some(lock);
+            store._lock = Some(lock);
             if migrated {
                 match legacy_entry().and_then(|entry| entry.delete_credential()) {
                     Ok(()) | Err(keyring::Error::NoEntry) => {}
@@ -90,7 +92,7 @@ impl Store {
             }
             Ok((store, vault))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
         {
             let bytes = read_vault(&path)?;
             let key = match read_legacy_key() {
@@ -106,7 +108,8 @@ impl Store {
                 }
                 Err(error) => return Err(format!("vault key unavailable: {error}")),
             };
-            let store = Self::with_header(path, &key, MAGIC.to_vec());
+            let mut store = Self::with_header(path, &key, MAGIC.to_vec());
+            store._lock = Some(lock);
             let vault = store.load_or_import(import)?;
             Ok((store, vault))
         }
@@ -215,8 +218,8 @@ impl Store {
             .and_then(|_| temporary.write_all(&nonce))
             .and_then(|_| temporary.write_all(&sealed))
             .map_err(|e| e.to_string())?;
+        temporary.as_file().sync_all().map_err(|e| e.to_string())?;
         if verify {
-            temporary.as_file().sync_all().map_err(|e| e.to_string())?;
             let check = std::fs::read(temporary.path()).map_err(|e| e.to_string())?;
             if self.decrypt(&check)?.as_slice() != plain.as_slice() {
                 return Err("vault verification failed".into());
@@ -226,7 +229,7 @@ impl Store {
             .persist(&self.path)
             .map_err(|e| format!("{}: {e}", self.path.display()))?;
         #[cfg(unix)]
-        if verify {
+        {
             std::fs::File::open(dir)
                 .and_then(|file| file.sync_all())
                 .map_err(|e| e.to_string())?;
@@ -246,6 +249,19 @@ impl Store {
         self.save(&vault)?;
         Ok(vault)
     }
+}
+
+#[cfg(any(target_os = "macos", windows))]
+fn lock_vault(dir: &Path) -> Result<std::fs::File, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let lock = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true).truncate(false)
+        .open(dir.join("vault.lock")).map_err(|e| e.to_string())?;
+    lock.try_lock().map_err(|e| match e {
+        std::fs::TryLockError::WouldBlock => "Close the other Termian window before opening this vault.".into(),
+        std::fs::TryLockError::Error(error) => error.to_string(),
+    })?;
+    Ok(lock)
 }
 
 fn read_vault(path: &Path) -> Result<Option<Vec<u8>>, String> {
@@ -300,6 +316,16 @@ fn random_key() -> Result<Key, String> {
 mod tests {
     use super::*;
     use crate::vault::tests::host;
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn vault_lock_excludes_other_openers_until_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let guard = lock_vault(dir.path()).unwrap();
+        assert!(lock_vault(dir.path()).is_err());
+        drop(guard);
+        assert!(lock_vault(dir.path()).is_ok());
+    }
 
     struct TestProtection(bool);
 

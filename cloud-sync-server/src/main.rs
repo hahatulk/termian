@@ -25,6 +25,8 @@ use tower_http::limit::RequestBodyLimitLayer;
 
 const DEFAULT_LIMIT: usize = 64 * 1024 * 1024;
 const MAX_BACKUPS: usize = 10;
+const LOG_GENERATION_HEADER: &str = "x-termian-key-generation";
+const INITIAL_GENERATION: &str = "initial";
 const CONDITIONAL_CREATE_HEADER: &str = "x-termian-conditional-create";
 const DEFAULT_LOG_RETENTION_DAYS: u64 = 60;
 const LOG_RETENTION_CHECK: Duration = Duration::from_secs(6 * 60 * 60);
@@ -337,15 +339,24 @@ fn current(cfg: &Config) -> io::Result<Option<Vec<u8>>> {
     }
 }
 
+fn storage_generation<'a>(state: &AppState, cfg: &'a Config) -> &'a str {
+    if cfg.dir == state.cfg.dir {
+        INITIAL_GENERATION
+    } else {
+        cfg.dir.file_name().and_then(|name| name.to_str()).expect("validated storage generation")
+    }
+}
+
 async fn get_snapshot(State(state): State<Shared>) -> Response {
     let storage = state.clone();
-    match tokio::task::spawn_blocking(move || with_storage(&storage, current)).await {
-        Ok(Ok(Some(data))) => {
+    match tokio::task::spawn_blocking(move || with_storage(&storage, |cfg| Ok((current(cfg)?, storage_generation(&storage, cfg).to_owned())))).await {
+        Ok(Ok((Some(data), generation))) => {
             if let Ok(mut last) = state.last_download.lock() {
                 *last = Some(SystemTime::now());
             }
             let hash = digest(&data);
             let mut headers = HeaderMap::new();
+            headers.insert(LOG_GENERATION_HEADER, generation.parse().unwrap());
             headers.insert(header::ETAG, etag(&hash).parse().unwrap());
             headers.insert(
                 header::CONTENT_TYPE,
@@ -353,11 +364,12 @@ async fn get_snapshot(State(state): State<Shared>) -> Response {
             );
             (StatusCode::OK, headers, data).into_response()
         }
-        Ok(Ok(None)) => {
+        Ok(Ok((None, generation))) => {
             // Only upgraded servers advertise atomic If-None-Match creation.
             // Older servers ignore that request header; clients must fail
             // closed rather than risk replacing another client's snapshot.
             let mut headers = HeaderMap::new();
+            headers.insert(LOG_GENERATION_HEADER, generation.parse().unwrap());
             headers.insert(CONDITIONAL_CREATE_HEADER, "v1".parse().unwrap());
             (StatusCode::NOT_FOUND, headers, "snapshot not found\n").into_response()
         }
@@ -553,6 +565,7 @@ async fn get_log(State(state): State<Shared>, UrlPath(name): UrlPath<String>) ->
 async fn put_log(
     State(state): State<Shared>,
     UrlPath(name): UrlPath<String>,
+    headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
     if !valid_log_name(&name) {
@@ -562,14 +575,21 @@ async fn put_log(
         Ok(body) if body.len() <= state.cfg.limit => body,
         _ => return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large\n").into_response(),
     };
+    let supplied = headers.get(LOG_GENERATION_HEADER).cloned();
     let result = tokio::task::spawn_blocking(move || with_storage(&state, |cfg| {
+        let active = storage_generation(&state, cfg);
+        if !supplied.as_ref().map_or(active == INITIAL_GENERATION, |value| value.as_bytes() == active.as_bytes()) {
+            return Ok(false);
+        }
         let dir = logs_dir(cfg);
         fs::create_dir_all(&dir)?;
-        durable_replace(&dir, &dir.join(&name), &body)
+        durable_replace(&dir, &dir.join(&name), &body)?;
+        Ok(true)
     }))
     .await;
     match result {
-        Ok(Ok(())) => (StatusCode::OK, "stored\n").into_response(),
+        Ok(Ok(true)) => (StatusCode::OK, "stored\n").into_response(),
+        Ok(Ok(false)) => (StatusCode::PRECONDITION_FAILED, "key generation changed\n").into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "storage error\n").into_response(),
     }
 }
@@ -775,6 +795,17 @@ mod tests {
         let sync = make_app(restarted.clone());
         let downloaded = sync.clone().oneshot(request("GET", Body::empty())).await.unwrap();
         assert_eq!(downloaded.headers()[header::ETAG], etag(&new_revision));
+        let generation = downloaded.headers()[LOG_GENERATION_HEADER].clone();
+        for stale in [None, Some(header::HeaderValue::from_static(INITIAL_GENERATION))] {
+            let mut log = log_request("PUT", "old.log", Body::from(stored.clone()));
+            if let Some(header) = stale {
+                log.headers_mut().insert(LOG_GENERATION_HEADER, header);
+            }
+            assert_eq!(sync.clone().oneshot(log).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+        }
+        let mut log = log_request("PUT", "current.log", Body::from(stored));
+        log.headers_mut().insert(LOG_GENERATION_HEADER, generation);
+        assert_eq!(sync.clone().oneshot(log).await.unwrap().status(), StatusCode::OK);
         let bytes = downloaded.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(panel::open_envelope(&bytes, "new test password").unwrap(), snapshot);
         let mut stale_upload = request("PUT", Body::from(original));

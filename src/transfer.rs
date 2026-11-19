@@ -14,7 +14,7 @@ use russh_sftp::client::SftpSession;
 use russh_sftp::protocol::OpenFlags;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
-use crate::files::{format_size, join, list_local, Entry};
+use crate::files::{format_size, join, list_local, valid_entry_name, valid_local_name, Entry};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -45,7 +45,7 @@ pub struct Planned {
     pub item: Item,
     /// Name in the destination folder.
     pub target: String,
-    /// Delete what is already at the target first.
+    /// Replace the whole target after copying.
     pub replace: bool,
 }
 
@@ -220,6 +220,8 @@ pub enum TransferEvent {
     /// Waiting for a [`Control`] about this path.
     Failed { path: String, error: String },
     Finished,
+    Incomplete,
+    CommitFailed { error: String },
     Cancelled,
 }
 
@@ -297,10 +299,39 @@ impl Fs {
         }
     }
 
-    async fn exists(&self, path: &str) -> bool {
+    async fn kind(&self, path: &str) -> Result<Option<bool>, String> {
         match self {
-            Fs::Local => tokio::fs::symlink_metadata(path).await.is_ok(),
-            Fs::Remote(sftp) => sftp.symlink_metadata(path).await.is_ok(),
+            Fs::Local => match tokio::fs::symlink_metadata(path).await {
+                Ok(meta) => Ok(Some(meta.is_dir() && !meta.file_type().is_symlink()
+                    && !is_reparse_point(&meta))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(at(path, e)),
+            },
+            Fs::Remote(sftp) => match sftp.symlink_metadata(path).await {
+                Ok(meta) => Ok(Some(meta.is_dir() && !meta.is_symlink())),
+                Err(russh_sftp::client::error::Error::Status(status))
+                    if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => Ok(None),
+                Err(e) => Err(at(path, e)),
+            },
+        }
+    }
+
+    fn valid_name(&self, name: &str) -> bool {
+        match self {
+            Fs::Local => valid_local_name(name),
+            Fs::Remote(_) => valid_entry_name(name),
+        }
+    }
+
+    async fn stage(&self, dir: &str) -> Result<String, String> {
+        match self {
+            Fs::Local => tempfile::Builder::new().prefix(".termian-copy-").tempdir_in(dir)
+                .map(|dir| dir.keep().to_string_lossy().into_owned()).map_err(|e| at(dir, e)),
+            Fs::Remote(sftp) => {
+                let path = join(dir, &format!(".termian-copy-{}", uuid::Uuid::new_v4()));
+                sftp.create_dir(&path).await.map_err(|e| at(&path, e))?;
+                Ok(path)
+            }
         }
     }
 
@@ -354,10 +385,7 @@ impl Fs {
     }
 
     async fn is_dir(&self, path: &str) -> bool {
-        match self {
-            Fs::Local => tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir()),
-            Fs::Remote(sftp) => sftp.metadata(path).await.is_ok_and(|m| m.is_dir()),
-        }
+        self.kind(path).await == Ok(Some(true))
     }
 
     /// Deletes a file, link or whole folder. Links are removed, not followed.
@@ -365,7 +393,7 @@ impl Fs {
         match self {
             Fs::Local => {
                 let meta = tokio::fs::symlink_metadata(path).await.map_err(|e| at(path, e))?;
-                let removed = if meta.is_dir() { tokio::fs::remove_dir_all(path).await } else { tokio::fs::remove_file(path).await };
+                let removed = if meta.is_dir() || is_reparse_point(&meta) { tokio::fs::remove_dir_all(path).await } else { tokio::fs::remove_file(path).await };
                 removed.map_err(|e| at(path, e))
             }
             Fs::Remote(sftp) => {
@@ -416,6 +444,19 @@ impl Fs {
     }
 }
 
+fn is_reparse_point(meta: &std::fs::Metadata) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        meta.file_attributes() & 0x400 != 0
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = meta;
+        false
+    }
+}
+
 /// A file or folder of a transfer, relative to the copied item.
 struct Part {
     relative: String,
@@ -426,7 +467,7 @@ struct Part {
 
 /// Everything under the item, folders before their contents. Links to
 /// folders inside the tree are skipped so a link loop cannot recurse forever.
-async fn scan(fs: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part>, String> {
+async fn scan(fs: &Fs, target: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part>, String> {
     if !is_dir {
         let (size, mode) = fs.size(root).await?;
         return Ok(vec![Part { relative: String::new(), is_dir: false, size, mode }]);
@@ -435,7 +476,13 @@ async fn scan(fs: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part>, String> {
     let mut pending = vec![String::new()];
     while let Some(relative) = pending.pop() {
         let dir = if relative.is_empty() { root.to_owned() } else { join(root, &relative) };
+        if fs.kind(&dir).await? != Some(true) {
+            return Err(at(&dir, "source is not a regular directory"));
+        }
         for entry in fs.list(&dir).await? {
+            if !target.valid_name(&entry.name) {
+                return Err(at(&dir, "invalid destination file name"));
+            }
             if entry.is_dir && entry.is_link {
                 continue;
             }
@@ -537,6 +584,9 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
                 self.progress.bytes_done += read as u64;
                 self.report(false);
             }
+            if copied != size {
+                return Err(Stop::Error(at(from, "source size changed during the transfer")));
+            }
             writer.shutdown().await.map_err(|e| Stop::Error(format!("{to}: {e}")))
         }
         .await;
@@ -558,73 +608,142 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
     }
 }
 
-/// Runs one transfer to the end. Every outcome is reported through `emit`.
+async fn publish(target: &Fs, from: &str, to: &str, backup: &str, replace: bool) -> Result<(), String> {
+    let Some(is_dir) = target.kind(to).await? else {
+        return target.rename(from, to).await;
+    };
+    if !replace {
+        return Err(at(to, "destination appeared during the transfer"));
+    }
+    target.rename(to, backup).await?;
+    if let Err(error) = target.rename(from, to).await {
+        if let Err(rollback) = target.rename(backup, to).await {
+            return Err(format!("{error}; previous destination is at {backup}: {rollback}"));
+        }
+        return Err(error);
+    }
+    target.remove(backup, is_dir).await.map_err(|e| format!("Copied to {to}, but could not remove the backup at {backup}: {e}"))
+}
+
+async fn commit(target: &Fs, stage: &str, from: &str, to: &str, parts: &[Part], replace: bool) -> Result<(), String> {
+    let backup = join(stage, "previous");
+    if replace || !parts[0].is_dir || target.kind(to).await? != Some(true) {
+        return publish(target, from, to, &backup, replace).await;
+    }
+    for part in &parts[1..] {
+        let dst = join(to, &part.relative);
+        if part.is_dir {
+            target.make_dir(&dst).await?;
+        } else {
+            if target.kind(&dst).await? == Some(true) {
+                return Err(at(&dst, "cannot replace a directory with a file during merge"));
+            }
+            publish(target, &join(from, &part.relative), &dst, &backup, true).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, from: &str, to: &str, parts: &[Part], replace: bool) -> TransferEvent {
+    let staged = join(stage, "item");
+    for part in parts {
+        if run.cancelled() {
+            return TransferEvent::Cancelled;
+        }
+        let path = |root: &str| if part.relative.is_empty() { root.to_owned() } else { join(root, &part.relative) };
+        let (from, to) = (path(from), path(&staged));
+        let mut started = false;
+        loop {
+            let result = if part.is_dir { run.target.make_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.size, part.mode, &mut started).await };
+            let error = match result {
+                Ok(()) => break,
+                Err(Stop::Cancelled) => return TransferEvent::Cancelled,
+                Err(Stop::Error(error)) => error,
+            };
+            match run.decide(&from, error).await {
+                Control::Retry => continue,
+                Control::Skip | Control::SkipAll => return TransferEvent::Incomplete,
+                Control::Cancel => return TransferEvent::Cancelled,
+            }
+        }
+        if !part.is_dir {
+            run.progress.files_done += 1;
+            run.report(true);
+        }
+    }
+    if run.cancelled() {
+        return TransferEvent::Cancelled;
+    }
+    match commit(run.target, stage, &staged, to, parts, replace).await {
+        Ok(()) => TransferEvent::Finished,
+        Err(error) => TransferEvent::CommitFailed { error },
+    }
+}
+
 pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: UnboundedReceiver<Control>, emit: impl Fn(TransferEvent)) {
+    if !source.valid_name(&job.planned.item.name) || !target.valid_name(&job.planned.target) {
+        return emit(TransferEvent::CommitFailed { error: "Invalid transfer file name".into() });
+    }
     let from_root = join(&job.source_dir, &job.planned.item.name);
     let to_root = join(&job.destination_dir, &job.planned.target);
     let now = Instant::now();
     let mut run = Run { source: &source, target: &target, controls: &mut controls, emit: &emit, progress: Progress::default(), started: now, reported: now };
 
     let parts = loop {
-        match scan(&source, &from_root, job.planned.item.is_dir).await {
+        match scan(&source, &target, &from_root, job.planned.item.is_dir).await {
             Ok(parts) => break parts,
             Err(error) => match run.decide(&from_root, error).await {
                 Control::Retry => continue,
-                Control::Skip | Control::SkipAll => return emit(TransferEvent::Finished),
+                Control::Skip | Control::SkipAll => return emit(TransferEvent::Incomplete),
                 Control::Cancel => return emit(TransferEvent::Cancelled),
             },
         }
     };
+    if run.cancelled() {
+        return emit(TransferEvent::Cancelled);
+    }
     run.progress.files_total = parts.iter().filter(|p| !p.is_dir).count();
-    run.progress.bytes_total = parts.iter().map(|p| p.size).sum();
+    run.progress.bytes_total = parts.iter().fold(0u64, |total, part| total.saturating_add(part.size));
     run.report(true);
-
-    while job.planned.replace && target.exists(&to_root).await {
-        let Err(error) = target.remove(&to_root, job.planned.item.is_dir).await else { break };
-        match run.decide(&to_root, error).await {
-            Control::Retry => continue,
-            Control::Skip | Control::SkipAll => return emit(TransferEvent::Finished),
-            Control::Cancel => return emit(TransferEvent::Cancelled),
-        }
+    let stage = match target.stage(&job.destination_dir).await {
+        Ok(path) => path,
+        Err(error) => return emit(TransferEvent::CommitFailed { error }),
+    };
+    let end = copy_parts(&mut run, &stage, &from_root, &to_root, &parts, job.planned.replace).await;
+    if matches!(target.kind(&join(&stage, "previous")).await, Ok(None)) {
+        let _ = target.remove(&stage, true).await;
     }
-
-    let mut skip_all = false;
-    for part in parts {
-        let path = |root: &str| if part.relative.is_empty() { root.to_owned() } else { join(root, &part.relative) };
-        let (from, to) = (path(&from_root), path(&to_root));
-        let mut started = false;
-        loop {
-            let result = if part.is_dir { target.make_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.size, part.mode, &mut started).await };
-            let error = match result {
-                Ok(()) => break,
-                Err(Stop::Cancelled) => return emit(TransferEvent::Cancelled),
-                Err(Stop::Error(error)) => error,
-            };
-            if skip_all {
-                break;
-            }
-            match run.decide(&from, error).await {
-                Control::Retry => continue,
-                Control::Skip => break,
-                Control::SkipAll => {
-                    skip_all = true;
-                    break;
-                }
-                Control::Cancel => return emit(TransferEvent::Cancelled),
-            }
-        }
-        if !part.is_dir {
-            // Skipped files count as handled so the bar still reaches the end.
-            run.progress.files_done += 1;
-            run.report(true);
-        }
-    }
-    emit(TransferEvent::Finished);
+    emit(end);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelled_replacement_keeps_existing_destination() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        tokio::fs::write(source.path().join("config"), b"new").await.unwrap();
+        tokio::fs::write(target.path().join("config"), b"old").await.unwrap();
+        let job = Job {
+            direction: Direction::Download,
+            source_dir: source.path().to_str().unwrap().into(),
+            destination_dir: target.path().to_str().unwrap().into(),
+            planned: Planned { item: Item { name: "config".into(), is_dir: false }, target: "config".into(), replace: true },
+        };
+        let (control, controls) = futures::channel::mpsc::unbounded();
+        let last = std::cell::RefCell::new(None);
+        transfer(Fs::Local, Fs::Local, job, controls, |event| {
+            if matches!(event, TransferEvent::Progress(Progress { files_done: 1, .. })) {
+                control.unbounded_send(Control::Cancel).unwrap();
+            }
+            last.replace(Some(event));
+        }).await;
+        assert_eq!(last.into_inner(), Some(TransferEvent::Cancelled));
+        assert_eq!(tokio::fs::read(target.path().join("config")).await.unwrap(), b"old");
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 1);
+    }
 
     #[tokio::test]
     async fn resume_validates_partial_contents_and_size() {

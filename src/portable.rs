@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{json, Map, Value};
 
-use crate::sync::{empty_snapshot, Device, KINDS};
+use crate::sync::{empty_snapshot, map_ids, Device, Ids, KINDS};
 use crate::vault::{EnvVar, ForwardingRule, Group, Host, HostSettings, Identity, RuleKind, Snippet, SnippetPackage, SshKey, Vault};
 
 /// Collections kept as they are.
@@ -258,10 +258,19 @@ pub fn export(vault: &Vault, now: &str) -> Value {
 /// Replaces the portable part of the vault with a (validated, sync-form)
 /// snapshot. Device-local data — history, logs, known hosts, cloud settings —
 /// stays. Returns the `[snapshot id, new id]` pairs the merge needs.
-pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
+pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Value, String> {
     let list = |name: &str| snapshot.get(name).and_then(Value::as_array).cloned().unwrap_or_default();
     let token = |id: &Value| id.to_string();
-    let mut next = vault.history.iter().map(|e| e.id).max().unwrap_or(0).max(vault.next_id());
+    let reused: BTreeMap<_, _> = matched.iter().flat_map(|(kind, entries)| {
+        entries.iter().filter_map(move |(local, remote)| {
+            Some(((kind.as_str(), token(remote)), local.strip_prefix("number:")?.parse::<u64>().ok()?))
+        })
+    }).collect();
+    let mut next = vault.history.iter().filter_map(|e| e.host)
+        .chain(vault.shell_history.iter().filter_map(|e| e.host))
+        .chain(vault.foreign["workspaceTemplates"].as_array().into_iter().flatten().filter_map(|v| v["local_id"].as_u64()))
+        .chain(reused.values().copied())
+        .max().unwrap_or(0).max(vault.next_id());
     let mut new_id = move || {
         next += 1;
         next
@@ -270,9 +279,10 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
     let mut ids: BTreeMap<(&str, String), u64> = BTreeMap::new();
     let mut portable = BTreeMap::new();
     let mut assign = |kind: &'static str, record: &Value, pairs: &mut BTreeMap<&str, Vec<Value>>, ids: &mut BTreeMap<(&str, String), u64>| -> u64 {
-        let id = new_id();
         let old = record.get("local_id").cloned().unwrap_or(Value::Null);
-        ids.insert((kind, token(&old)), id);
+        let old_token = token(&old);
+        let id = reused.get(&(kind, old_token.clone())).copied().unwrap_or_else(&mut new_id);
+        ids.insert((kind, old_token), id);
         pairs.get_mut(kind).expect("known kind").push(json!([old, id]));
         id
     };
@@ -432,14 +442,28 @@ pub fn import(vault: &mut Vault, snapshot: &Value) -> Result<Value, String> {
         });
         portable.insert(key("portForwardingRules", id), raw);
     }
-    // Collections kept as they are use their snapshot ids as their own.
+    let templates = list("workspaceTemplates");
+    for raw in &templates {
+        assign("workspaceTemplates", raw, &mut pairs, &mut ids);
+    }
     let mut foreign = json!({"settings": snapshot.get("settings").cloned().unwrap_or_else(|| json!({}))});
+    let translate = |kind: &str, id: &Value| {
+        ids.get(&(kind, token(id))).map_or_else(|| id.clone(), |id| json!(id))
+    };
     for name in FOREIGN {
-        let records = list(name);
-        for record in &records {
-            pairs.get_mut(name).expect("known kind").push(json!([record["local_id"], record["local_id"]]));
-        }
+        let records = if name == "workspaceTemplates" {
+            templates.iter().map(|record| map_ids(record, name, &mut |kind, id| translate(kind, id))).collect()
+        } else {
+            let records = list(name);
+            for record in &records {
+                pairs.get_mut(name).expect("known kind").push(json!([record["local_id"], record["local_id"]]));
+            }
+            records.iter().map(|record| map_ids(record, name, &mut |kind, id| translate(kind, id))).collect()
+        };
         foreign[name] = Value::Array(records);
+    }
+    for raw in portable.values_mut() {
+        *raw = map_ids(raw, "", &mut |kind, id| translate(kind, id));
     }
 
     vault.keys = keys;
@@ -468,8 +492,8 @@ impl Device for VaultDevice<'_> {
         crate::sync::validate_snapshot(&export(self.vault, &self.now))
     }
 
-    fn import(&mut self, snapshot: &Value) -> Result<Value, String> {
-        import(self.vault, snapshot)
+    fn import(&mut self, snapshot: &Value, ids: &Ids) -> Result<Value, String> {
+        import(self.vault, snapshot, ids)
     }
 
     fn backup(&mut self, snapshot: &Value) -> Result<(), String> {
@@ -529,11 +553,43 @@ mod tests {
         let web = snapshot["hosts"].as_array().unwrap().iter().find(|h| h["label"] == "web").unwrap();
         assert_eq!(web["ssh_config"]["port"], 2222);
         let mut copy = Vault { history: vec![crate::vault::HistoryEntry::default()], ..Vault::default() };
-        let pairs = import(&mut copy, &snapshot).unwrap();
+        let pairs = import(&mut copy, &snapshot, &Ids::new()).unwrap();
         assert_eq!(shape(&copy), shape(&vault));
         assert_eq!(copy.history.len(), 1, "device-local history stays");
         assert_eq!(pairs["hosts"].as_array().unwrap().len(), 2);
         assert!(!copy.secrets_missing);
+    }
+
+    #[test]
+    fn sync_import_preserves_host_ids_and_translates_workspace_references() {
+        let mut vault = sample();
+        vault.history.push(crate::vault::HistoryEntry { host: Some(5), ..Default::default() });
+        vault.shell_history.push(crate::vault::ShellCommand { host: Some(5), ..Default::default() });
+        vault.foreign = json!({"workspaceTemplates": [{
+            "local_id": 11, "label": "web", "workspaceTerminals": [
+                {"id": "terminal", "protocol": "ssh", "host": { "local_id": 5 }}
+            ]
+        }]});
+        let local = validate_snapshot(&export(&vault, NOW)).unwrap();
+        let mut matched = Ids::new();
+        let mut remote = crate::sync::to_sync_form(&local, &mut matched);
+        remote["hosts"][0]["label"] = json!("updated");
+        let remote = validate_snapshot(&remote).unwrap();
+
+        let mut fresh = Vault::default();
+        import(&mut fresh, &remote, &Ids::new()).unwrap();
+        let templates = crate::workspace_template::templates(&fresh);
+        let id = fresh.hosts.iter().find(|host| host.label == "updated").unwrap().id;
+        assert_eq!(templates[0].workspace_terminals[0].target(&fresh), Some(crate::workspace_template::Target::Host(id)));
+
+        import(&mut vault, &remote, &matched).unwrap();
+        assert_eq!(vault.history[0].host, Some(5));
+        assert_eq!(vault.shell_history[0].host, Some(5));
+        assert_eq!(vault.host(5).unwrap().label, "updated");
+        let templates = crate::workspace_template::templates(&vault);
+        assert_eq!(templates[0].id, 11);
+        assert_eq!(templates[0].workspace_terminals[0].target(&vault), Some(crate::workspace_template::Target::Host(5)));
+        validate_snapshot(&export(&vault, NOW)).unwrap();
     }
 
     #[test]
@@ -555,7 +611,7 @@ mod tests {
         assert_eq!(config["env_variables"], json!([{"name": "LANG", "value": "C"}]));
         assert_eq!(config["color_scheme"], "Night Owl");
         let mut copy = Vault::default();
-        import(&mut copy, &snapshot).unwrap();
+        import(&mut copy, &snapshot, &Ids::new()).unwrap();
         let web = copy.hosts.iter().find(|h| h.label == "web").unwrap();
         let snippet = copy.snippets.iter().find(|s| s.label == "top").unwrap().id;
         assert_eq!(web.settings, HostSettings { startup_snippet: Some(snippet), ..vault.hosts[0].settings.clone() });
@@ -577,7 +633,7 @@ mod tests {
         snapshot["settings"] = json!({"settings_font_size": 14});
         let snapshot = validate_snapshot(&snapshot).unwrap();
         let mut vault = Vault::default();
-        import(&mut vault, &snapshot).unwrap();
+        import(&mut vault, &snapshot, &Ids::new()).unwrap();
         vault.hosts[0].label = "renamed".into();
         let again = validate_snapshot(&export(&vault, NOW)).unwrap();
         let host = again["hosts"].as_array().unwrap().iter().find(|h| h["label"] == "renamed").unwrap();
@@ -602,7 +658,7 @@ mod tests {
     fn exporting_twice_after_an_import_gives_the_same_digests() {
         let snapshot = validate_snapshot(&export(&sample(), NOW)).unwrap();
         let mut vault = Vault::default();
-        import(&mut vault, &snapshot).unwrap();
+        import(&mut vault, &snapshot, &Ids::new()).unwrap();
         let first = validate_snapshot(&export(&vault, NOW)).unwrap();
         let second = validate_snapshot(&export(&vault, NOW)).unwrap();
         assert_eq!(crate::sync::digests_of(Some(&first)), crate::sync::digests_of(Some(&second)));

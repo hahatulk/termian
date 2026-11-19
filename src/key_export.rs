@@ -16,27 +16,32 @@ use crate::vault::SshKey;
 
 pub const LOCATION: &str = "~/.ssh";
 pub const FILENAME: &str = "authorized_keys";
-/// The legacy export script: `$1` location, `$2` filename, `$3` the quoted key lines.
-pub const SCRIPT: &str = "if test ! -e $1;\nthen mkdir -p $1;\nchmod 700 $1;\nfi;\nif test ! -e \"$1/$2\";\nthen touch \"$1/$2\";\nchmod 600 \"$1/$2\";\nfi;\necho $3 >> \"$1/$2\";";
+pub const SCRIPT: &str = "set -e\ncase \"$1\" in /*) dir=$1;; *) dir=./$1;; esac\nif [ ! -d \"$dir\" ]; then mkdir -m 700 -p \"$dir\"; fi\ncase \"$2\" in ''|.|..|*/*) exit 1;; esac\numask 077\nprintf '%s' \"$3\" >> \"$dir/$2\"";
 
 /// The key's OpenSSH public key: stored, or derived from the private key.
 pub fn public_key(key: &SshKey) -> Result<String, String> {
     const INVALID: &str = "Unable to export the public key. Please make sure that your key has the correct format.";
     if let Some(public_key) = key.public_key.as_deref().map(str::trim).filter(|k| !k.is_empty()) {
-        return Ok(public_key.to_owned());
+        if public_key.contains(['\r', '\n', '\0']) {
+            return Err(INVALID.into());
+        }
+        let key = russh::keys::PublicKey::from_openssh(public_key).map_err(|_| INVALID)?;
+        return key.to_openssh().map_err(|_| INVALID.into());
     }
     let private_key = key.private_key.as_deref().ok_or(INVALID)?;
     let decoded = crate::keys::decode(private_key, key.passphrase.as_deref()).map_err(|_| INVALID)?;
     decoded.public_key().to_openssh().map_err(|_| INVALID.to_owned())
 }
 
-/// `script` with `$1`, `$2` and `$3` filled in, as legacy does; `$3` is
-/// `"# <label> Key by Termius\n<public key>\n"` in double quotes.
 pub fn prepare(script: &str, location: &str, filename: &str, label: &str, public_key: &str) -> String {
-    // Unlike legacy, keep a label with quotes or `$` from breaking the shell string.
-    let label: String = label.chars().flat_map(|c| if matches!(c, '"' | '$' | '`' | '\\') { vec!['\\', c] } else { vec![c] }).collect();
-    let lines = format!("\"# {label} Key by Termius\n{}\n\"", public_key.trim());
-    script.replace("$1", location).replace("$2", filename).replace("$3", &lines)
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "'\\''"));
+    let location = match location {
+        "~" => r#""$HOME""#.into(),
+        _ => location.strip_prefix("~/").map_or_else(|| quote(location), |path| format!(r#""$HOME"/{}"#, quote(path))),
+    };
+    let label: String = label.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let lines = format!("# {label} Key by Termius\n{}\n", public_key.trim());
+    format!("sh -c {} termian-key-export {location} {} {}", quote(script), quote(filename), quote(&lines))
 }
 
 #[derive(Debug, PartialEq)]
@@ -127,17 +132,11 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn prepare_fills_the_legacy_placeholders() {
+    fn prepare_passes_values_as_shell_arguments() {
         let script = prepare(SCRIPT, LOCATION, FILENAME, "work", "ssh-ed25519 AAAA test\n");
-        assert!(script.starts_with("if test ! -e ~/.ssh;\nthen mkdir -p ~/.ssh;"));
-        assert!(script.contains("touch \"~/.ssh/authorized_keys\""));
-        assert!(script.ends_with("echo \"# work Key by Termius\nssh-ed25519 AAAA test\n\" >> \"~/.ssh/authorized_keys\";"));
-    }
-
-    #[test]
-    fn prepare_escapes_shell_characters_in_the_label() {
-        let script = prepare("$3", "", "", "a\"$(x)`", "k");
-        assert_eq!(script, "\"# a\\\"\\$(x)\\` Key by Termius\nk\n\"");
+        assert!(script.starts_with("sh -c "));
+        assert!(script.contains(r#"termian-key-export "$HOME"/'.ssh' 'authorized_keys'"#));
+        assert!(script.ends_with("'# work Key by Termius\nssh-ed25519 AAAA test\n'"));
     }
 
     #[test]

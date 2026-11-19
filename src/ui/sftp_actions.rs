@@ -142,18 +142,15 @@ fn other(side: Side) -> Side {
 
 /// A folder of its own for one host-to-host file.
 fn relay_dir() -> Result<PathBuf, String> {
-    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join("termian-relay").join(format!("{}-{n}", std::process::id()));
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir)
+    tempfile::Builder::new().prefix("termian-relay-").tempdir()
+        .map(|dir| dir.keep()).map_err(|e| e.to_string())
 }
 
 impl SftpState {
     /// Handles a transfer event from a side's connection.
     pub fn on_transfer(&mut self, conn: Side, id: TransferId, event: TransferEvent) {
         let Some(row) = self.actions.transfers.iter_mut().find(|r| r.conn == conn && r.id == id) else {
-            if matches!(event, TransferEvent::Finished | TransferEvent::Cancelled) {
+            if matches!(event, TransferEvent::Finished | TransferEvent::Incomplete | TransferEvent::CommitFailed { .. } | TransferEvent::Cancelled) {
                 if let Some(remote) = self.remote_mut(conn) {
                     remote.connection.finished(id);
                 }
@@ -166,7 +163,7 @@ impl SftpState {
                 row.failure = None;
             }
             TransferEvent::Failed { error, .. } => row.failure = Some(error),
-            TransferEvent::Finished | TransferEvent::Cancelled => {
+            TransferEvent::Finished | TransferEvent::Incomplete | TransferEvent::CommitFailed { .. } | TransferEvent::Cancelled => {
                 let direction = row.direction;
                 let finished = event == TransferEvent::Finished;
                 let (label, is_dir) = (row.label.clone(), row.is_dir);
@@ -227,6 +224,11 @@ impl SftpState {
                     || (matches!(self.actions.dialog, Some(Dialog::Transfers)) && self.actions.transfers.is_empty())
                 {
                     self.actions.dialog = None;
+                }
+                match event {
+                    TransferEvent::CommitFailed { error } => self.actions.dialog = Some(Dialog::Error(error)),
+                    TransferEvent::Incomplete => self.actions.dialog = Some(Dialog::Error("Transfer was incomplete".into())),
+                    _ => {}
                 }
                 // Uploads land on their host; downloads on the disk panel.
                 let destination = refresh.unwrap_or(if direction == Direction::Upload { conn } else { conn.other() });
@@ -517,7 +519,7 @@ impl Shell {
             direction: Direction::Upload,
             source_dir: file.local_dir(),
             destination_dir,
-            planned: Planned { target: name.clone(), item, replace: false },
+            planned: Planned { target: name.clone(), item, replace: true },
         };
         let id = remote.connection.transfer(job);
         self.sftp.actions.transfers.push(TransferRow {
@@ -767,17 +769,6 @@ impl Shell {
         }
         if let Some(row) = self.sftp.actions.transfers.iter_mut().find(|r| r.conn == conn && r.id == id) {
             row.failure = None;
-        }
-        if control == Control::Cancel {
-            self.sftp.actions.transfers.retain(|r| {
-                let gone = r.conn == conn && r.id == id;
-                if gone {
-                    if let After::Relay { temp, .. } | After::Cleanup(temp) = &r.after {
-                        let _ = std::fs::remove_dir_all(temp);
-                    }
-                }
-                !gone
-            });
         }
         if matches!(self.sftp.actions.dialog, Some(Dialog::TransferError(side, open)) if side == conn && open == id) {
             self.sftp.actions.dialog = None;

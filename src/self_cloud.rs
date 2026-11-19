@@ -326,11 +326,17 @@ pub fn candidate_config(vault: &Vault, changes: ConfigChanges) -> Result<cloud::
     let saved = vault.cloud.clone().unwrap_or(cloud::CloudConfig { auto_sync: true, ..cloud::CloudConfig::default() });
     let keep = |new: String, old: String| if new.is_empty() { old } else { new };
     let basic_user = changes.basic_user.trim().to_owned();
+    let url = changes.url.trim().to_owned();
+    let same_server = url == saved.url;
     let config = cloud::CloudConfig {
-        url: changes.url.trim().to_owned(),
-        token: keep(changes.token, saved.token.clone()),
-        passphrase: keep(changes.passphrase, saved.passphrase.clone()),
-        basic_password: if basic_user.is_empty() { String::new() } else { keep(changes.basic_password, saved.basic_password.clone()) },
+        url,
+        token: keep(changes.token, if same_server { saved.token } else { String::new() }),
+        passphrase: keep(changes.passphrase, if same_server { saved.passphrase } else { String::new() }),
+        basic_password: if basic_user.is_empty() {
+            String::new()
+        } else {
+            keep(changes.basic_password, if same_server && basic_user == saved.basic_user { saved.basic_password } else { String::new() })
+        },
         basic_user,
         auto_sync: saved.auto_sync,
     };
@@ -449,7 +455,12 @@ pub fn download(vault: &mut Vault, backups: &Path) -> Result<Report, String> {
     let remote = client.fetch().map_err(|e| config.redact(&e))?.ok_or("В облаке ещё нет данных")?;
     let snapshot = sync::validate_snapshot(&remote.snapshot)?;
     backup(backups, &portable::export(vault, &now()), &config.passphrase)?;
-    let pairs = portable::import(vault, &snapshot)?;
+    let server = sync::server_key(&config.url);
+    let mut matched = vault.sync_state.as_ref().filter(|state| state.server == server)
+        .map(|state| state.ids.clone()).unwrap_or_default();
+    let exported = portable::export(vault, &now());
+    sync::match_ids(&exported, Some(&snapshot), &mut matched);
+    let pairs = portable::import(vault, &snapshot, &matched)?;
     let mut ids = sync::ids_from_import(&pairs);
     let exported = sync::validate_snapshot(&portable::export(vault, &now()))?;
     sync::match_ids(&exported, Some(&snapshot), &mut ids);
@@ -678,17 +689,25 @@ mod tests {
     }
 
     #[test]
-    fn settings_keep_saved_secrets_when_their_fields_are_empty() {
+    fn settings_keep_credentials_only_for_the_same_server() {
         let mut vault = Vault::default();
-        let changes = ConfigChanges { url: "https://sync.example".into(), token: "tok".into(), passphrase: "long enough passphrase".into(), ..ConfigChanges::default() };
+        let mut changes = ConfigChanges {
+            url: "https://sync.example".into(),
+            token: "tok".into(),
+            passphrase: "long enough passphrase".into(),
+            basic_user: "proxy".into(),
+            basic_password: "test password".into(),
+        };
         save_config(&mut vault, changes.clone()).unwrap();
-        save_config(&mut vault, ConfigChanges { url: "https://other.example".into(), ..ConfigChanges::default() }).unwrap();
-        let saved = vault.cloud.clone().unwrap();
-        assert_eq!((saved.url.as_str(), saved.token.as_str(), saved.passphrase.as_str()), ("https://other.example", "tok", "long enough passphrase"));
-        assert!(save_config(&mut vault, ConfigChanges { url: "http://public.example".into(), ..ConfigChanges::default() }).is_err());
-        assert_eq!(vault.cloud.unwrap().url, "https://other.example", "a rejected change saves nothing");
-        let mut fresh = Vault::default();
-        assert_eq!(save_config(&mut fresh, ConfigChanges { url: "https://a.example".into(), ..ConfigChanges::default() }).unwrap_err(), "Недопустимый токен");
+        let same = ConfigChanges { url: changes.url.clone(), basic_user: changes.basic_user.clone(), ..ConfigChanges::default() };
+        assert_eq!(candidate_config(&vault, same.clone()).unwrap(), *vault.cloud.as_ref().unwrap());
+        let other = ConfigChanges { url: "https://other.example".into(), ..same };
+        assert!(save_config(&mut vault, other.clone()).is_err());
+        assert!(candidate_config(&vault, ConfigChanges { token: changes.token.clone(), passphrase: changes.passphrase.clone(), ..other.clone() }).is_err());
+        assert_eq!(vault.cloud.as_ref().unwrap().url, changes.url);
+        changes.url = other.url;
+        save_config(&mut vault, changes).unwrap();
+        assert_eq!(vault.cloud.unwrap().url, "https://other.example");
     }
 
     #[test]

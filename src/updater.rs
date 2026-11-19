@@ -17,6 +17,7 @@ const MANIFEST_ASSET: &str = "latest.json";
 pub const FIRST_CHECK: Duration = Duration::from_secs(20);
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 const PROGRESS_STEP: u64 = 256 * 1024;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -143,6 +144,7 @@ pub struct Package {
     pub version: String,
     pub url: url::Url,
     pub signature: String,
+    expected_file: String,
 }
 
 /// `latest.json` key of this build. The native client ships only the bundle
@@ -169,7 +171,13 @@ pub fn select_package(manifest: &str, target: &str, current: &semver::Version) -
     if url.scheme() != "https" {
         return Err("latest.json: the package must be downloaded over HTTPS".into());
     }
-    Ok(Some(Package { version: version.to_string(), url, signature: platform.signature.clone() }))
+    let suffix = match target {
+        "darwin-aarch64" => "mac-arm64.app.tar.gz",
+        "windows-x86_64" => "win-x64.exe",
+        _ => return Err("Пакет недоступен для автообновления на этой платформе".into()),
+    };
+    let expected_file = format!("termian-{version}-{suffix}");
+    Ok(Some(Package { expected_file, version: version.to_string(), url, signature: platform.signature.clone() }))
 }
 
 fn base64_text(text: &str) -> Result<String, String> {
@@ -181,11 +189,15 @@ fn base64_text(text: &str) -> Result<String, String> {
 /// Accept `bytes` only when the release key signed them for `version`, as
 /// tauri-plugin-updater does with `requireSignedVersion`: the manifest is not
 /// signed, so the signed version is what stops an old package passing as new.
-pub fn verify(bytes: &[u8], signature: &str, version: &str) -> Result<(), String> {
+pub fn verify(bytes: &[u8], signature: &str, version: &str, expected_file: &str) -> Result<(), String> {
     let key = minisign_verify::PublicKey::decode(&base64_text(PUBLIC_KEY)?).map_err(|error| format!("public key: {error}"))?;
     let signature = minisign_verify::Signature::decode(&base64_text(signature)?).map_err(|error| format!("signature: {error}"))?;
     key.verify(bytes, &signature, true).map_err(|_| "Подпись обновления не совпадает с ключом выпуска".to_owned())?;
     // The trusted comment is covered by the global signature verified above.
+    let mut files = signature.trusted_comment().split('\t').filter_map(|field| field.strip_prefix("file:"));
+    if files.next() != Some(expected_file) || files.next().is_some() {
+        return Err("Подпись не соответствует пакету обновления для этой платформы".into());
+    }
     let signed = signature.trusted_comment().split('\t').find_map(|field| field.strip_prefix("version:"));
     let Some(signed) = signed else { return Err("Подпись обновления не содержит версию".into()) };
     let parse = |text: &str| semver::Version::parse(text.trim().trim_start_matches('v')).ok();
@@ -226,11 +238,17 @@ pub fn download(package: &Package, mut progress: impl FnMut(u64, Option<u64>)) -
         .call()
         .map_err(|error| format!("Загрузка обновления: {error}"))?;
     let total = response.header("content-length").and_then(|length| length.parse().ok());
+    if total.is_some_and(|size| size > MAX_PACKAGE_BYTES) {
+        return Err("Пакет обновления превышает 256 МиБ".into());
+    }
     let (mut reader, mut bytes, mut chunk, mut reported) = (response.into_reader(), Vec::new(), vec![0u8; 64 * 1024], 0u64);
     loop {
         let read = reader.read(&mut chunk).map_err(|error| format!("Загрузка обновления: {error}"))?;
         if read == 0 {
             break;
+        }
+        if bytes.len() as u64 + read as u64 > MAX_PACKAGE_BYTES {
+            return Err("Пакет обновления превышает 256 МиБ".into());
         }
         bytes.extend_from_slice(&chunk[..read]);
         let downloaded = bytes.len() as u64;
@@ -239,7 +257,7 @@ pub fn download(package: &Package, mut progress: impl FnMut(u64, Option<u64>)) -
             progress(downloaded, total);
         }
     }
-    verify(&bytes, &package.signature, &package.version)?;
+    verify(&bytes, &package.signature, &package.version, &package.expected_file)?;
     Ok(bytes)
 }
 
@@ -377,11 +395,12 @@ mod tests {
     #[test]
     fn accepts_only_release_signatures_bound_to_the_version() {
         let data = b"termian-updater-key-check";
-        verify(data, KEY_CHECK_SIGNATURE, "1.0.0").unwrap();
-        verify(data, KEY_CHECK_SIGNATURE, "v1.0.0").unwrap();
-        assert!(verify(b"tampered", KEY_CHECK_SIGNATURE, "1.0.0").unwrap_err().contains("Подпись"));
-        assert!(verify(data, KEY_CHECK_SIGNATURE, "1.2.0").unwrap_err().contains("не совпадает с объявленной"));
-        assert!(verify(data, "not base64!", "1.0.0").is_err());
+        verify(data, KEY_CHECK_SIGNATURE, "1.0.0", "keycheck.txt").unwrap();
+        verify(data, KEY_CHECK_SIGNATURE, "v1.0.0", "keycheck.txt").unwrap();
+        assert!(verify(b"tampered", KEY_CHECK_SIGNATURE, "1.0.0", "keycheck.txt").unwrap_err().contains("Подпись"));
+        assert!(verify(data, KEY_CHECK_SIGNATURE, "1.2.0", "keycheck.txt").unwrap_err().contains("не совпадает с объявленной"));
+        assert!(verify(data, "not base64!", "1.0.0", "keycheck.txt").is_err());
+        assert!(verify(data, KEY_CHECK_SIGNATURE, "1.0.0", "other.exe").is_err());
     }
 
     fn release(tag: &str, draft: bool, manifest: Option<&str>) -> Release {
@@ -520,6 +539,6 @@ mod live {
         let package = super::check(&semver::Version::new(0, 0, 1)).unwrap().expect("a published release with latest.json");
         let bytes = super::download(&package, |_, _| {}).unwrap();
         eprintln!("verified {} ({} bytes) from {}", package.version, bytes.len(), package.url);
-        assert!(super::verify(&bytes[1..], &package.signature, &package.version).is_err());
+        assert!(super::verify(&bytes[1..], &package.signature, &package.version, &package.expected_file).is_err());
     }
 }

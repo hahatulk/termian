@@ -69,6 +69,11 @@ fn meta(entry: &HistoryEntry, name: &str, key: &str) -> Value {
 /// Uploads the logs of `history` that are new or changed since the last run.
 pub fn backup(cloud: &Cloud, logs_dir: &Path, history: &[HistoryEntry]) -> Result<Outcome, String> {
     let ledger_file = ledger_path(logs_dir);
+    if history.iter().all(|entry| entry.log.is_none()) {
+        return Ok(Outcome::default());
+    }
+    let generation = cloud.log_generation()?;
+    let prefix = format!("{}:", cloud.storage_key());
     let mut ledger = read_ledger(&ledger_file);
     let mut outcome = Outcome::default();
     for entry in history {
@@ -79,7 +84,8 @@ pub fn backup(cloud: &Cloud, logs_dir: &Path, history: &[HistoryEntry]) -> Resul
         }
         let Ok(metadata) = fs::metadata(logs_dir.join(&name)) else { continue };
         let current = Uploaded { size: metadata.len(), modified: metadata.modified().map(millis).unwrap_or(0) };
-        if ledger.get(&name) == Some(&current) {
+        let entry_key = format!("{prefix}{name}");
+        if ledger.get(&entry_key) == Some(&current) {
             outcome.unchanged += 1;
             continue;
         }
@@ -89,11 +95,11 @@ pub fn backup(cloud: &Cloud, logs_dir: &Path, history: &[HistoryEntry]) -> Resul
             continue;
         }
         let payload = json!({"format": FORMAT, "version": 1, "name": name, "modified": current.modified, "meta": meta(entry, &name, &log.key), "file": STANDARD.encode(&file)});
-        if !cloud.put_log(&name, &payload)? {
+        if !cloud.put_log(&name, &payload, &generation)? {
             outcome.unsupported = true;
             break;
         }
-        ledger.insert(name, current);
+        ledger.insert(entry_key, current);
         outcome.uploaded += 1;
         if let Ok(bytes) = serde_json::to_vec(&ledger) {
             let _ = fs::write(&ledger_file, bytes);

@@ -77,6 +77,27 @@ pub enum SortKey {
 }
 
 /// Joins remote-style paths (`/` separated) without touching the local OS rules.
+pub fn valid_entry_name(name: &str) -> bool {
+    !matches!(name, "" | "." | "..") && !name.contains(['/', '\\', '\0'])
+}
+
+pub fn valid_local_name(name: &str) -> bool {
+    if !valid_entry_name(name) {
+        return false;
+    }
+    if cfg!(windows) {
+        let stem = name.split('.').next().unwrap_or("").trim_end_matches(' ').to_ascii_uppercase();
+        let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$")
+            || ["COM", "LPT"].into_iter().any(|prefix| stem.strip_prefix(prefix).is_some_and(|n| {
+                matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³")
+            }));
+        if reserved || name.ends_with([' ', '.']) || name.chars().any(|c| c < ' ' || ":*?\"<>|".contains(c)) {
+            return false;
+        }
+    }
+    true
+}
+
 pub fn join(dir: &str, name: &str) -> String {
     if dir.ends_with('/') { format!("{dir}{name}") } else { format!("{dir}/{name}") }
 }

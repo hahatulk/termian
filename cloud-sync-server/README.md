@@ -70,7 +70,7 @@ location / {
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health` | Public health check |
-| `GET /v1/snapshot` | Download snapshot; returns `ETag` or 404 |
+| `GET /v1/snapshot` | Download snapshot with `ETag`; if absent, returns 404 with `X-Termian-Conditional-Create: v1` |
 | `PUT /v1/snapshot` | Replace snapshot; returns new `ETag` |
 | `GET /v1/logs/<name>` | Download a session log backup or 404 |
 | `PUT /v1/logs/<name>` | Store or replace a session log backup |
@@ -78,7 +78,7 @@ location / {
 
 For conditional writes, `If-Match` checks an existing revision, while `If-None-Match: *` permits creation only if absent. Clients merging changes from several devices always upload with one of them, so a snapshot uploaded meanwhile by another device is never overwritten. A failed precondition returns HTTP 412. The last 10 revisions are retained in `revisions/`.
 
-Session logs are encrypted by the client (sealed with the encryption password, like the snapshot) and stored in `logs/`, separately from the snapshot and its revisions. Names may contain only letters, digits, `.`, `_` and `-`. Logs not updated for `SYNC_LOG_RETENTION_DAYS` (default `60`) are deleted at start and then every 6 hours. Older servers without these routes answer 404, and clients then skip log backups.
+Session logs are encrypted by the client (sealed with the encryption password, like the snapshot) and stored in `logs/`, separately from the snapshot and its revisions. Names may contain only letters, digits, `.`, `_` and `-`. Logs not updated for `SYNC_LOG_RETENTION_DAYS` (default `60`) are deleted at start and then every 6 hours. The snapshot response also includes `X-Termian-Key-Generation`. Clients check that their password opens the snapshot when one exists, then send that generation with each log upload. After password rotation, the server rejects missing or stale generations with HTTP 412. Update the server before updating clients.
 
 ## Security
 

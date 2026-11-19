@@ -249,6 +249,9 @@ pub(crate) async fn list(sftp: &SftpSession, path: &str) -> Result<Vec<Entry>, S
     for item in sftp.read_dir(path).await.map_err(|e| format!("{path}: {e}"))? {
         let meta = item.metadata();
         let name = item.file_name();
+        if !crate::files::valid_entry_name(&name) {
+            return Err(format!("{path}: invalid directory entry name"));
+        }
         let is_link = meta.is_symlink();
         // Links count as folders when they point at one, so they can be opened.
         let is_dir = if is_link {
@@ -417,7 +420,7 @@ mod tests {
             if matches!(event, TransferEvent::Failed { .. }) {
                 remote.control(id, on_failure);
             }
-            let done = matches!(event, TransferEvent::Finished | TransferEvent::Cancelled);
+            let done = matches!(event, TransferEvent::Finished | TransferEvent::Incomplete | TransferEvent::CommitFailed { .. } | TransferEvent::Cancelled);
             seen.push(event);
             if done {
                 remote.finished(id);
@@ -475,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_deletes_the_old_item_first() {
+    fn replace_swaps_the_completed_item() {
         let (served, local, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         std::fs::create_dir_all(served.path().join("site/old")).unwrap();
         std::fs::write(served.path().join("site/old/stale.txt"), b"stale").unwrap();
@@ -499,7 +502,7 @@ mod tests {
         let id = remote.transfer(job(Direction::Download, "/", local.path().to_str().unwrap(), "missing.txt", false));
         let seen = finish(&mut remote, &mut events, id, Control::Skip);
         assert!(matches!(&seen[0], TransferEvent::Failed { path, .. } if path == "/missing.txt"), "{seen:?}");
-        assert_eq!(seen.last(), Some(&TransferEvent::Finished));
+        assert_eq!(seen.last(), Some(&TransferEvent::Incomplete));
 
         let id = remote.transfer(job(Direction::Download, "/", local.path().to_str().unwrap(), "missing.txt", false));
         assert_eq!(finish(&mut remote, &mut events, id, Control::Cancel).last(), Some(&TransferEvent::Cancelled));

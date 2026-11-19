@@ -16,6 +16,7 @@ pub struct Edited {
     pub local_path: PathBuf,
     /// Modification time when the download finished; `None` until then.
     baseline: Option<SystemTime>,
+    temp_dir: PathBuf,
     pub changed: bool,
 }
 
@@ -52,16 +53,17 @@ impl Edits {
 
     /// Default place: a folder in the system temp directory.
     pub fn in_temp_dir() -> Self {
-        Self::new(std::env::temp_dir().join("termian-native-sftp"))
+        Self::new(std::env::temp_dir())
     }
 
     /// Reserves a temporary folder for a download of `remote_path`.
     pub fn prepare(&mut self, remote_path: &str) -> Result<&Edited, String> {
+        let name = remote_path.rsplit('/').next().filter(|n| crate::files::valid_local_name(n))
+            .ok_or("Invalid file name")?;
+        let dir = tempfile::Builder::new().prefix("termian-edit-").tempdir_in(&self.root)
+            .map_err(|e| e.to_string())?.keep();
         self.next += 1;
-        let name = remote_path.rsplit('/').next().filter(|n| !n.is_empty()).ok_or("no file name")?;
-        let dir = self.root.join(format!("{}-{}", std::process::id(), self.next));
-        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-        self.files.push(Edited { id: self.next, remote_path: remote_path.to_owned(), local_path: dir.join(name), baseline: None, changed: false });
+        self.files.push(Edited { id: self.next, remote_path: remote_path.to_owned(), local_path: dir.join(name), baseline: None, temp_dir: dir, changed: false });
         Ok(self.files.last().expect("just pushed"))
     }
 
@@ -104,9 +106,7 @@ impl Edits {
     pub fn discard(&mut self, id: EditId) {
         if let Some(index) = self.files.iter().position(|f| f.id == id) {
             let file = self.files.remove(index);
-            if let Some(dir) = file.local_path.parent() {
-                let _ = std::fs::remove_dir_all(dir);
-            }
+            let _ = std::fs::remove_dir_all(file.temp_dir);
         }
     }
 
