@@ -74,6 +74,8 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
+        with:
+          cache-on-failure: ${{ matrix.platform == 'win-x64' }}
       - name: Test client
         run: cargo test --locked --release --target '${{ matrix.target }}'
       - name: Build client
