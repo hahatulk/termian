@@ -203,11 +203,13 @@ async fn main() {
             axum::serve(panel_listener, panel_app).await.expect("panel server");
         });
     }
-    let retention = state.cfg.clone();
+    let retention = state.clone();
     tokio::spawn(async move {
         loop {
-            let cfg = retention.clone();
-            let _ = tokio::task::spawn_blocking(move || prune_logs(&cfg, SystemTime::now())).await;
+            let state = retention.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                with_storage(&state, |cfg| Ok(prune_logs(cfg, SystemTime::now())))
+            }).await;
             tokio::time::sleep(LOG_RETENTION_CHECK).await;
         }
     });
@@ -288,6 +290,33 @@ fn unauthorized() -> Response {
     (StatusCode::UNAUTHORIZED, "unauthorized\n").into_response()
 }
 
+const ACTIVE_STORAGE: &str = ".active-storage";
+const GENERATION_PREFIX: &str = "sealed-";
+
+fn active_config(cfg: &Config) -> io::Result<Config> {
+    let name = match fs::read_to_string(cfg.dir.join(ACTIVE_STORAGE)) {
+        Ok(name) => name,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(cfg.clone()),
+        Err(error) => return Err(error),
+    };
+    if !name.strip_prefix(GENERATION_PREFIX).is_some_and(|id| {
+        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())
+    }) {
+        return Err(io::Error::other("invalid active storage directory"));
+    }
+    let mut active = cfg.clone();
+    active.dir = active.dir.join(name);
+    if !active.dir.is_dir() {
+        return Err(io::Error::other("active storage directory missing"));
+    }
+    Ok(active)
+}
+
+fn with_storage<T>(state: &AppState, f: impl FnOnce(&Config) -> io::Result<T>) -> io::Result<T> {
+    let _guard = state.write_lock.lock().map_err(|_| io::Error::other("storage lock poisoned"))?;
+    f(&active_config(&state.cfg)?)
+}
+
 fn snapshot_path(cfg: &Config) -> PathBuf {
     cfg.dir.join("snapshot.bin")
 }
@@ -309,8 +338,8 @@ fn current(cfg: &Config) -> io::Result<Option<Vec<u8>>> {
 }
 
 async fn get_snapshot(State(state): State<Shared>) -> Response {
-    let cfg = state.cfg.clone();
-    match tokio::task::spawn_blocking(move || current(&cfg)).await {
+    let storage = state.clone();
+    match tokio::task::spawn_blocking(move || with_storage(&storage, current)).await {
         Ok(Ok(Some(data))) => {
             if let Ok(mut last) = state.last_download.lock() {
                 *last = Some(SystemTime::now());
@@ -403,14 +432,15 @@ fn store_snapshot(
         .write_lock
         .lock()
         .map_err(|_| io::Error::other("write lock poisoned"))?;
-    let old = current(&state.cfg)?;
+    let cfg = active_config(&state.cfg)?;
+    let old = current(&cfg)?;
     if (create_only && old.is_some()) || !if_match_satisfied(condition, old.as_deref()) {
         return Err(StoreError::Precondition);
     }
     if let Some(previous) = old.as_deref() {
-        backup(&state.cfg, previous, &digest(previous))?;
+        backup(&cfg, previous, &digest(previous))?;
     }
-    durable_replace(&state.cfg.dir, &snapshot_path(&state.cfg), body)?;
+    durable_replace(&cfg.dir, &snapshot_path(&cfg), body)?;
     Ok(digest(body))
 }
 
@@ -507,8 +537,7 @@ async fn get_log(State(state): State<Shared>, UrlPath(name): UrlPath<String>) ->
     if !valid_log_name(&name) {
         return (StatusCode::BAD_REQUEST, "invalid log name\n").into_response();
     }
-    let path = logs_dir(&state.cfg).join(&name);
-    match tokio::task::spawn_blocking(move || fs::read(path)).await {
+    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| fs::read(logs_dir(cfg).join(&name)))).await {
         Ok(Ok(data)) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
@@ -533,11 +562,11 @@ async fn put_log(
         Ok(body) if body.len() <= state.cfg.limit => body,
         _ => return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large\n").into_response(),
     };
-    let dir = logs_dir(&state.cfg);
-    let result = tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || with_storage(&state, |cfg| {
+        let dir = logs_dir(cfg);
         fs::create_dir_all(&dir)?;
         durable_replace(&dir, &dir.join(&name), &body)
-    })
+    }))
     .await;
     match result {
         Ok(Ok(())) => (StatusCode::OK, "stored\n").into_response(),
@@ -554,14 +583,13 @@ struct ClearLogs {
 
 async fn delete_logs(State(state): State<Shared>, Query(query): Query<ClearLogs>) -> Response {
     let since = SystemTime::UNIX_EPOCH + Duration::from_millis(query.since.unwrap_or(0));
-    let cfg = state.cfg.clone();
-    match tokio::task::spawn_blocking(move || clear_logs(&cfg, since)).await {
-        Ok(removed) => {
+    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| Ok(clear_logs(cfg, since)))).await {
+        Ok(Ok(removed)) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
             (StatusCode::OK, headers, format!("{{\"removed\":{removed}}}")).into_response()
         }
-        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, "storage error\n").into_response(),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, "storage error\n").into_response(),
     }
 }
 
@@ -686,6 +714,98 @@ mod tests {
         assert_eq!(json_body(response).await, snapshot);
     }
 
+    fn rotation_request(revision: &str, old: &str, token: Option<&str>) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder().method("POST").uri("/api/rotate-password")
+            .header(header::HOST, "127.0.0.1:8081")
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("x-termian-panel", "1");
+        if let Some(token) = token {
+            request = request.header("x-termian-token", token);
+        }
+        request.body(Body::from(serde_json::json!({
+            "passphrase": old, "new_passphrase": "new test password",
+            "revision": revision, "confirmed": true,
+        }).to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn rotation_commits_snapshot_and_logs_together() {
+        let dir = TempDir::new().unwrap();
+        let shared = state(dir.path(), 1024 * 1024);
+        let sync = make_app(shared.clone());
+        let panel = panel::make_panel(shared.clone());
+        let snapshot = serde_json::json!({"version": 1, "hosts": [{"label": "test host"}]});
+        let original = seal(&snapshot, "");
+        let log = serde_json::json!({"version": 1, "name": "test.log"});
+        let bad_log = seal(&log, "mismatched");
+        let current_log = seal(&log, "");
+        let log_path = logs_dir(&shared.cfg).join("test.log");
+        fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        fs::write(&log_path, &bad_log).unwrap();
+
+        let upload = sync.clone().oneshot(request("PUT", Body::from(original.clone()))).await.unwrap();
+        assert_eq!(upload.status(), StatusCode::OK);
+        let revision = digest(&original);
+        let missing = panel.clone().oneshot(rotation_request(&revision, "", None)).await.unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        let stale = panel.clone().oneshot(rotation_request("stale", "", Some(TOKEN))).await.unwrap();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        let blocked = panel.clone().oneshot(rotation_request(&revision, "", Some(TOKEN))).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(current(&active_config(&shared.cfg).unwrap()).unwrap(), Some(original.clone()));
+        assert_eq!(fs::read(&log_path).unwrap(), bad_log);
+
+        fs::write(&log_path, current_log).unwrap();
+        let modified = fs::metadata(&log_path).unwrap().modified().unwrap();
+        let done = panel.clone().oneshot(rotation_request(&revision, "", Some(TOKEN))).await.unwrap();
+        assert_eq!(done.status(), StatusCode::OK);
+        let new_revision = json_body(done).await["revision"].as_str().unwrap().to_owned();
+        assert_ne!(new_revision, revision);
+        assert!(!snapshot_path(&shared.cfg).exists());
+        assert!(!log_path.exists());
+
+        let restarted = state(dir.path(), 1024 * 1024);
+        let active = active_config(&restarted.cfg).unwrap();
+        let log_path = logs_dir(&active).join("test.log");
+        let stored = fs::read(&log_path).unwrap();
+        assert_eq!(fs::metadata(&log_path).unwrap().modified().unwrap(), modified);
+        assert_eq!(panel::open_envelope(&stored, "new test password").unwrap(), log);
+        assert!(panel::open_envelope(&stored, "").is_err());
+
+        let sync = make_app(restarted.clone());
+        let downloaded = sync.clone().oneshot(request("GET", Body::empty())).await.unwrap();
+        assert_eq!(downloaded.headers()[header::ETAG], etag(&new_revision));
+        let bytes = downloaded.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(panel::open_envelope(&bytes, "new test password").unwrap(), snapshot);
+        let mut stale_upload = request("PUT", Body::from(original));
+        stale_upload.headers_mut().insert(header::IF_MATCH, etag(&revision).parse().unwrap());
+        assert_eq!(sync.oneshot(stale_upload).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+    }
+
+    #[tokio::test]
+    async fn panel_accepts_empty_short_and_long_passphrases() {
+        let snapshot = serde_json::json!({"version": 1});
+        let long = "  密碼🔑!  ".repeat(1024);
+        let host = "127.0.0.1:8081";
+
+        for passphrase in ["", "7", long.as_str()] {
+            let dir = TempDir::new().unwrap();
+            let shared = state(dir.path(), 1024 * 1024);
+            let upload = make_app(shared.clone())
+                .oneshot(request("PUT", Body::from(seal(&snapshot, passphrase))))
+                .await
+                .unwrap();
+            assert_eq!(upload.status(), StatusCode::OK);
+
+            let panel = panel::make_panel(shared);
+            let response = panel.clone().oneshot(panel_request("/api/unlock", host, passphrase)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "passphrase length: {}", passphrase.len());
+            let response = panel.oneshot(panel_request("/api/export", host, passphrase)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(json_body(response).await, snapshot);
+        }
+    }
+
     #[tokio::test]
     async fn panel_rejects_wrong_passwords_with_lockout_and_foreign_hosts() {
         let dir = TempDir::new().unwrap();
@@ -693,8 +813,8 @@ mod tests {
         let snapshot = serde_json::json!({"format": "termius-portable-snapshot", "version": 1});
         make_app(shared.clone()).oneshot(request("PUT", Body::from(seal(&snapshot, "correct horse battery")))).await.unwrap();
         let panel = panel::make_panel(shared);
-        for _ in 0..3 {
-            let response = panel.clone().oneshot(panel_request("/api/export", "127.0.0.1:8081", "wrong")).await.unwrap();
+        for passphrase in ["", "wrong", "wrong"] {
+            let response = panel.clone().oneshot(panel_request("/api/export", "127.0.0.1:8081", passphrase)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
         let response = panel.clone().oneshot(panel_request("/api/export", "127.0.0.1:8081", "wrong")).await.unwrap();

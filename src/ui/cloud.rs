@@ -395,7 +395,8 @@ impl Shell {
     /// follows the hourly auto-sync switch, as the legacy backup does.
     fn backup_logs(&mut self, cx: &mut Context<Self>) {
         let state = &self.cloud;
-        if state.logs_running || state.logs_unsupported || state.logs_paused_until.is_some_and(|t| std::time::Instant::now() < t) {
+        if state.dialog.as_ref().is_some_and(|d| d.busy && matches!(d.body, Body::Config(_)))
+            || state.logs_running || state.logs_unsupported || state.logs_paused_until.is_some_and(|t| std::time::Instant::now() < t) {
             return;
         }
         let Some(cloud) = self.vault.cloud.as_ref().filter(|c| c.auto_sync).and_then(|c| c.validate().ok()) else { return };
@@ -545,24 +546,76 @@ impl Shell {
         cx.notify();
     }
 
-    fn save_cloud_config(&mut self, cx: &mut Context<Self>) {
-        let Some(CloudDialog { body: Body::Config(form), out, busy: false }) = &mut self.cloud.dialog else { return };
-        if let Some(missing) = form.missing() {
-            *out = Some(Out::Error(missing.into()));
+    fn save_cloud_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(CloudDialog { body: Body::Config(form), out, busy }) = &mut self.cloud.dialog else { return };
+        if *busy { return; }
+        let candidate = form.missing().map_or_else(|| self_cloud::candidate_config(&self.vault, form.changes()), |error| Err(error.into()));
+        let candidate = match candidate {
+            Ok(candidate) => candidate,
+            Err(error) => {
+                *out = Some(Out::Error(error));
+                cx.notify();
+                return;
+            }
+        };
+        let rotating = self.vault.cloud.as_ref().is_some_and(|saved| {
+            !saved.passphrase.is_empty() && saved.passphrase != candidate.passphrase
+                && termian_native::sync::server_key(&saved.url) == termian_native::sync::server_key(&candidate.url)
+        });
+        if !rotating {
+            self.commit_cloud_config(candidate, false, cx);
+            return;
+        }
+        if self.cloud.running || self.cloud.logs_running {
+            *out = Some(Out::Error("Дождитесь завершения операции с облаком и повторите.".into()));
             cx.notify();
             return;
         }
-        match self_cloud::save_config(&mut self.vault, form.changes()) {
-            Ok(()) => {
-                form.load(&self.vault);
-                *out = Some(Out::Success("Настройки сохранены".into()));
-                self.save_vault();
-                // Fresh settings: credential errors no longer pause checks.
-                self.cloud.header.reset();
-                self.check_cloud(false, cx);
-            }
-            Err(error) => *out = Some(Out::Error(error)),
+        *busy = true;
+        self.cloud.running = true;
+        let confirm = window.prompt(gpui::PromptLevel::Warning, "Сменить пароль шифрования?",
+            Some("Сначала перешифруйте снимок в веб-панели сервера. Клиент проверит новый пароль и будет использовать его для следующих отправок."),
+            &["Проверить и сохранить", "Отмена"], cx);
+        cx.spawn(async move |this, cx| {
+            let result = if confirm.await == Ok(0) {
+                let config = candidate.clone();
+                Some(cx.background_executor().spawn(async move { self_cloud::verify_cloud_password(&config) }).await)
+            } else {
+                None
+            };
+            let _ = this.update(cx, |shell, cx| {
+                shell.cloud.running = false;
+                if let Some(dialog) = &mut shell.cloud.dialog {
+                    dialog.busy = false;
+                    if let Some(Err(error)) = &result {
+                        dialog.out = Some(Out::Error(error.clone()));
+                    }
+                }
+                if matches!(result, Some(Ok(()))) {
+                    shell.commit_cloud_config(candidate, true, cx);
+                }
+                cx.notify();
+            });
+        }).detach();
+        cx.notify();
+    }
+
+    fn commit_cloud_config(&mut self, candidate: termian_native::cloud::CloudConfig, rotated: bool, cx: &mut Context<Self>) {
+        let Some(CloudDialog { body: Body::Config(form), out, .. }) = &mut self.cloud.dialog else { return };
+        let previous = self.vault.cloud.replace(candidate);
+        if let Err(error) = self.store.save(&self.vault) {
+            self.vault.cloud = previous;
+            *out = Some(Out::Error(error));
+            cx.notify();
+            return;
         }
+        form.load(&self.vault);
+        *out = Some(Out::Success(if rotated { "Новый пароль сохранён. Следующие отправки будут зашифрованы им." } else { "Настройки сохранены" }.into()));
+        if rotated {
+            self.cloud.logs_paused_until = None;
+        }
+        self.cloud.header.reset();
+        self.check_cloud(false, cx);
         cx.notify();
     }
 
@@ -587,7 +640,7 @@ impl Shell {
                 let paste = cx.read_from_clipboard().and_then(|c| c.text());
                 let value = form.field.and_then(|f| form.value(f));
                 match edit(value, keystroke, paste) {
-                    Key::Enter => self.save_cloud_config(cx),
+                    Key::Enter => self.save_cloud_config(window, cx),
                     Key::Edited => cx.notify(),
                     _ => {}
                 }
@@ -882,7 +935,11 @@ impl Shell {
             Body::Config(_) => (
                 "Своё облако",
                 self.render_cloud_config(cx),
-                vec![button("cloud-save", "Сохранить настройки", true, busy).on_click(cx.listener(|shell, _, _, cx| shell.save_cloud_config(cx))).into_any_element()],
+                vec![button("cloud-save", if self.vault.cloud.is_some() && matches!(&dialog.body, Body::Config(form) if !form.passphrase.is_empty()) {
+                    "Сменить пароль"
+                } else {
+                    "Сохранить настройки"
+                }, true, busy).on_click(cx.listener(|shell, _, window, cx| shell.save_cloud_config(window, cx))).into_any_element()],
             ),
             Body::Run(run) => {
                 let mut fields: Vec<AnyElement> = self.render_cloud_panel(run, cx).into_iter().map(IntoElement::into_any_element).collect();

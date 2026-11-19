@@ -52,7 +52,7 @@ ul.help li{margin:4px 0}
   <section class="card" id="login">
     <h2>Вход паролем шифрования</h2>
     <form id="unlock" autocomplete="off">
-      <input id="passphrase" type="password" placeholder="Пароль шифрования из настроек «Своё облако»" autocomplete="current-password" required>
+      <input id="passphrase" type="password" placeholder="Пароль шифрования из настроек «Своё облако»" autocomplete="current-password">
       <button class="primary" type="submit">Открыть</button>
     </form>
     <div class="msg" id="login-msg" role="status"></div>
@@ -70,6 +70,17 @@ ul.help li{margin:4px 0}
       <div class="grid" id="snapshot"></div>
       <table id="collections" aria-label="Содержимое снимка"></table>
       <p class="note warn">Выгруженный файл не зашифрован: в нём пароли, приватные ключи и адреса хостов. Храните его в защищённом месте и удалите после использования.</p>
+    </section>
+    <section class="card" id="rotation" hidden>
+      <h2>Сменить пароль шифрования</h2>
+      <p class="note">Остановите синхронизацию и резервное копирование на клиентах. Снимок и журналы на сервере будут перешифрованы. Исторические копии останутся под старыми паролями.</p>
+      <form id="rotate" autocomplete="off">
+        <input id="rotation-token" type="password" placeholder="Токен доступа сервера" aria-label="Токен доступа сервера" required>
+        <input id="new-password" type="password" placeholder="Новый пароль, от 12 символов" aria-label="Новый пароль" autocomplete="new-password" minlength="12" required>
+        <input id="repeat-password" type="password" placeholder="Повторите новый пароль" aria-label="Повторите новый пароль" autocomplete="new-password" minlength="12" required>
+        <button class="primary" type="submit">Перешифровать</button>
+      </form>
+      <div id="rotation-msg" class="msg" role="status"></div>
     </section>
     <section class="card" id="empty" hidden>
       <h2>Снимок</h2>
@@ -91,6 +102,7 @@ ul.help li{margin:4px 0}
 <script>
 (() => {
   let passphrase = null; // memory only: cleared on logout and page close
+  let revision = null;
   const $ = id => document.getElementById(id);
   const fmtDate = ms => ms ? new Date(ms).toLocaleString() : '—';
   const fmtBytes = n => n == null ? '—' : n < 1024 ? n + ' Б' : n < 1048576 ? (n / 1024).toFixed(1) + ' КБ' : (n / 1048576).toFixed(1) + ' МБ';
@@ -109,8 +121,8 @@ ul.help li{margin:4px 0}
     return box;
   };
 
-  async function call(path) {
-    const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Termian-Panel': '1'}, body: JSON.stringify({passphrase})});
+  async function call(path, fields = {}, headers = {}) {
+    const response = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Termian-Panel': '1', ...headers}, body: JSON.stringify({passphrase, ...fields})});
     if (response.status === 429) {
       const wait = Number(response.headers.get('Retry-After')) || 0;
       throw new Error('Слишком много неверных попыток. Повторите через ' + (wait < 90 ? wait + ' с' : Math.ceil(wait / 60) + ' мин') + '.');
@@ -125,12 +137,13 @@ ul.help li{margin:4px 0}
   }
 
   function render({server, snapshot}) {
+    revision = server.revision;
     $('max-rev').textContent = server.maxRevisions;
     const s = $('server');
     s.replaceChildren(
       kv('Последняя синхронизация', fmtDate(server.lastUploadAt), fmtAgo(server.lastUploadAt)),
       kv('Последнее получение клиентом', fmtDate(server.lastDownloadAt), server.lastDownloadAt ? fmtAgo(server.lastDownloadAt) : 'с момента запуска не было'),
-      kv('Ревизия', server.revision || '—', 'SHA-256, первые 12 символов'),
+      kv('Ревизия', revision?.slice(0, 12) || '—', 'SHA-256, первые 12 символов'),
       kv('Размер снимка', fmtBytes(server.snapshotBytes), 'лимит ' + fmtBytes(server.maxBodyBytes)),
       kv('Сохранённые версии', server.revisions.length + ' из ' + server.maxRevisions, server.revisions[0] ? 'последняя ' + fmtDate(server.revisions[0].at) : 'нет'),
       kv('Работает', fmtUptime(server.uptimeSeconds), 'с ' + fmtDate(server.startedAt)),
@@ -138,6 +151,7 @@ ul.help li{margin:4px 0}
       kv('Версия сервера', server.version, server.trustForwardedFor ? 'адрес клиента из X-Forwarded-For' : 'адрес клиента из соединения'),
     );
     $('snapshot-card').hidden = !snapshot;
+    $('rotation').hidden = !snapshot || !revision;
     $('empty').hidden = !!snapshot;
     if (!snapshot) return;
     $('snapshot').replaceChildren(
@@ -185,8 +199,36 @@ ul.help li{margin:4px 0}
     } catch (error) { alert(error.message); }
     finally { button.disabled = false; }
   });
+  $('rotate').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = event.submitter;
+    const msg = $('rotation-msg');
+    const next = $('new-password').value;
+    if (next !== $('repeat-password').value) {
+      msg.className = 'msg err'; msg.textContent = 'Новые пароли не совпадают.';
+      return;
+    }
+    if (!confirm('Перешифровать снимок и журналы? Введите новый пароль на всех клиентах перед возобновлением синхронизации.')) return;
+    button.disabled = true;
+    $('logout').disabled = true;
+    msg.className = 'msg'; msg.textContent = 'Перешифровка…';
+    try {
+      await call('/api/rotate-password', {new_passphrase: next, revision, confirmed: true},
+        {'X-Termian-Token': $('rotation-token').value});
+      passphrase = next;
+      await load();
+      msg.textContent = 'Пароль изменён. Проверьте и сохраните его в настройках клиентов.';
+    } catch (error) {
+      msg.className = 'msg err'; msg.textContent = error.message;
+    } finally {
+      $('rotate').reset();
+      button.disabled = false;
+      $('logout').disabled = false;
+    }
+  });
   $('logout').addEventListener('click', () => {
-    passphrase = null;
+    passphrase = null; revision = null;
+    $('rotate').reset(); $('rotation-msg').textContent = '';
     $('dashboard').hidden = true; $('logout').hidden = true; $('login').hidden = false;
     $('server').replaceChildren(); $('snapshot').replaceChildren(); $('collections').replaceChildren();
     $('passphrase').focus();

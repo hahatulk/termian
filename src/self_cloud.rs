@@ -318,6 +318,11 @@ pub struct ConfigChanges {
 
 /// Saves the settings the way the legacy form does; the result must validate.
 pub fn save_config(vault: &mut Vault, changes: ConfigChanges) -> Result<(), String> {
+    vault.cloud = Some(candidate_config(vault, changes)?);
+    Ok(())
+}
+
+pub fn candidate_config(vault: &Vault, changes: ConfigChanges) -> Result<cloud::CloudConfig, String> {
     let saved = vault.cloud.clone().unwrap_or(cloud::CloudConfig { auto_sync: true, ..cloud::CloudConfig::default() });
     let keep = |new: String, old: String| if new.is_empty() { old } else { new };
     let basic_user = changes.basic_user.trim().to_owned();
@@ -330,7 +335,19 @@ pub fn save_config(vault: &mut Vault, changes: ConfigChanges) -> Result<(), Stri
         auto_sync: saved.auto_sync,
     };
     config.validate()?;
-    vault.cloud = Some(config);
+    Ok(config)
+}
+
+pub fn verify_cloud_password(config: &cloud::CloudConfig) -> Result<(), String> {
+    if let Some(remote) = config.validate()?.fetch().map_err(|error| {
+        if error == cloud::WRONG_PASSPHRASE {
+            "Снимок на сервере ещё не открывается новым паролем. Сначала измените пароль в веб-панели сервера.".into()
+        } else {
+            config.redact(&error)
+        }
+    })? {
+        sync::validate_snapshot(&remote.snapshot)?;
+    }
     Ok(())
 }
 
@@ -518,6 +535,29 @@ mod tests {
         let mut l: Vec<String> = vault.hosts.iter().map(|h| h.label.clone()).collect();
         l.sort();
         l
+    }
+
+    #[test]
+    fn rotation_verification_leaves_the_vault_and_server_untouched() {
+        let (url, stored) = crate::cloud::tests::server();
+        let mut local = vault(&url, &["web"]);
+        upload(&mut local).unwrap();
+        let previous = local.clone();
+        let mut next = local.cloud.clone().unwrap();
+        next.passphrase = "different test password".into();
+        let before = stored.lock().unwrap().clone();
+        assert!(verify_cloud_password(&next).unwrap_err().contains("веб-панели"));
+        assert_eq!(*stored.lock().unwrap(), before);
+        assert_eq!(local, previous);
+
+        let remote = local.cloud.as_ref().unwrap().validate().unwrap().fetch().unwrap().unwrap();
+        next.validate().unwrap().upload(&remote.snapshot, Condition::Revision(remote.revision.unwrap())).unwrap();
+        let rotated = stored.lock().unwrap().clone();
+        assert!(verify_cloud_password(&next).is_ok());
+        assert_eq!(*stored.lock().unwrap(), rotated);
+        local.cloud = Some(next);
+        let backups = tempfile::tempdir().unwrap();
+        assert_eq!(sync(&mut local, None, backups.path()).unwrap(), Report::Done("Данные уже синхронизированы".into()));
     }
 
     #[test]

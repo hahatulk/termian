@@ -107,6 +107,7 @@ pub(super) enum Menu {
 impl Shell {
     /// Settings… (⌘, / Ctrl+,): brings the window forward, or opens it.
     pub fn open_settings(&mut self, tab: Option<Tab>, cx: &mut Context<Self>) {
+        if self.privacy_locked() { return; }
         if let Some(handle) = self.settings_window {
             let shown = handle.update(cx, |settings, window, cx| {
                 if let Some(tab) = tab {
@@ -203,7 +204,14 @@ pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
         });
     });
     let file_access = std::rc::Rc::new(std::cell::RefCell::new(None));
-    cx.on_action(move |_: &OpenFileAccess, cx| super::file_access::open(&file_access, cx));
+    cx.on_action(move |_: &OpenFileAccess, cx| {
+        let file_access = file_access.clone();
+        cx.defer(move |cx| {
+            if main.read(cx).is_ok_and(|shell| !shell.privacy_locked()) {
+                super::file_access::open(&file_access, cx);
+            }
+        });
+    });
     cx.on_action(|_: &Quit, cx| cx.quit());
     let mut items = vec![MenuItem::action("Vaults", OpenVaults), MenuItem::action("SFTP", OpenSftp), MenuItem::action("Settings…", OpenSettings)];
     // The protected folders are a macOS matter, as in legacy.
@@ -216,6 +224,7 @@ pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
 
 impl Shell {
     fn show_pinned(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.privacy_locked() { return; }
         let id = self.tabs.all()[index].id;
         self.tabs.activate(id);
         window.activate_window();
