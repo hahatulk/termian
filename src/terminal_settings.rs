@@ -412,32 +412,37 @@ pub struct FontFace {
     pub label: &'static str,
     pub regular: (&'static str, u16),
     pub bold: (&'static str, u16),
-    /// File names in the legacy `src/ui/assets` (the `@font-face` sources).
-    pub files: &'static [&'static str],
+    pub files: &'static [(&'static str, &'static [u8])],
 }
 
 const SAUCE: &str = "SauceCodePro Nerd Font Mono";
 const OPERATOR: &str = "Operator Mono";
 const FIRA_MONO: &str = "FiraMono Nerd Font Mono";
 
+macro_rules! terminal_fonts {
+    ($($name:literal),+ $(,)?) => {
+        &[$(($name, include_bytes!(concat!("../assets/fonts/terminal/", $name)))),+]
+    };
+}
+
 pub const FONT_FACES: [FontFace; 17] = [
-    FontFace { label: "Source Code Pro", regular: (SAUCE, 400), bold: (SAUCE, 700), files: &["SauceCodeProNerdFontMono-Regular-a075caa1.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
-    FontFace { label: "Source Code Pro Medium", regular: (SAUCE, 500), bold: (SAUCE, 700), files: &["SauceCodeProNerdFontMono-Medium-cc62f20a.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
-    FontFace { label: "Operator Mono Book", regular: (OPERATOR, 325), bold: (OPERATOR, 400), files: &["OperatorMono-Book-8b7c2d70.otf", "OperatorMono-Bold-9efd8643.otf"] },
-    FontFace { label: "Operator Mono Medium", regular: (OPERATOR, 350), bold: (OPERATOR, 400), files: &["OperatorMono-Medium-67ac1792.otf", "OperatorMono-Bold-9efd8643.otf"] },
-    FontFace { label: "Fira Mono", regular: (FIRA_MONO, 400), bold: (FIRA_MONO, 700), files: &["FiraMonoNerdFontMono-Regular-8f953740.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
-    FontFace { label: "Fira Mono Medium", regular: (FIRA_MONO, 500), bold: (FIRA_MONO, 700), files: &["FiraMonoNerdFontMono-Medium-0aa28652.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
-    FontFace { label: "Inconsolata-g", regular: ("Inconsolata Nerd Font Mono", 400), bold: ("Inconsolata Nerd Font Mono", 700), files: &["InconsolataNerdFontMono-Regular-8e959977.ttf", "InconsolataNerdFontMono-Bold-ef7f1722.ttf"] },
-    FontFace { label: "Anonymous Pro", regular: ("AnonymicePro Nerd Font Mono", 400), bold: ("AnonymicePro Nerd Font Mono", 700), files: &["AnonymiceProNerdFontMono-Regular-fcf2f9ba.ttf", "AnonymiceProNerdFontMono-Bold-b69192d7.ttf"] },
-    FontFace { label: "Ubuntu Mono", regular: ("UbuntuMono Nerd Font Mono", 400), bold: ("UbuntuMono Nerd Font Mono", 700), files: &["UbuntuMonoNerdFontMono-Regular-e6d08eec.ttf", "UbuntuMonoNerdFontMono-Bold-b998edcd.ttf"] },
-    FontFace { label: "Droid Sans Mono", regular: ("DroidSansM Nerd Font Mono", 400), bold: ("DroidSansM Nerd Font Mono", 700), files: &["DroidSansMNerdFontMono-Regular-0eed7946.otf"] },
-    FontFace { label: "Dejavu Sans Mono", regular: ("DejaVuSansM Nerd Font Mono", 400), bold: ("DejaVuSansM Nerd Font Mono", 700), files: &["DejaVuSansMNerdFontMono-Regular-02ad4ecb.ttf", "DejaVuSansMNerdFontMono-Bold-967b90db.ttf"] },
-    FontFace { label: "PT Mono", regular: ("PT Mono", 400), bold: ("PT Mono", 700), files: &["PTM55FT-cbe732b3.ttf"] },
-    FontFace { label: "Andale Mono", regular: ("Andale Mono", 400), bold: ("Andale Mono", 700), files: &["AndaleMono-48d9bc61.ttf"] },
-    FontFace { label: "Cascadia Code", regular: ("CaskaydiaCove Nerd Font Mono", 400), bold: ("CaskaydiaCove Nerd Font Mono", 700), files: &["CaskaydiaCoveNerdFontMono-Regular-f30b07c7.ttf", "CaskaydiaCoveNerdFontMono-Bold-d73327e9.ttf"] },
-    FontFace { label: "Fira Code", regular: ("FiraCode Nerd Font", 400), bold: ("FiraCode Nerd Font Mono", 700), files: &["FiraCodeNerdFont-Regular-7e49cee3.ttf", "FiraCodeNerdFontMono-Bold-08b86e12.ttf"] },
-    FontFace { label: "JetBrains Mono", regular: ("JetBrainsMono Nerd Font Mono", 400), bold: ("JetBrainsMono Nerd Font Mono", 700), files: &["JetBrainsMonoNerdFontMono-Regular-276cf05f.ttf", "JetBrainsMonoNerdFontMono-Bold-1a606ae3.ttf"] },
-    FontFace { label: "Meslo", regular: ("MesloLGS Nerd Font Mono", 400), bold: ("MesloLGS Nerd Font Mono", 700), files: &["MesloLGSNerdFontMono-Regular-7fc866e6.ttf", "MesloLGSNerdFontMono-Bold-cf2b2171.ttf"] },
+    FontFace { label: "Source Code Pro", regular: (SAUCE, 400), bold: (SAUCE, 700), files: terminal_fonts!["SauceCodeProNerdFontMono-Regular-a075caa1.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
+    FontFace { label: "Source Code Pro Medium", regular: (SAUCE, 500), bold: (SAUCE, 700), files: terminal_fonts!["SauceCodeProNerdFontMono-Medium-cc62f20a.ttf", "SauceCodeProNerdFontMono-Bold-33bdfcf8.ttf"] },
+    FontFace { label: "Operator Mono Book", regular: (OPERATOR, 325), bold: (OPERATOR, 400), files: terminal_fonts!["OperatorMono-Book-8b7c2d70.otf", "OperatorMono-Bold-9efd8643.otf"] },
+    FontFace { label: "Operator Mono Medium", regular: (OPERATOR, 350), bold: (OPERATOR, 400), files: terminal_fonts!["OperatorMono-Medium-67ac1792.otf", "OperatorMono-Bold-9efd8643.otf"] },
+    FontFace { label: "Fira Mono", regular: (FIRA_MONO, 400), bold: (FIRA_MONO, 700), files: terminal_fonts!["FiraMonoNerdFontMono-Regular-8f953740.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
+    FontFace { label: "Fira Mono Medium", regular: (FIRA_MONO, 500), bold: (FIRA_MONO, 700), files: terminal_fonts!["FiraMonoNerdFontMono-Medium-0aa28652.otf", "FiraMonoNerdFontMono-Bold-8923d43c.otf"] },
+    FontFace { label: "Inconsolata-g", regular: ("Inconsolata Nerd Font Mono", 400), bold: ("Inconsolata Nerd Font Mono", 700), files: terminal_fonts!["InconsolataNerdFontMono-Regular-8e959977.ttf", "InconsolataNerdFontMono-Bold-ef7f1722.ttf"] },
+    FontFace { label: "Anonymous Pro", regular: ("AnonymicePro Nerd Font Mono", 400), bold: ("AnonymicePro Nerd Font Mono", 700), files: terminal_fonts!["AnonymiceProNerdFontMono-Regular-fcf2f9ba.ttf", "AnonymiceProNerdFontMono-Bold-b69192d7.ttf"] },
+    FontFace { label: "Ubuntu Mono", regular: ("UbuntuMono Nerd Font Mono", 400), bold: ("UbuntuMono Nerd Font Mono", 700), files: terminal_fonts!["UbuntuMonoNerdFontMono-Regular-e6d08eec.ttf", "UbuntuMonoNerdFontMono-Bold-b998edcd.ttf"] },
+    FontFace { label: "Droid Sans Mono", regular: ("DroidSansM Nerd Font Mono", 400), bold: ("DroidSansM Nerd Font Mono", 700), files: terminal_fonts!["DroidSansMNerdFontMono-Regular-0eed7946.otf"] },
+    FontFace { label: "Dejavu Sans Mono", regular: ("DejaVuSansM Nerd Font Mono", 400), bold: ("DejaVuSansM Nerd Font Mono", 700), files: terminal_fonts!["DejaVuSansMNerdFontMono-Regular-02ad4ecb.ttf", "DejaVuSansMNerdFontMono-Bold-967b90db.ttf"] },
+    FontFace { label: "PT Mono", regular: ("PT Mono", 400), bold: ("PT Mono", 700), files: terminal_fonts!["PTM55FT-cbe732b3.ttf"] },
+    FontFace { label: "Andale Mono", regular: ("Andale Mono", 400), bold: ("Andale Mono", 700), files: terminal_fonts!["AndaleMono-48d9bc61.ttf"] },
+    FontFace { label: "Cascadia Code", regular: ("CaskaydiaCove Nerd Font Mono", 400), bold: ("CaskaydiaCove Nerd Font Mono", 700), files: terminal_fonts!["CaskaydiaCoveNerdFontMono-Regular-f30b07c7.ttf", "CaskaydiaCoveNerdFontMono-Bold-d73327e9.ttf"] },
+    FontFace { label: "Fira Code", regular: ("FiraCode Nerd Font", 400), bold: ("FiraCode Nerd Font Mono", 700), files: terminal_fonts!["FiraCodeNerdFont-Regular-7e49cee3.ttf", "FiraCodeNerdFontMono-Bold-08b86e12.ttf"] },
+    FontFace { label: "JetBrains Mono", regular: ("JetBrainsMono Nerd Font Mono", 400), bold: ("JetBrainsMono Nerd Font Mono", 700), files: terminal_fonts!["JetBrainsMonoNerdFontMono-Regular-276cf05f.ttf", "JetBrainsMonoNerdFontMono-Bold-1a606ae3.ttf"] },
+    FontFace { label: "Meslo", regular: ("MesloLGS Nerd Font Mono", 400), bold: ("MesloLGS Nerd Font Mono", 700), files: terminal_fonts!["MesloLGSNerdFontMono-Regular-7fc866e6.ttf", "MesloLGSNerdFontMono-Bold-cf2b2171.ttf"] },
 ];
 
 /// A bundled face, or a typed system font name used as it is.
@@ -446,8 +451,7 @@ pub fn font_face(label: &str) -> FontFace {
 }
 
 /// Where the bundled font files are: `TERMIAN_FONTS_DIR`, the app bundle's
-/// `Resources/fonts` or `fonts` next to the EXE, else the legacy assets of a
-/// source checkout.
+/// `Resources/fonts` or `fonts` next to the EXE, else the embedded fonts.
 pub fn font_dirs() -> Vec<std::path::PathBuf> {
     let mut dirs = Vec::new();
     if let Some(dir) = std::env::var_os("TERMIAN_FONTS_DIR") {
@@ -459,20 +463,20 @@ pub fn font_dirs() -> Vec<std::path::PathBuf> {
             dirs.push(parent.join("fonts"));
         }
     }
-    dirs.push(concat!(env!("CARGO_MANIFEST_DIR"), "/legacy/src/ui/assets").into());
     dirs
 }
 
 /// Whether every file of a bundled face can be found.
 pub fn font_available(face: &FontFace) -> bool {
-    let dirs = font_dirs();
-    face.files.iter().all(|name| dirs.iter().any(|dir| dir.join(name).is_file()))
+    !face.files.is_empty()
 }
 
 /// The files of a face that exist, read.
 pub fn font_files(face: &FontFace) -> Vec<Vec<u8>> {
     let dirs = font_dirs();
-    face.files.iter().filter_map(|name| dirs.iter().find_map(|dir| std::fs::read(dir.join(name)).ok())).collect()
+    face.files.iter().map(|(name, embedded)| {
+        dirs.iter().find_map(|dir| std::fs::read(dir.join(name)).ok()).unwrap_or_else(|| embedded.to_vec())
+    }).collect()
 }
 
 #[cfg(test)]
@@ -563,6 +567,6 @@ mod tests {
         assert_eq!(FONT_FACES.map(|f| f.label), FONT_FAMILIES);
         assert_eq!(font_face("fira code").bold.0, "FiraCode Nerd Font Mono");
         assert!(font_face("Menlo").files.is_empty());
-        assert!(font_available(&font_face("JetBrains Mono")), "the legacy assets of this checkout");
+        assert!(font_available(&font_face("JetBrains Mono")));
     }
 }

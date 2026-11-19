@@ -1,154 +1,55 @@
 # Спецификация Termian
 
-Документ описывает назначение, архитектуру, функциональные требования, форматы данных, протоколы и инварианты проекта. Он дополняет [AGENTS.md](AGENTS.md) (правила работы с репозиторием) и профильные README:
+Документ описывает назначение, архитектуру, функциональные требования, форматы данных, протоколы и инварианты проекта. Документ дополняет [правила разработки](AGENTS.md), [README](README.md) и [документацию сервера](cloud-sync-server/README.md).
 
-- [README.md](README.md) — витрина проекта;
-- [legacy/README.md](legacy/README.md) — техническая документация клиента;
-- [legacy/src/ui/README.md](legacy/src/ui/README.md) — интерфейс;
-- [cloud-sync-server/README.md](cloud-sync-server/README.md) — сервер синхронизации.
+## 1. Назначение
 
-При расхождении приоритет такой: код и тесты → этот документ → README. Если поведение меняется, обновляйте spec.md вместе с кодом.
-
-Статусы в документе:
-
-- **Проверено** — подтверждено автоматическими тестами или ручным запуском (указано, каким именно).
-- **Не проверено в GUI** — покрыто только unit/интеграционными тестами, в собранном приложении не запускалось.
-
----
-
-## 1. Назначение и границы
-
-### 1.1. Назначение
-
-Termian — десктопный SSH/SFTP-клиент на **Tauri 2**: React/Redux-интерфейс поверх собственного нативного бэкенда на Rust. Данные хранятся локально; синхронизация между устройствами идёт через **собственный** сервер пользователя, который хранит только шифротекст.
-
-### 1.2. Поддерживаемые платформы
-
-| Платформа | Формат | Статус |
-| --- | --- | --- |
-| Windows x64 | Portable EXE (`termian-<version>-win-x64.exe`), нужен WebView2 | Локальная сборка и запуск проверены |
-| Windows x64 | Установщик NSIS (`termian-<version>-win-x64-setup.exe`), для текущего пользователя | Собирается в CI, запуск не проверен |
-| macOS Apple Silicon (arm64, macOS ≥ 11.0) | DMG + `.app.tar.gz` для автообновления | CI настроен, запуск на Mac не подтверждён |
-
-Android, Linux-клиент, macOS Intel и Electron **не поддерживаются**.
-
-### 1.3. Вне рамок проекта
-
-- Облачные аккаунты, команды, тарифы, Collaborate/Share, SSHid/passkeys, облачные интеграции AWS/DigitalOcean/Azure. Они убраны из интерфейса или заглушены.
-- Второй десктопный клиент (Electron) и дублирование исходников (`src-tauri/`, `ui-src/`).
-- Автоматическое разрешение конфликтов синхронизации без выбора пользователя.
-
----
+Termian содержит нативный SSH/SFTP-клиент на Rust и GPUI. Данные хранятся локально и могут синхронизироваться через собственный сервер. Релизные цели: Windows x64 (`x86_64-pc-windows-msvc`) и macOS Apple Silicon (`aarch64-apple-darwin`, минимальная версия 11.0). Android, Linux и macOS Intel не входят в релиз.
 
 ## 2. Структура репозитория
 
-| Путь | Назначение |
-| --- | --- |
-| `Cargo.toml`, `src/` | Нативный клиент на GPUI (в разработке, см. `docs/adr/0001-native-gpui-client.md`) |
-| `package.json` | Корневые скрипты: нативный клиент и сборка legacy (`legacy:*`) |
-| `legacy/` | Релизный клиент Tauri + WebView. Рабочий каталог npm-команд legacy |
-| `legacy/src/` | Исходники и конфигурация legacy-клиента |
-| `legacy/src/rust/` | Нативный бэкенд (Tauri-команды) |
-| `legacy/src/bridge/` | JS-мост: совместимость UI с Tauri |
-| `legacy/src/ui/` | Интерфейс (HTML + бандлы `assets/`, индексы `symbols.json`, `inventory.json`) |
-| `legacy/src/original-bridge.js` | Ранний скрипт-загрузчик каждого окна (preload-аналог Electron) |
-| `legacy/src/legacy-terminal.js` | Привязка локальных терминальных вкладок к нативному PTY |
-| `legacy/src/self-cloud-*.cjs`, `self-cloud.css`, `sync-change-groups.cjs`, `local-account.cjs` | Экспорт/импорт снимков, UI своего облака, офлайн-аккаунт |
-| `legacy/tests/` | Тесты Node (`node --test`) |
-| `legacy/scripts/` | Сборка, публикация, подпись обновлений, CDP-утилиты отладки |
-| `legacy/dist/` | Результаты сборки, Rust-кэш (`.cargo/`), **пользовательский профиль портативной Windows-версии** (`termian-data/`) |
-| `cloud-sync-server/` | Самостоятельный сервер синхронизации (Rust/axum, Docker) |
-| `.github/workflows/release.yml` | Релиз Windows x64 + macOS arm64 |
-
----
+- `Cargo.toml`, `src/`: клиент. `src/legacy/` читает существующий профиль macOS.
+- `assets/`: иконки, шрифты, ресурсы пакетов и публичный ключ обновлений.
+- `cloud-sync-server/`: отдельный сервер синхронизации на Rust и axum.
+- `scripts/release/`: вычисление версии, подпись пакетов и подготовка `latest.json`.
+- `scripts/package-macos.sh`, `scripts/termian.nsi`: упаковка бинарника Cargo.
+- `.github/workflows/release.yml`: тесты, сборка и публикация пакетов.
 
 ## 3. Архитектура клиента
 
-### 3.1. Слои
+Главное окно, настройки и окно доступа к папкам macOS используют GPUI. `src/session.rs`, `src/forwarding.rs` и `src/remote_fs.rs` обеспечивают SSH, проброс портов и удалённые файлы. Терминал использует `alacritty_terminal` и `portable-pty`.
 
-```text
-┌──────────────────────────────────────────────────────────────┐
-│ UI (React/Redux, src/ui/assets)                             │
-│   ожидает Electron, Node-модули и нативный @termius/libtermius│
-├──────────────────────────────────────────────────────────────┤
-│ JS-мост (original-bridge.js + src/bridge/*)                  │
-│   window.require/preloadedModules, электрон-шимы, Redux-relay│
-│   libtermius-замена, fs-шимы, self-cloud, логи сессий        │
-├──────────────────────────────────────────────────────────────┤
-│ Tauri 2 IPC (invoke / Channel / events)                      │
-├──────────────────────────────────────────────────────────────┤
-│ Rust (src/rust): russh SSH/SFTP/forward, portable-pty, serial│
-│   keyring, local_fs, self-cloud (scrypt+AES-GCM, ureq),      │
-│   session_logs, updater                                      │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Главный принцип: **внешнее поведение и протоколы UI сохраняются**. Мост реализует те контракты, которые UI ожидал от Electron и libtermius. Правки бандлов точечные и помечаются комментарием `// Tauri:`.
-
-### 3.2. Окна
-
-| Label | Страница | Роль |
-| --- | --- | --- |
-| `main` | `index.html?type=ui` | Основной интерфейс: подключения, терминал, Vault UI. Владелец автосинхронизации и выгрузки логов |
-| `background` | `background.html?type=background` | Скрытое окно, владелец Vault (IndexedDB), Store, адаптер снимков. `backgroundThrottling: disabled` |
-| `preferences` | `settings.html?type=preferences` | Окно настроек; создаётся при первом открытии, затем скрывается и показывается |
-
-- Закрытие `main` завершает приложение.
-- Redux-экшены между окнами передаются через `BroadcastChannel` `termian:redux` (`bridge/redux-relay.js`). Экшены с `meta.scope = 'local'` не пересылаются. Функции из payload вырезаются, `Map`/`Set`/`Date` сохраняются (JSON запрещён).
-- Запросы к фоновому окну (export/import/clear-logs) идут через IPC-шину `self-cloud:request` / `self-cloud:response`.
-
-### 3.3. Запуск
-
-- `bridge/startup-recovery.js` ставится только в `main`. Он показывает «Подготовка приложения…» лишь для нового профиля WebView, делает не более одной автоматической перезагрузки (`sessionStorage`) и затем предлагает ручной повтор с первыми пятью перехваченными ошибками.
-- Признак готовности профиля — `termian:startup:profile-ready` в localStorage.
-- Удалять `termian-data/`, IndexedDB или Vault для восстановления **запрещено**.
-
-### 3.4. Замена нативных модулей
-
-| Модуль UI | Реализация |
-| --- | --- |
-| `electron`, `@electron/remote` | Шимы в `original-bridge.js` |
-| `@termius/libtermius` | `bridge/ssh-compat*.js`: `SshClient`, `SshAgentStorage`, ключи, crypto, `terminalOutput`, `logging` |
-| `@termius/keytar` | Rust `keychain_*` (keyring: Windows Credential Manager, macOS Keychain) |
-| `fs` (main, preferences) | `bridge/local-fs.js` → Rust `local_fs*` |
-| `fs/promises` (background) | `bridge/node-shims.js`: каталог `session-logs-v2` → Rust `session_logs_fs`; прочие пути ведут себя как пустой каталог |
-| `@serialport/stream` | `bridge/serialport.js` → Rust (`serial2`) |
-| `@termius/mosh`, `child_process`, `net`, `crypto` | Инертные заглушки. Защищённые операции бросают исключение |
-
-Неизвестные модули возвращают инертный Proxy, чтобы деструктуризация экспортов не падала. Вызов защищённых операций (`fs.*`, `child_process.*`, `net.*`, Telnet, SRP) бросает исключение.
-
----
+При запуске клиент открывает свой Vault. При первом запуске найденный старый профиль macOS читается без записи в него. Если профиля нет, клиент создаёт пустой Vault. Повреждённый или закрытый Vault не заменяется пустым.
 
 ## 4. Функциональные требования
 
 ### 4.1. Терминал и подключения
 
-- **FR-T1.** SSH через `russh` (`rust/ssh_client.rs`) с колбэк-протоколом libtermius:
-  - проверка host key по known hosts, переданным UI; неявного доверия нет;
-  - выбор метода аутентификации, keyboard-interactive (до 20 раундов);
-  - таймаут подключения 20 с;
-  - события идут через Tauri `Channel`, ответы UI — через `ssh_client_reply`.
-- **FR-T2.** Технические ошибки подключения видны в логе connection-flow и в итоговом сообщении. При ошибке есть повтор с `-v`. Автоматических повторов без команды пользователя нет.
-- **FR-T3.** Локальный терминал — `portable-pty` (Windows ConPTY, macOS PTY). Оболочка берётся из Settings → Terminal → Local Terminal Path. Вкладка привязывается к xterm через React fiber (`legacy-terminal.js`). Новый `nativeSessionId` при каждом переподключении отсекает поздние события.
+- **FR-T1.** SSH через `russh` (`src/session.rs`). Неизвестный ключ хоста требует подтверждения. Клиент поддерживает пароль, ключ и keyboard-interactive.
+- **FR-T2.** Ошибки SSH видны на экране подключения и в журнале. Ручной повтор доступен после ошибки.
+- **FR-T3.** Локальный терминал использует `portable-pty`: ConPTY на Windows, PTY на macOS. Оболочка выбирается в Settings → Terminal → Local Terminal Path.
+
 - **FR-T4.** Serial/COM: скорость, data bits, parity, stop bits, flow control.
-- **FR-T5.** Буфер обмена — `plugin-clipboard-manager`: Windows Ctrl+C (с выделением копирует, без выделения отправляет прерывание) / Ctrl+V; macOS ⌘C/⌘V.
+- **FR-T5.** Буфер обмена: Windows Ctrl+C (с выделением копирует, без выделения отправляет прерывание) / Ctrl+V; macOS ⌘C/⌘V.
 - **FR-T6.** Mosh не поддерживается.
 - **FR-T7. Нативный клиент:** Settings → Terminal → Import shell history управляет фоновым чтением существующей истории bash/zsh/fish при новом локальном Unix-терминале, SSH-входе и переподключении. Импорт не выполняет команды истории и не пропускает их через вывод терминала или лог сессии; SSH использует отдельный exec-канал. До 10 000 записей читаются из стандартных файлов/сессии истории, без загрузки пользовательской конфигурации (кроме обязательного для zsh `.zshenv`); нестандартные HISTFILE и сессии fish не поддерживаются. На запрос — таймаут 10 секунд и предел вывода 4 МиБ; ошибки, неуспешный exit status, незавершённый или слишком большой ответ пропускаются. Баннеры вне маркеров ответа отбрасываются. Команды с тем же текстом и хостом не дублируются и не повышают рейтинг при повторном импорте; новые записи имеют неизвестную дату (`0`), частоту из импортированного набора и добавляются после существующих, до общего предела 2000. Отключение настройки отбрасывает поздний результат, но включение начинает чтение только со следующего подключения. Многострочность не гарантируется при построчном разборе, как в legacy. Локальный импорт на Windows не реализован. Проверено тестами реальных оболочек с изолированными файлами, локальных/SSH-событий, выключенной настройки, лимитов, сохранности истории и слияния; GUI и настоящий удалённый SSH-сервер не проверялись.
 
 ### 4.2. Проброс портов и SFTP
 
-- **FR-P1.** Local, remote и dynamic (SOCKS) forwarding поверх сессии russh (`rust/ssh_forward.rs`). Local/dynamic по умолчанию слушают `127.0.0.1`; другой адрес задаётся явно в правиле. Host chains работают через локальные форварды.
-- **FR-S1.** SFTP (`rust/sftp.rs`, `russh-sftp`): handle-API с SFTP-кодами статуса, чтение блоками до 256 КиБ.
-- **FR-S2.** Панель **Local** работает с реальной файловой системой (`rust/local_fs.rs`). Ошибки возвращаются в Node-кодах (`ENOENT`, `EACCES`, `EPERM`, …); синхронные вызовы не поддерживаются. Реальный `fs` есть только в окнах `main` и `preferences`.
+- **FR-P1.** Local, remote и dynamic (SOCKS) forwarding поверх SSH (`src/forwarding.rs`). Для Local и Dynamic по умолчанию используется `127.0.0.1`.
+- **FR-S1.** SFTP использует `russh-sftp` (`src/remote_fs.rs`).
+- **FR-S2.** Панель Local читает и изменяет файлы через `src/files.rs`.
+
 - **FR-S3.** macOS: окно «Доступ к файлам» показывает статус защищённых папок (опрос раз в 2 с) и открывает разделы «Конфиденциальность и безопасность». Запрос прав в GUI не проверялся.
 - **FR-S4.** В шапке SFTP-панели есть кнопка **Disconnect**.
 - **FR-S5. Нативный клиент:** ручной Retry продолжает файл, начатый текущей передачей, с размера частичной копии после проверки размера исходного файла и побайтового сравнения скопированного префикса. Replace начинает с нуля; при несовпадении или недоступности частичной копии повтор сообщает ошибку. Проверка требует права чтения и не обнаруживает изменения ещё не скопированной части исходного файла при неизменном размере. Автоматический повтор и переподключение не реализованы. Проверено тестами локальных файлов и тестового SFTP-сервера; GUI не проверялся.
 
 ### 4.3. Vault и секреты
 
-- **FR-V1.** Хосты, группы, идентификаторы, SSH-ключи (включая сертификаты), SSH/Telnet-конфигурации, прокси, сниппеты и пакеты, правила проброса, шаблоны рабочих областей и настройки хранятся в IndexedDB фонового окна (Store из бандла).
-- **FR-V2.** Локальный ключ Vault и пароли хранятся в системном хранилище (keyring). Индекс аккаунтов keytar лежит в данных приложения и не содержит секретов.
-- **FR-V3.** Офлайн-аккаунт (`local-account.cjs`) авторизует UI без облачного сервиса и блокирует облачные API.
+- **FR-V1.** Хосты, ключи, идентификаторы, история и настройки хранятся в зашифрованном `vault.bin`.
+- **FR-V2.** Случайный ключ Vault защищён средствами ОС; на macOS используется Secure Enclave.
+- **FR-V3.** Для работы клиента не требуется облачная учётная запись.
+
 - **FR-V6. Нативный клиент на macOS:** Vault открывается после системной проверки Touch ID или пароля учётной записи. Secure Enclave защищает случайный локальный ключ; десериализованный Vault существует в памяти процесса. До открытия Vault интерфейс хостов и синхронизация не запускаются. Версия `TMNVLT1` переходит на `TMNVLT2` после проверки новой зашифрованной копии. Формат облачного снимка, резервных копий перед импортом и алгоритм слияния не меняются.
 - **FR-V4. Нативный клиент:** Keychain → Generate Key создаёт программные ED25519, ECDSA (P-256/P-384/P-521) и RSA (2048–8192 бит; в форме 2048/4096 и отклоняемый backend вариант 1024 из legacy). OpenSSH-пара с комментарием `Generated By Termian` генерируется в фоне без временных файлов. Passphrase шифрует приватный ключ, Save passphrase управляет сохранением парольной фразы в Vault. Закрытие формы исключает сохранение позднего результата. Cipher/Rounds не настраиваются, используются defaults библиотеки. Проверено тестами генерации, разбора и запроса парольной фразы при SSH-входе; GUI не проверялся.
 - **FR-V5. Нативный клиент: SSH-сертификаты.** У ключа — один OpenSSH user certificate (первая запись legacy `ssh_certificates` / `sshKeys[].certificates`), поле Certificate в форме ключа. При входе сертификат предлагается раньше ключа; если сервер отказал, предлагается сам ключ. Экспорт сохраняет поля и `local_id` первой записи, очистка поля удаляет сертификат из снимка.
@@ -157,10 +58,8 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 ### 4.4. Логи сессий
 
-- **FR-L1. Запись всего вывода.** Пишется вывод SSH, Telnet, Serial и локальных терминалов.
-  - Логи включены для каждого vault, пока их явно не выключили в Settings → Logs (`areSessionLogsEnabled`: `enabled !== false`).
-  - SSH/Telnet/Serial пишет UI через `terminalOutput.Writer`.
-  - Локальные терминалы пишет `legacy-terminal.js`. Данные лога берутся из `PRE_CREATE_HISTORY` или из пропа `connection` в React. Вывод до появления лога буферизуется (до 1 МиБ). При закрытии вкладки отправляется `FINISH_SESSION_LOG_WRITING`.
+- **FR-L1. Запись вывода.** Клиент записывает вывод SSH, Serial и локальных терминалов. Запись можно отключить в Settings → Logs.
+
 - **FR-L2. Шифрование и формат.** У каждого лога свой случайный 32-байтный ключ в записи истории Vault (`session_log_data.secretKey`). Формат файла `<connection-id>.log`:
 
   ```text
@@ -175,7 +74,7 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
   - Иначе показывается «Файл лога сессии не найден…».
   - Фоновая сага `DOWNLOAD_SESSION_LOG_FILE` всегда отвечает `success` или `failure`.
 - **FR-L5. Ретенция 60 дней.** Клиент удаляет файлы, не изменявшиеся больше 60 дней, при запуске и каждые 6 часов. Сервер делает то же по своему `SYNC_LOG_RETENTION_DAYS` (по умолчанию 60). Записи истории остаются; открыть такой лог нельзя.
-- **FR-L6. Тихая резервная копия в своё облако** (`bridge/session-log-sync.js` + `session_logs_cloud_sync`).
+- **FR-L6. Тихая резервная копия в своё облако** (`src/log_backup.rs`).
   - Условия: облако настроено и автосинхронизация включена.
   - Расписание: через 45 с после запуска, раз в час и через 5 с после закрытия сессии.
   - Отправляются только новые и изменённые файлы. Учёт ведётся в `session-log-uploads.json` (имя, размер, mtime — без секретов).
@@ -194,7 +93,7 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 #### 4.5.1. Конфигурация
 
-- `self-cloud.json` в данных приложения хранит `url`, `token`, `passphrase`, `basic_user`, `basic_password` и `auto_sync`. Секреты в UI не возвращаются, интерфейс только записывает их.
+- Зашифрованный Vault хранит `url`, `token`, `passphrase`, `basic_user`, `basic_password` и `auto_sync`. Секреты в UI не возвращаются, интерфейс только записывает их.
 - Требования к значениям:
   - URL — HTTPS; HTTP допустим только для локальной сети (loopback, частные IPv4, link-local, `100.64.0.0/10`, IPv6 ULA/link-local, имена без точки, `.local`, `.lan`, `.home.arpa`, `.internal`, `.localhost`). URL без учётных данных, query и fragment;
   - токен — печатный ASCII до 4096 символов;
@@ -213,24 +112,23 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 - Конверт `{version: 1, salt, iv, tag, ciphertext}` (base64): scrypt (N = 2^14, r = 8, p = 1) → AES-256-GCM.
 - Ограничения размера: открытый текст до 47 МиБ, тело запроса до 64 МиБ.
-- Неверный пароль шифрования ограничивается на клиенте: 3 попытки без задержки, затем блокировка от 30 с с удвоением до 15 мин (`self-cloud-decrypt-guard.json`).
 
 #### 4.5.4. Операции
 
 | Операция | Поведение |
 | --- | --- |
-| Проверка (опрос раз в 60 с, при фокусе) | Только чтение. Сравнивает индексы SHA-256 с базой `termian:self-cloud:baseline:v1` (обе стороны) и выдаёт статус: `synced`, `upload`, `download`, `conflict`, `uncertain`, `empty`, `error`, `unconfigured` |
+| Проверка (опрос раз в 60 с, при фокусе) | Только чтение. Сравнивает индексы SHA-256 с базой обеих сторон в Vault и выдаёт статус: `synced`, `upload`, `download`, `conflict`, `uncertain`, `empty`, `error`, `unconfigured` |
 | **Синхронизировать** (кнопка или автозапуск) | Трёхстороннее слияние (§4.5.5) |
 | Отправить | Принудительно заменяет снимок в облаке локальными данными в sync-форме |
 | Получить | Резервная копия, затем принудительно заменяет локальные данные снимком из облака |
 
 Все операции окна выполняются последовательно через общую очередь. После ошибки токена или пароля фоновые проверки и автосинхронизация приостанавливаются до изменения настроек или ручной проверки.
 
-#### 4.5.5. Алгоритм слияния (`bridge/sync-merge.js`)
+#### 4.5.5. Алгоритм слияния (`src/sync.rs`)
 
 1. **Стабильные идентификаторы.**
    - В облаке `local_id` каждой записи — постоянный sync-ID: UUID для новых записей или числа из снимков старого формата.
-   - Устройство хранит соответствие `local_id → sync-ID` по коллекциям в `termian:self-cloud:merge:v1` (localStorage, привязано к SHA-256 адреса сервера). Там же лежат дайджесты записей обеих сторон на момент прошлой синхронизации.
+   - Устройство хранит соответствие `local_id → sync-ID` по коллекциям в состоянии синхронизации Vault (привязано к адресу сервера). Там же лежат дайджесты записей обеих сторон на момент прошлой синхронизации.
    - Перевод ID затрагивает саму запись и все ссылки: `ssh_key`, `identity`, `proxy`, `startup_snippet`, `parent_group`, `group`, `ssh_config`, `telnet_config`, `package`, `host`, `targetHosts[]`, `hosts_chain[]`.
 2. **Сопоставление** записей без sync-ID (первая синхронизация устройства, данные после старой полной загрузки).
    - Сначала по названию: `kind + label + номер вхождения` для групп, хостов, идентификаторов, ключей, сниппетов, пакетов, прокси, правил проброса и шаблонов.
@@ -261,7 +159,7 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 #### 4.5.6. Автосинхронизация
 
-- Включена по умолчанию; флажок в Settings → Account → «Своё облако» (`self_cloud_set_auto_sync`, поле `autoSync`).
+- Включена по умолчанию; флажок в Settings → Account → «Своё облако».
 - Выполняется в окне `main` через 60 с после запуска и затем каждые 60 мин, если облако настроено.
 - Тот же флажок управляет выгрузкой логов.
 
@@ -281,42 +179,21 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 ### 4.6. Автообновление
 
-- Работает только в релизных сборках (задан `TERMIAN_RELEASE_VERSION`). Проверка через 20 с после запуска и затем каждые 6 часов. Отключается переменной `TERMIAN_DISABLE_UPDATES=1`.
-- Источник — GitHub API `/repos/<owner>/<repo>/releases` (релизы публикуются как prerelease). Выбирается максимальная стабильная версия `vX.Y.Z` выше текущей, у которой есть `latest.json`. Репозиторий задаётся `TERMIAN_UPDATE_REPOSITORY`, по умолчанию `hahatulk/termius`.
-- Подпись minisign с `--app-version`, `requireSignedVersion: true`. Ключ `plugins.updater.pubkey` меняется только вместе с ротацией ключа.
-- Обновление скачивается и устанавливается в фоне, затем пользователь видит уведомление «Перезапустить» / «Позже». Открытые SSH-сессии не обрываются.
-- Windows, портативная версия (ключ `windows-x86_64`): работающий EXE переименовывается в `.exe.old`, новый занимает его путь.
-- Windows, установленная версия (ключ `windows-x86_64-nsis`; тип сборки вписан в бинарник): проверенный `-setup.exe` запускается в пассивном режиме по кнопке «Перезапустить» или при закрытии главного окна.
-- macOS: `.app` подменяется на месте (не из DMG и не из App Translocation).
-- Settings → Version: статус обновления, кнопка «Проверить обновления» (`update_check`, проверка и загрузка сразу), прогресс загрузки (байты и проценты, событие `termian://update-status` во все окна) и «Перезапустить и обновить».
-- Webview не получает прав `updater:*`; ему доступны только `update_status`, `update_check` и `update_restart`.
+- Релизные сборки используют `TERMIAN_RELEASE_VERSION` и `TERMIAN_UPDATE_REPOSITORY`. Первая проверка через 20 секунд, последующие через 6 часов. `TERMIAN_DISABLE_UPDATES=1` отключает проверки.
+- Клиент принимает пакет, подписанный прежним ключом minisign. Публичный ключ находится в `assets/app/update-public-key`. Подписанный комментарий `version:` должен совпадать с версией из `latest.json`.
+- Windows заменяет бинарник на месте, macOS заменяет `.app`. Новая версия запускается после перезапуска. Клиент не закрывает активные SSH-сессии при загрузке пакета.
 
-### 4.7. Оформление и меню
+### 4.7. Оформление
 
-- Windows: окна без системной рамки; кнопки окна и гамбургер-меню рисует UI (нативное меню Tauri).
-- macOS: `tauri.macos.conf.json` — `titleBarStyle: Overlay`, системные кнопки поверх заглушек UI; строка меню termian/File/Edit/View/Window.
-- Перетаскивание окна по `-webkit-app-region: drag` выполняет `bridge/app-region.js` через `startDragging()`.
-- Брендинг: окна называются «Termian», ключи генерируются с комментарием `Generated By Termian`.
+GPUI рисует интерфейс и обрабатывает сочетания клавиш. На macOS системные кнопки окна видны в строке вкладок. Меню настроек доступно из главного окна.
 
----
+## 5. Модули клиента
 
-## 5. Нативные команды (Tauri IPC)
-
-| Группа | Команды |
-| --- | --- |
-| Терминал | `start_terminal`, `write_terminal`, `resize_terminal`, `stop_terminal`, `list_serial_ports`, `app_info` |
-| SSH | `ssh_client_connect`, `ssh_client_reply`, `ssh_client_close`, `ssh_client_shell`, `ssh_client_exec`, `ssh_client_write`, `ssh_client_resize`, `ssh_client_close_channel`, `ssh_forward_start` |
-| SFTP | `sftp_start`, `sftp_stop`, `sftp_op` |
-| Ключи | `ssh_generate_key` |
-| Локальные файлы | `local_fs`, `local_fs_read`, `local_fs_write`, `local_fs_permissions` |
-| Системное | `keychain_get`, `keychain_set`, `keychain_delete`, `keychain_find`, `open_external`, `quit_app` |
-| Своё облако | `self_cloud_get_config`, `self_cloud_save_config`, `self_cloud_set_auto_sync`, `self_cloud_probe`, `self_cloud_fetch`, `self_cloud_upload(snapshot, revision?, create?)`, `self_cloud_download`, `self_cloud_backup` |
-| Логи сессий | `session_log_append`, `session_log_read`, `session_logs_fs`, `session_logs_cloud_sync`, `session_log_cloud_restore`, `session_logs_clear(since, keep)` |
-| Обновления | `update_status`, `update_check`, `update_restart` |
-
-Пользовательские пути проходят валидацию в Rust. Имена логов не могут выйти за пределы `session-logs-v2/`. `open_external` разрешает только определённые URL и панели Системных настроек macOS.
-
----
+- `src/session.rs`, `src/login.rs`: SSH, аутентификация и терминальные сессии.
+- `src/transfer.rs`, `src/remote_fs.rs`: SFTP и состояние передач.
+- `src/store.rs`, `src/vault.rs`: шифрование и модель данных.
+- `src/cloud.rs`, `src/self_cloud.rs`, `src/sync.rs`: транспорт, операции облака и слияние.
+- `src/updater.rs`: проверка подписи и установка обновления.
 
 ## 6. Сервер синхронизации
 
@@ -347,101 +224,43 @@ Android, Linux-клиент, macOS Intel и Electron **не поддержива
 
 ## 7. Данные приложения
 
-| Что | Где |
-| --- | --- |
-| Профиль Windows portable | `termian-data/` рядом с EXE (WebView2 в `webview/`, Vault, конфиги) |
-| Профиль Windows installer | `%APPDATA%\app.termian.desktop`, WebView2 в `%LOCALAPPDATA%\app.termian.desktop\EBWebView` |
-| Профиль macOS | Системный каталог данных приложения (`app.termian.desktop`) |
-| Конфиг своего облака | `self-cloud.json` |
-| Блокировка неверного пароля | `self-cloud-decrypt-guard.json` |
-| Резервные копии перед импортом | `self-cloud-backups/` (зашифрованы, последние 10) |
-| Логи сессий | `session-logs-v2/*.log` |
-| Учёт выгрузки логов | `session-log-uploads.json` |
-| База и соответствия синхронизации | localStorage: `termian:self-cloud:baseline:v1`, `termian:self-cloud:merge:v1`, `termian:self-cloud:last-sync` |
-
-Перечисленные данные пользователя нельзя удалять автоматически, в том числе при восстановлении после ошибок запуска.
-
----
+Клиент хранит `vault.bin`, `known_hosts`, `self-cloud-backups/` и `session-logs-v2/` в каталоге `termian-native` внутри системного каталога данных. Конфигурация облака и состояние слияния входят в Vault. Каталог `termian-data/` прежнего клиента и его системные профили не удаляются. На macOS возможен импорт старого профиля WebKit; на Windows перенос выполняется через облачный снимок.
 
 ## 8. Безопасность
 
-- CSP: `default-src 'self'`; скрипты только `'self'`; `connect-src` только IPC.
-- Права webview: базовые операции с окнами, буфер обмена (текст), `dialog:allow-confirm`, создание окна. Файловая система, SSH и секреты доступны только через Rust-команды.
-- Секреты (токен, пароль шифрования, пароли хостов, приватные ключи, ключи логов) не логируются и не попадают в Git. Ключи логов уходят на сервер только внутри конверта, запечатанного паролем шифрования.
-- Хранилище логов, локальная база слияния и учёт выгрузки содержат только хеши и имена, без открытого содержимого.
-- Host keys SSH проверяются всегда; неизвестный ключ требует подтверждения пользователя.
+- Секреты не попадают в Git или логи. Ключи сессий передаются в облако только в зашифрованном конверте.
+- Ключ SSH-хоста проверяется. Неизвестный ключ требует подтверждения пользователя.
+- Если снимок на сервере пропал, обычная синхронизация не удаляет локальные данные. Запись при слиянии условная. Перед импортом создаётся зашифрованная резервная копия.
 
----
+## 9. Сборка
 
-## 9. Сборка, тестирование, релиз
-
-### 9.1. Команды (из `legacy/`)
+### 9.1. Команды
 
 ```bash
-npm ci
-npm test            # build:web + node --test tests/*.test.mjs
-npm run check:web   # проверка UI-бандлов, синтаксиса моста, сборки web
-npm run index:ui    # пересборка symbols.json после правки бандлов
-npm run dev
-npm run build:windows
-npm run build:mac
-npm run clean:rust-cache
+cargo run --locked --bin termian-native
+cargo test --locked
+cargo build --locked --release --bin termian-native
+cargo test --locked --manifest-path scripts/release/Cargo.toml
+cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 ```
 
-Rust-тесты (нужен собранный `dist/web`):
+### 9.4. Релиз
 
-```bash
-CARGO_TARGET_DIR=$PWD/dist/.cargo MACOSX_DEPLOYMENT_TARGET=11.0 \
-  cargo test --release --lib --target aarch64-apple-darwin --manifest-path src/Cargo.toml --locked
-```
+[GitHub Actions](.github/workflows/release.yml) тестирует и собирает клиент через Cargo на Windows x64 и macOS Apple Silicon. macOS использует `MACOSX_DEPLOYMENT_TARGET=11.0`, Xcode Swift, `codesign` и `hdiutil`. Windows использует компилятор MSVC и NSIS для упаковки. Клиент и workflow не требуют Node.js или WebView.
 
-Сервер: `cd cloud-sync-server && cargo test`.
+Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg` и `termian-<version>-mac-arm64.app.tar.gz`. Версия берётся из стабильных тегов `vX.Y.Z` или из параметра ручного запуска. Для публикации нужны пакеты обеих платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`.
 
-### 9.2. Требования к изменениям
+- `TERMIAN_SIGNING_PRIVATE_KEY` содержит прежний ключ minisign в Base64, `TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD` содержит его пароль. Workflow также принимает прежние имена `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Публичный ключ меняется только при ротации.
+- Без Apple Developer ID `.app` подписывается ad-hoc. Для подписи и нотариализации нужны `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` и `APPLE_TEAM_ID`.
+- Кэш Cargo остаётся в `target/`. Упаковка пишет в `dist/`. Установщик NSIS не удаляет каталоги данных.
 
-- Для изменений JS/UI обязательны `npm test` и `npm run check:web`; для Rust — Cargo-тесты.
-- Сначала тест, потом исправление UI.
-- Нельзя утверждать, что GUI проверен, если он не запускался.
-- Документация обновляется вместе с поведением. Для этого файла это тоже обязательно.
+## 10. Инварианты
 
-### 9.3. Ключевые тесты
-
-| Файл | Что покрывает |
-| --- | --- |
-| `tests/first-launch.test.mjs`, `startup-performance.test.mjs` | Первый запуск без чёрного экрана |
-| `tests/bridge.test.mjs`, `original-ui.test.mjs`, `app-region.test.mjs` | Мост и точечные правки UI |
-| `tests/legacy-terminal.test.mjs` | Локальный PTY и запись его лога |
-| `tests/local-fs.test.mjs` | Панель Local |
-| `tests/self-cloud-scope.test.mjs`, `sync-status.test.mjs`, `sync-change-groups.test.mjs` | Состав снимка, статусы, группировка изменений |
-| `tests/sync-merge.test.mjs` | Слияние на двух эмулированных устройствах, конфликты, удаления, гонки, очистка логов, проводка UI |
-| `tests/session-logs.test.mjs` | Формат и шифрование логов, читалка, fs-шим, тихая выгрузка |
-| `tests/updater.test.mjs`, `macos-release.test.mjs`, `build-performance.test.mjs` | Обновления и релиз |
-| Rust `session_logs::tests`, `native::tests`, `local_fs::tests`, `updater` | Нативные модули |
-
-### 9.4. Релиз (`.github/workflows/release.yml`)
-
-- Собираются только Windows x64 и macOS arm64. Неполный релиз не публикуется.
-- Релиз обязан содержать подписанные пакеты обновлений (`*.app.tar.gz`, portable `*-win-x64.exe`, установщик `*-win-x64-setup.exe`, каждый с `.sig`) и `latest.json` (`darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis`).
-- Windows: `tauri build --no-bundle`, затем `publish-windows.mjs`. Скрипт копирует портативный EXE (бинарник ещё не помечен, `…_VAR_UNK`), затем выполняет `tauri bundle --bundles nsis` (`installMode: currentUser`, языки RU/EN, WebView2 через загрузчик).
-- Секреты: `TAURI_SIGNING_PRIVATE_KEY` и при необходимости `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Для Developer ID дополнительно 6 секретов `APPLE_*`; без них используется ad-hoc подпись.
-- macOS: Cargo-тесты собираются с `--target aarch64-apple-darwin` и `MACOSX_DEPLOYMENT_TARGET=11.0`. Порядок: `tauri build --no-bundle` → `tauri bundle --bundles app,dmg` (повтор упаковки при `hdiutil … Resource busy`). Затем `codesign --verify`, а для Developer ID ещё `spctl --assess`.
-- Кэш `legacy/src -> ../dist/.cargo` сохраняется между сборками и не очищается автоматически.
-
----
-
-## 10. Инварианты (нельзя нарушать)
-
-1. Клиенты: нативный (корень, `src/`) и legacy (`legacy/`, исходники только в `legacy/src/`). Не создавать `src-tauri/`, `ui-src/`, копии Electron.
-2. Не очищать `legacy/dist/` целиком. Не трогать `termian-data/`, Vault, WebView-профили, резервные копии.
-3. Не удалять работающий код только из-за имени «Electron» в нём.
-4. Конфликт синхронизации разрешает только пользователь. Отправка слияния всегда условная (`If-Match` или `If-None-Match`). Перед импортом из облака делается резервная копия. Пропавший снимок на сервере не превращается в удаление локальных данных.
-5. Выгрузка логов не влияет на снимок, базу и индикацию синхронизации. Пароли и ключи хостов в метаданных логов не отправляются.
-6. Вкладка лога всегда завершает загрузку: выводом или видимой ошибкой.
-7. Первый запуск без данных не оставляет чёрный экран и не удаляет данные.
-8. `plugins.updater.pubkey` меняется только вместе с ротацией ключа. У webview нет прав `updater:*`.
-9. Без явного запроса не коммитить, не пушить и не переписывать пользовательские изменения.
-
----
+1. Клиент собирается из корневого `Cargo.toml`. Импорт старого профиля не требует сборки прежнего клиента.
+2. Повреждённый Vault и пользовательские профили нельзя удалять или сбрасывать при ошибке.
+3. Конфликт синхронизации решает пользователь. Выгрузка логов не изменяет снимок и базу слияния.
+4. Релиз не публикуется без пакетов обеих платформ и подписей обновлений.
+5. Без явного запроса не коммитить и не пушить изменения пользователя.
 
 ## 11. Известные ограничения
 
@@ -452,8 +271,8 @@ CARGO_TARGET_DIR=$PWD/dist/.cargo MACOSX_DEPLOYMENT_TARGET=11.0 \
 - Переименование записи на одном устройстве — обычное изменение. Но если до первой синхронизации устройства одна и та же запись называется по-разному, она станет двумя записями.
 - История подключений не синхронизируется, поэтому логи другого устройства недоступны.
 - Логи больше ~34 МиБ не отправляются в облако.
-- Реальное автообновление между двумя опубликованными релизами не проверялось; установщик NSIS и обновление через него не запускались (Windows-ветки Rust проверяются только сборкой в CI).
-- Mosh и аппаратные ключи (FIDO, Secure Enclave) не поддерживаются.
+- Реальное автообновление между двумя опубликованными релизами не проверялось; установщик NSIS и обновление через него не запускались (сборка Windows запускается в CI).
+- Mosh и аутентификация SSH аппаратными ключами FIDO не поддерживаются.
 
 ---
 
