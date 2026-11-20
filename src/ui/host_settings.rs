@@ -3,7 +3,7 @@
 //! their menus and the «Environment Variables» and «Select Color Theme»
 //! panels.
 
-use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, SharedString, Stateful, Window};
+use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, MouseButton, SharedString, Stateful, Window};
 use termian_native::terminal_settings::themes;
 use termian_native::theme;
 use termian_native::vault::EnvVar;
@@ -114,6 +114,7 @@ impl Shell {
                                 .gap_2()
                                 .child(svg().path(icon("identity")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
                                 .child(div().flex().flex_col().child(identity.label.clone()).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(detail)))
+                                .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     if let Some(editor) = &mut shell.host_editor {
                                         editor.host.identity = Some(id);
