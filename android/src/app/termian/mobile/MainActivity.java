@@ -50,6 +50,7 @@ public final class MainActivity extends Activity {
     private int widthDp;
     private MobileVault vault;
     private MobileFiles files;
+    private MobileUpdates updates;
     TermianStyle style;
     private JSONArray tabs = new JSONArray();
     private String tabId = "", page = "vault";
@@ -118,6 +119,7 @@ public final class MainActivity extends Activity {
             if (result.has("error")) throw new java.io.IOException(result.optString("error"));
             opened = true;
             build();
+            updates = new MobileUpdates(this);
         } catch (Exception e) {
             root.addView(label("Termian", 24, ACCENT));
             root.addView(label("Не удалось открыть Vault. Данные не были сброшены.", 16, MUTED));
@@ -128,17 +130,20 @@ public final class MainActivity extends Activity {
         super.onStart();
         visible = true;
         if (opened) handler.post(poll);
+        if (updates != null) updates.start();
     }
 
     @Override public void onStop() {
         visible = false;
         handler.removeCallbacks(poll);
+        if (updates != null) updates.stop();
         super.onStop();
     }
 
     @Override public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         if (question != null) question.dismiss();
+        if (updates != null) updates.close();
         if (opened) call("close");
         super.onDestroy();
     }
@@ -878,7 +883,7 @@ public final class MainActivity extends Activity {
     private void settings() {
         JSONObject state = call("vault");
         new AlertDialog.Builder(this).setTitle("Settings").setItems(new String[]{
-            "Self-hosted cloud", "Terminal", "Session logging", "Clear logs", "Privacy password"
+            "Self-hosted cloud", "Terminal", "Session logging", "Clear logs", "Privacy password", "Version"
         }, (d,i) -> {
             if (i == 0) cloudSettings(call("cloud"));
             if (i == 1) vault.terminalSettings(state.optJSONObject("terminal"));
@@ -895,6 +900,7 @@ public final class MainActivity extends Activity {
                         redrawHosts();
                     }).show()).show();
             if (i == 4) privacyPassword(false);
+            if (i == 5) updates.show();
         }).show();
     }
 
@@ -912,7 +918,10 @@ public final class MainActivity extends Activity {
         });
     }
 
+    boolean privacyLocked() { return locked; }
+
     private void lock() {
+        if (updates != null) updates.dismiss();
         if (!call("vault").optBoolean("privacyConfigured")) { privacyPassword(true); return; }
         dismissQuestion();
         locked = true;

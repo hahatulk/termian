@@ -156,13 +156,13 @@ pub struct Package {
     expected_file: String,
 }
 
-/// `latest.json` key of this build. The native client ships only the bundle
-/// (macOS) and the portable EXE (Windows); there is no installer yet.
 pub fn target() -> Option<&'static str> {
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some("darwin-aarch64")
     } else if cfg!(all(windows, target_arch = "x86_64")) {
         Some("windows-x86_64")
+    } else if cfg!(target_os = "android") {
+        Some("android-universal")
     } else {
         None
     }
@@ -183,6 +183,7 @@ pub fn select_package(manifest: &str, target: &str, current: &semver::Version) -
     let suffix = match target {
         "darwin-aarch64" => "mac-arm64.app.tar.gz",
         "windows-x86_64" => "win-x64.exe",
+        "android-universal" => "android.apk",
         _ => return Err("Пакет недоступен для автообновления на этой платформе".into()),
     };
     let expected_file = format!("termian-{version}-{suffix}");
@@ -199,10 +200,18 @@ fn base64_text(text: &str) -> Result<String, String> {
 /// tauri-plugin-updater does with `requireSignedVersion`: the manifest is not
 /// signed, so the signed version is what stops an old package passing as new.
 pub fn verify(bytes: &[u8], signature: &str, version: &str, expected_file: &str) -> Result<(), String> {
+    let (key, signature) = verification_key(signature)?;
+    key.verify(bytes, &signature, true).map_err(|_| "Подпись обновления не совпадает с ключом выпуска".to_owned())?;
+    verify_identity(&signature, version, expected_file)
+}
+
+fn verification_key(signature: &str) -> Result<(minisign_verify::PublicKey, minisign_verify::Signature), String> {
     let key = minisign_verify::PublicKey::decode(&base64_text(PUBLIC_KEY)?).map_err(|error| format!("public key: {error}"))?;
     let signature = minisign_verify::Signature::decode(&base64_text(signature)?).map_err(|error| format!("signature: {error}"))?;
-    key.verify(bytes, &signature, true).map_err(|_| "Подпись обновления не совпадает с ключом выпуска".to_owned())?;
-    // The trusted comment is covered by the global signature verified above.
+    Ok((key, signature))
+}
+
+fn verify_identity(signature: &minisign_verify::Signature, version: &str, expected_file: &str) -> Result<(), String> {
     let mut files = signature.trusted_comment().split('\t').filter_map(|field| field.strip_prefix("file:"));
     if files.next() != Some(expected_file) || files.next().is_some() {
         return Err("Подпись не соответствует пакету обновления для этой платформы".into());
@@ -263,8 +272,38 @@ fn package_for_release(manifest: &str, target: &str, current: &semver::Version, 
         .ok_or_else(|| format!("latest.json: версия пакета не совпадает с тегом v{version}"))
 }
 
-/// Download and verify `package`; `progress(downloaded, total)` runs every 256 KB.
-pub fn download(package: &Package, mut progress: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
+pub fn download(package: &Package, progress: impl FnMut(u64, Option<u64>)) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    download_chunks(package, progress, |chunk| {
+        bytes.extend_from_slice(chunk);
+        Ok(())
+    })?;
+    verify(&bytes, &package.signature, &package.version, &package.expected_file)?;
+    Ok(bytes)
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn download_apk(package: &Package, path: &Path, progress: impl FnMut(u64, Option<u64>)) -> Result<(), String> {
+    use std::io::Write;
+    let (key, signature) = verification_key(&package.signature)?;
+    let mut verifier = key.verify_stream(&signature).map_err(|error| format!("Подпись APK: {error}"))?;
+    let parent = path.parent().ok_or("Нет каталога для APK")?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    download_chunks(package, progress, |chunk| {
+        verifier.update(chunk);
+        file.write_all(chunk).map_err(|e| e.to_string())
+    })?;
+    verifier.finalize().map_err(|error| format!("Подпись APK: {error}"))?;
+    verify_identity(&signature, &package.version, &package.expected_file)?;
+    file.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn download_chunks(
+    package: &Package,
+    mut progress: impl FnMut(u64, Option<u64>),
+    mut write: impl FnMut(&[u8]) -> Result<(), String>,
+) -> Result<(), String> {
     let response = ureq::get(package.url.as_str())
         .timeout(Duration::from_secs(15 * 60))
         .set("user-agent", "termian-updater")
@@ -274,24 +313,24 @@ pub fn download(package: &Package, mut progress: impl FnMut(u64, Option<u64>)) -
     if total.is_some_and(|size| size > MAX_PACKAGE_BYTES) {
         return Err("Пакет обновления превышает 256 МиБ".into());
     }
-    let (mut reader, mut bytes, mut chunk, mut reported) = (response.into_reader(), Vec::new(), vec![0u8; 64 * 1024], 0u64);
+    let (mut reader, mut chunk, mut downloaded, mut reported) = (response.into_reader(), vec![0u8; 64 * 1024], 0u64, 0u64);
+    progress(0, total);
     loop {
         let read = reader.read(&mut chunk).map_err(|error| format!("Загрузка обновления: {error}"))?;
         if read == 0 {
             break;
         }
-        if bytes.len() as u64 + read as u64 > MAX_PACKAGE_BYTES {
+        downloaded += read as u64;
+        if downloaded > MAX_PACKAGE_BYTES {
             return Err("Пакет обновления превышает 256 МиБ".into());
         }
-        bytes.extend_from_slice(&chunk[..read]);
-        let downloaded = bytes.len() as u64;
+        write(&chunk[..read])?;
         if downloaded - reported >= PROGRESS_STEP || total == Some(downloaded) {
             reported = downloaded;
             progress(downloaded, total);
         }
     }
-    verify(&bytes, &package.signature, &package.version, &package.expected_file)?;
-    Ok(bytes)
+    Ok(())
 }
 
 /// Put verified `bytes` in place of the running app.
@@ -473,7 +512,8 @@ mod tests {
         let manifest = r#"{"version":"1.3.0","notes":"","pub_date":"2026-11-01T00:00:00.000Z","platforms":{
             "darwin-aarch64":{"signature":"c2ln","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-mac-arm64.app.tar.gz"},
             "windows-x86_64":{"signature":"d2lu","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-win-x64.exe"},
-            "windows-x86_64-nsis":{"signature":"bnNpcw==","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-win-x64-setup.exe"}}}"#;
+            "windows-x86_64-nsis":{"signature":"bnNpcw==","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-win-x64-setup.exe"},
+            "android-universal":{"signature":"YXBr","url":"https://github.com/o/r/releases/download/v1.3.0/termian-1.3.0-android.apk"}}}"#;
         let current = semver::Version::new(1, 2, 0);
         let mac = select_package(manifest, "darwin-aarch64", &current).unwrap().unwrap();
         assert_eq!((mac.version.as_str(), mac.signature.as_str()), ("1.3.0", "c2ln"));
@@ -482,6 +522,9 @@ mod tests {
         let beta_manifest = manifest.replace("1.3.0", "1.3.0-beta.1");
         assert_eq!(package_for_release(&beta_manifest, "darwin-aarch64", &current, &beta).unwrap().version, beta.to_string());
         assert!(mac.url.as_str().ends_with("mac-arm64.app.tar.gz"));
+        let apk = package_for_release(&beta_manifest, "android-universal", &current, &beta).unwrap();
+        assert_eq!(apk.expected_file, "termian-1.3.0-beta.1-android.apk");
+        assert!(apk.url.as_str().ends_with(&apk.expected_file));
         let windows = select_package(manifest, "windows-x86_64", &current).unwrap().unwrap();
         assert!(windows.url.as_str().ends_with("win-x64.exe"), "portable, not the installer");
         assert_eq!(select_package(manifest, "darwin-aarch64", &semver::Version::new(1, 3, 0)).unwrap(), None);

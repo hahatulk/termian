@@ -5,6 +5,7 @@ use std::{
 };
 
 mod files;
+mod updates;
 mod vault;
 use std::sync::{mpsc, Mutex};
 

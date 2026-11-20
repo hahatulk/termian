@@ -180,6 +180,7 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          TERMIAN_UPDATE_REPOSITORY: ${{ github.repository }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}

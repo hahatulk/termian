@@ -212,6 +212,7 @@ IPv6-адрес сохранённого хоста и порт передают
 - В Settings → Version на macOS и Windows выбирается канал "Latest" (по умолчанию, стабильный выпуск GitHub) или "Pre-release" (предварительные выпуски GitHub с суффиксом SemVer). Канал хранится на устройстве. Во время проверки, загрузки и до перезапуска после установки канал не меняется. Клиент принимает только версию новее текущей и проверяет совпадение версии манифеста с тегом выпуска.
 - Клиент принимает пакет, подписанный прежним ключом minisign. Публичный ключ находится в `assets/app/update-public-key`. Подписанный комментарий `version:` должен совпадать с версией из `latest.json`, а `file:` должен содержать имя пакета автообновления для текущей платформы. Предел загрузки пакета: 256 МиБ.
 - Windows заменяет бинарник на месте, macOS заменяет `.app`. Новая версия запускается после перезапуска. Клиент не закрывает активные SSH-сессии при загрузке пакета.
+- Android проверяет выбранный канал в Settings → Version вручную и автоматически, пока приложение открыто. Канал хранится в локальных настройках. Клиент проверяет подпись APK, имя пакета, версию, возрастающий `versionCode` и совпадение сертификата с установленным Termian. APK загружается в кэш приложения. Установку подтверждает пользователь в системном установщике.
 
 ### 4.7. Оформление
 
@@ -285,7 +286,7 @@ cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 
 [GitHub Actions](.github/workflows/release.yml) тестирует и собирает клиент через Cargo на Windows x64 и macOS Apple Silicon и собирает Android APK. macOS использует `MACOSX_DEPLOYMENT_TARGET=11.0`, Xcode Swift, `codesign` и `hdiutil`. Windows использует компилятор MSVC и NSIS для упаковки. Клиент и workflow не требуют Node.js или WebView. `.github/workflows/cloud-server.yml` отдельно запускает серверные тесты при изменениях в `cloud-sync-server/`.
 
-Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg`, `termian-<version>-mac-arm64.app.tar.gz` и `termian-<version>-android.apk`. Автоматический выпуск использует стабильные теги `vX.Y.Z`. Ручной параметр `version` принимает предварительную версию, например `1.2.3-beta.1`. Такой выпуск помечается в GitHub как pre-release. Стабильный выпуск помечается как latest. Для публикации нужны пакеты трёх платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`. Android APK подписывает `apksigner`; APK не входит в `latest.json`.
+Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg`, `termian-<version>-mac-arm64.app.tar.gz` и `termian-<version>-android.apk`. Автоматический выпуск использует стабильные теги `vX.Y.Z`. Ручной параметр `version` принимает предварительную версию, например `1.2.3-beta.1`. Такой выпуск помечается в GitHub как pre-release. Стабильный выпуск помечается как latest. Для публикации нужны пакеты трёх платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` и `android-universal` создаёт Rust-инструмент `scripts/release/`. Android APK также подписывает `apksigner`.
 
 - `TERMIAN_SIGNING_PRIVATE_KEY` содержит прежний ключ minisign в Base64, `TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD` содержит его пароль. Workflow также принимает прежние имена `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Публичный ключ меняется только при ротации.
 - Без Apple Developer ID `.app` подписывается ad-hoc. Для подписи и нотариализации нужны `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` и `APPLE_TEAM_ID`.
@@ -296,7 +297,7 @@ cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 1. Клиент собирается из корневого `Cargo.toml`. Импорт старого профиля не требует сборки прежнего клиента.
 2. Повреждённый Vault и пользовательские профили нельзя удалять или сбрасывать при ошибке.
 3. Синхронизация разрешает конфликт отдельно для каждой записи. Выгрузка логов не изменяет снимок и базу слияния.
-4. Релиз не публикуется без пакетов обеих платформ и подписей обновлений.
+4. Релиз не публикуется без пакетов macOS, Windows и Android и подписей обновлений.
 5. Без явного запроса не коммитить и не пушить изменения пользователя.
 
 ## 11. Известные ограничения

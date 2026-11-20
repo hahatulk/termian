@@ -99,7 +99,7 @@ fn prepare() -> Result<()> {
     Ok(())
 }
 
-fn packages(version: &Version) -> [(&'static str, String); 3] {
+fn packages(version: &Version) -> [(&'static str, String); 4] {
     [
         (
             "darwin-aarch64",
@@ -110,13 +110,16 @@ fn packages(version: &Version) -> [(&'static str, String); 3] {
             "windows-x86_64-nsis",
             format!("termian-{version}-win-x64-setup.exe"),
         ),
+        (
+            "android-universal",
+            format!("termian-{version}-android.apk"),
+        ),
     ]
 }
 
-fn exact_assets(dir: &Path, version: &Version, files: &[(&str, String); 3]) -> Result<()> {
+fn exact_assets(dir: &Path, version: &Version, files: &[(&str, String)]) -> Result<()> {
     let mut expected: BTreeSet<String> = files.iter().map(|(_, name)| name.clone()).collect();
     expected.insert(format!("termian-{version}-mac-arm64.dmg"));
-    expected.insert(format!("termian-{version}-android.apk"));
     let mut actual = BTreeSet::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -256,8 +259,10 @@ mod tests {
         let public = minisign_verify::PublicKey::from_base64(&pair.pk.to_base64()).unwrap();
         let package_bytes = b"package fixture";
 
-        for (_, name) in &files {
-            fs::write(dir.path().join(name), package_bytes).unwrap();
+        for (target, name) in &files {
+            if *target != "android-universal" {
+                fs::write(dir.path().join(name), package_bytes).unwrap();
+            }
         }
         assert!(sign_assets(dir.path(), &version, "owner/repo", "", &pair.pk, &pair.sk).is_err());
         assert!(!dir.path().join("latest.json").exists());
@@ -269,7 +274,7 @@ mod tests {
         assert!(sign_assets(dir.path(), &version, "owner/repo", "", &pair.pk, &pair.sk).is_err());
         fs::write(
             dir.path().join(format!("termian-{version}-android.apk")),
-            b"apk fixture",
+            package_bytes,
         )
         .unwrap();
 
@@ -290,6 +295,13 @@ mod tests {
                 Some("version:1.2.3-beta.1")
             );
             public.verify(package_bytes, &signature, true).unwrap();
+            if target == "android-universal" {
+                let mut stream = public.verify_stream(&signature).unwrap();
+                for chunk in package_bytes.chunks(3) {
+                    stream.update(chunk);
+                }
+                stream.finalize().unwrap();
+            }
         }
     }
 
