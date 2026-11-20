@@ -277,6 +277,8 @@ cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 
 ### 9.2. Android
 
+[Workflow Android](.github/workflows/android.yml) запускается при изменениях клиента в PR и при push в `main` или `master`, а также вручную. Он запускает `scripts/build-android.sh` на Ubuntu 24.04 и загружает `termian-debug.apk` в артефакт `termian-android-debug` на 14 дней.
+
 `./scripts/build-android.sh` использует SDK 37.0 и NDK r28c для сборки JNI-библиотек ARM64 и x86_64 через корневой Cargo. Скрипт проверяет выравнивание сегментов ELF и несжатых библиотек в APK для устройств со страницами 16 КиБ. APK с отладочной подписью записывается в `dist/android/termian-debug.apk`, ключ отладочной подписи хранится в `target/android/`. `minSdkVersion` равен 26, `targetSdkVersion` равен 37. Перед обращением к локальной сети Android 17 запрашивает `ACCESS_LOCAL_NETWORK`.
 
 ### 9.4. Релиз
