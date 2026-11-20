@@ -175,13 +175,14 @@ struct Run {
     /// Conflicts found by a confirmed sync.
     checked_at: Option<i64>,
     confirm: bool,
+    upload_preview: Option<self_cloud::UploadPreview>,
     /// Groups the user opened or closed, by position.
     toggled: HashSet<usize>,
 }
 
 impl Run {
     fn checked(&mut self, status: Status, at: i64) {
-        self.confirm = matches!(&status, Status::Checked(preview) if *preview != Preview::Unconfigured);
+        self.confirm = (self.operation == Operation::Sync || self.upload_preview.is_some()) && !(self.operation == Operation::Download && matches!(status, Status::Checked(Preview::Empty))) && matches!(&status, Status::Checked(preview) if *preview != Preview::Unconfigured);
         self.panel = Some(status);
         self.checked_at = Some(at);
     }
@@ -195,7 +196,7 @@ impl Run {
                 Out::Success(text.clone())
             }
             Err(error) => {
-                self.confirm = true;
+                self.confirm = self.operation == Operation::Sync;
                 Out::Error(error.clone())
             }
         }
@@ -315,7 +316,7 @@ impl Shell {
         }
         let body = match operation {
             None => Body::Config(ConfigForm::from_vault(&self.vault)),
-            Some(operation) => Body::Run(Run { operation, configured: configured(&self.vault), panel: None, checked_at: None, confirm: false, toggled: HashSet::new() }),
+            Some(operation) => Body::Run(Run { operation, configured: configured(&self.vault), panel: None, checked_at: None, confirm: false, upload_preview: None, toggled: HashSet::new() }),
         };
         let checking = matches!(&body, Body::Run(run) if run.configured);
         let out = match &body {
@@ -441,7 +442,7 @@ impl Shell {
         if !enabled || self.cloud.header.paused() || self.cloud.running || self.cloud.logs_running || self.cloud.dialog.is_some() {
             return;
         }
-        self.run_cloud(Operation::Sync, cx);
+        self.run_cloud(Operation::Sync, None, cx);
     }
 
     /// Read-only comparison; `for_dialog` also fills an open dialog's panel.
@@ -456,24 +457,25 @@ impl Shell {
         self.cloud.running = true;
         self.cloud.header.set(Status::Checking);
         let vault = self.vault.clone();
-        let task = cx.background_spawn(async move { self_cloud::preview(&vault) });
+        let task = cx.background_spawn(async move { self_cloud::checked_preview(&vault) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |shell, cx| {
                 shell.cloud.running = false;
-                let status = match result {
-                    Ok(preview) => Status::Checked(preview),
-                    Err(message) => Status::Error { credentials: self_cloud::is_credential_error(&message), message },
+                let (status, ticket) = match result {
+                    Ok((preview, ticket)) => (Status::Checked(preview), ticket),
+                    Err(message) => (Status::Error { credentials: self_cloud::is_credential_error(&message), message }, None),
                 };
                 shell.cloud.header.set(status.clone());
                 if let Some(dialog) = &mut shell.cloud.dialog {
                     if let Body::Run(run) = &mut dialog.body {
-                        if for_dialog || run.panel.is_some() {
+                        if for_dialog || run.panel.is_none() || run.operation == Operation::Sync {
+                            run.upload_preview = ticket;
                             run.checked(status, now());
-                            if for_dialog {
-                                dialog.out = None;
-                                dialog.busy = false;
-                            }
+                            dialog.out = if run.operation != Operation::Sync && !run.confirm && matches!(run.panel, Some(Status::Checked(_))) {
+                                Some(Out::Error("Нет проверенной ревизии для этой операции.".into()))
+                            } else { None };
+                            dialog.busy = false;
                         }
                     }
                 }
@@ -484,7 +486,7 @@ impl Shell {
     }
 
     /// Runs a confirmed operation on a copy of the vault and adopts the result.
-    fn run_cloud(&mut self, operation: Operation, cx: &mut Context<Self>) {
+    fn run_cloud(&mut self, operation: Operation, ticket: Option<self_cloud::UploadPreview>, cx: &mut Context<Self>) {
         if self.cloud.running {
             return;
         }
@@ -506,8 +508,8 @@ impl Shell {
             };
             let result = match operation {
                 Operation::Sync => self_cloud::sync(&mut vault, &backups),
-                Operation::Upload => self_cloud::upload(&mut vault),
-                Operation::Download => self_cloud::download(&mut vault, &backups),
+                Operation::Upload => ticket.ok_or_else(|| "Сначала проверьте изменения.".to_string()).and_then(|t| self_cloud::upload_checked(&mut vault, t)),
+                Operation::Download => ticket.ok_or_else(|| "Сначала проверьте изменения.".to_string()).and_then(|t| self_cloud::download_checked(&mut vault, &backups, t)),
             };
             let result = result.map(|text| match logs_notice { Some(notice) => format!("{text}. {notice}"), None => text });
             (vault, result)
@@ -563,7 +565,8 @@ impl Shell {
         run.confirm = false;
         dialog.busy = true;
         dialog.out = Some(Out::Working("Выполняется…".into()));
-        self.run_cloud(operation, cx);
+        let ticket = run.upload_preview.take();
+        self.run_cloud(operation, ticket, cx);
         cx.notify();
     }
 
@@ -880,6 +883,7 @@ impl Shell {
                         .child(
                             div()
                                 .id(SharedString::from(format!("cloud-group-{index}")))
+                                .menu_feedback(false)
                                 .min_h(px(37.))
                                 .px(px(11.))
                                 .flex()
@@ -937,6 +941,9 @@ impl Shell {
                             }))
                             .into_any_element(),
                     );
+                }
+                if run.configured && !run.confirm && !busy && matches!(dialog.out, Some(Out::Error(_))) {
+                    actions.push(button("cloud-recheck", "Проверить снова", true, false).on_click(cx.listener(|shell, _, _, cx| shell.check_cloud(true, cx))).into_any_element());
                 }
                 if run.confirm {
                     actions.push(button("cloud-confirm", run.operation.confirm(), true, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(cx))).into_any_element());
@@ -1053,7 +1060,7 @@ mod tests {
     use termian_native::cloud::CloudConfig;
 
     fn run(operation: Operation) -> Run {
-        Run { operation, configured: true, panel: None, checked_at: None, confirm: false, toggled: HashSet::new() }
+        Run { operation, configured: true, panel: None, checked_at: None, confirm: false, upload_preview: None, toggled: HashSet::new() }
     }
 
     #[test]

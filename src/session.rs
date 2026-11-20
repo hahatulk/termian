@@ -10,10 +10,11 @@ use std::time::Duration;
 
 use futures::channel::mpsc::{unbounded, UnboundedReceiver, UnboundedSender};
 use futures::future::BoxFuture;
-use futures::StreamExt;
+use futures::{SinkExt, StreamExt};
+use futures::channel::mpsc::{Receiver, Sender};
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{
-    known_hosts::learn_known_hosts_path, load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey,
+    load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey,
     PublicKeyOrCertificate,
 };
 use russh::ChannelMsg;
@@ -44,7 +45,7 @@ enum Input {
 /// A running session. Dropping it closes the connection.
 pub struct Session {
     input: UnboundedSender<Input>,
-    events: Option<UnboundedReceiver<SessionEvent>>,
+    events: Option<Receiver<SessionEvent>>,
 }
 
 impl Session {
@@ -58,7 +59,7 @@ impl Session {
     }
 
     /// Session output; can be taken once.
-    pub fn take_events(&mut self) -> Option<UnboundedReceiver<SessionEvent>> {
+    pub fn take_events(&mut self) -> Option<Receiver<SessionEvent>> {
         self.events.take()
     }
 
@@ -73,16 +74,25 @@ impl Drop for Session {
     }
 }
 
-fn channels() -> (UnboundedSender<Input>, UnboundedReceiver<Input>, UnboundedSender<SessionEvent>, Session) {
+#[derive(Clone)]
+struct EventTx(Sender<SessionEvent>);
+
+impl EventTx {
+    fn send(&self, event: SessionEvent) -> Result<(), futures::channel::mpsc::SendError> {
+        futures::executor::block_on(self.0.clone().send(event))
+    }
+}
+
+fn channels() -> (UnboundedSender<Input>, UnboundedReceiver<Input>, EventTx, Session) {
     let (input, input_rx) = unbounded();
-    let (events_tx, events) = unbounded();
-    (input.clone(), input_rx, events_tx, Session { input, events: Some(events) })
+    let (events_tx, events) = futures::channel::mpsc::channel(32);
+    (input.clone(), input_rx, EventTx(events_tx), Session { input, events: Some(events) })
 }
 
 /// A finished session's output, replayed read-only (Logs).
 pub fn replay(data: Vec<u8>) -> Session {
     let (_, _, events, session) = channels();
-    let _ = events.unbounded_send(SessionEvent::Output(data));
+    let _ = events.send(SessionEvent::Output(data));
     session
 }
 
@@ -133,7 +143,7 @@ fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u1
         let events = events_tx.clone();
         std::thread::spawn(move || {
             if let Some(commands) = crate::shell_history::local(&path) {
-                let _ = events.unbounded_send(SessionEvent::History(commands));
+                let _ = events.send(SessionEvent::History(commands));
             }
         });
     }
@@ -144,7 +154,7 @@ fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u1
             match reader.read(&mut buffer) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if events_tx.unbounded_send(SessionEvent::Output(buffer[..n].to_vec())).is_err() {
+                    if events_tx.send(SessionEvent::Output(buffer[..n].to_vec())).is_err() {
                         break;
                     }
                 }
@@ -152,7 +162,7 @@ fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u1
         }
         let status = child.wait().ok();
         let reason = status.filter(|s| !s.success()).map(|s| format!("Process exited with code {}", s.exit_code()));
-        let _ = events_tx.unbounded_send(SessionEvent::Closed(reason));
+        let _ = events_tx.send(SessionEvent::Closed(reason));
     });
 
     let master = pair.master;
@@ -252,7 +262,7 @@ pub fn serial(options: &crate::serial::SerialOptions) -> Result<Session, String>
             match reader.read(&mut buffer) {
                 Ok(0) => continue,
                 Ok(n) => {
-                    if events_tx.unbounded_send(SessionEvent::Output(charset.decode(&buffer[..n]))).is_err() {
+                    if events_tx.send(SessionEvent::Output(charset.decode(&buffer[..n]))).is_err() {
                         break None;
                     }
                 }
@@ -260,7 +270,7 @@ pub fn serial(options: &crate::serial::SerialOptions) -> Result<Session, String>
                 Err(e) => break Some(format!("Connection closed with error: {e}")),
             }
         };
-        let _ = events_tx.unbounded_send(SessionEvent::Closed(reason));
+        let _ = events_tx.send(SessionEvent::Closed(reason));
     });
     std::thread::spawn(move || {
         let charset = Charset::new(encoding);
@@ -374,10 +384,15 @@ impl SshTarget {
     /// Port 22, the user's default OpenSSH keys, and the native client's known_hosts.
     pub fn new(host: &str, username: Option<String>) -> Self {
         let home = dirs::home_dir().unwrap_or_default();
-        let (host, port) = match host.rsplit_once(':') {
+        let bracketed = host.strip_prefix('[').and_then(|s| s.split_once(']')).and_then(|(ip, suffix)| {
+            ip.parse::<std::net::Ipv6Addr>().ok()?;
+            let port = if suffix.is_empty() { 22 } else { suffix.strip_prefix(':')?.parse().ok()? };
+            Some((ip.to_owned(), port))
+        });
+        let (host, port) = bracketed.unwrap_or_else(|| match host.rsplit_once(':') {
             Some((h, p)) if !h.contains(':') && p.parse::<u16>().is_ok() => (h.to_owned(), p.parse().unwrap()),
             _ => (host.to_owned(), 22),
-        };
+        });
         Self {
             host,
             port,
@@ -399,8 +414,9 @@ impl SshTarget {
         let mut target = Self {
             password,
             key: key.and_then(LoginKey::from_vault),
-            ..Self::new(&host.destination(), username)
+            ..Self::new(&host.address, username)
         };
+        if let Some(port) = host.port { target.port = port; }
         let settings = &host.settings;
         target.options.env = settings.env.iter().map(|v| (v.name.clone(), v.value.clone())).collect();
         target.options.agent_forwarding = settings.agent_forwarding;
@@ -434,12 +450,12 @@ pub fn ssh(target: SshTarget, columns: u16, rows: u16) -> Session {
         let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(runtime) => runtime,
             Err(error) => {
-                let _ = events_tx.unbounded_send(SessionEvent::Closed(Some(error.to_string())));
+                let _ = events_tx.send(SessionEvent::Closed(Some(error.to_string())));
                 return;
             }
         };
         let result = runtime.block_on(run_ssh(target, input_rx, events_tx.clone(), (columns, rows)));
-        let _ = events_tx.unbounded_send(SessionEvent::Closed(result.err()));
+        let _ = events_tx.send(SessionEvent::Closed(result.err()));
     });
     session
 }
@@ -614,9 +630,9 @@ impl client::Handler for Verifier {
                 Ok(true)
             }
             HostKeyDecision::Save => {
-                match learn_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
+                match crate::known_hosts::learn(&self.host, self.port, &key, &self.known_hosts) {
                     Ok(()) => io.log(format!("Permanently added '{}' to the list of known hosts", self.host)),
-                    Err(error) => io.log(format!("Could not save the host key: {error}")),
+                    Err(error) => return Err(error.into()),
                 }
                 Ok(true)
             }
@@ -627,7 +643,7 @@ impl client::Handler for Verifier {
 async fn run_ssh(
     target: SshTarget,
     mut input: UnboundedReceiver<Input>,
-    events: UnboundedSender<SessionEvent>,
+    events: EventTx,
     size: (u16, u16),
 ) -> Result<(), String> {
     // Answers go to the login; everything else waits for the shell.
@@ -658,7 +674,7 @@ async fn run_ssh(
     let emit_events = events.clone();
     let prompter = Arc::new(Mutex::new(EventPrompter {
         emit: move |event| {
-            let _ = emit_events.unbounded_send(SessionEvent::Login(event));
+            let _ = emit_events.send(SessionEvent::Login(event));
         },
         answers,
         picked: None,
@@ -682,7 +698,7 @@ async fn run_ssh(
         tokio::spawn(async move {
             let version = server_id.lock().unwrap().clone().unwrap_or_default();
             if let Some(os) = detect_os(&handle, &version).await {
-                let _ = events.unbounded_send(SessionEvent::Os(os.to_owned()));
+                let _ = events.send(SessionEvent::Os(os.to_owned()));
             }
         });
     }
@@ -690,7 +706,7 @@ async fn run_ssh(
         let (handle, events) = (handle.clone(), events.clone());
         tokio::spawn(async move {
             if let Some(commands) = read_shell_history(&handle).await {
-                let _ = events.unbounded_send(SessionEvent::History(commands));
+                let _ = events.send(SessionEvent::History(commands));
             }
         })
     });
@@ -1024,7 +1040,7 @@ impl Backoff {
 async fn pump(
     channel: russh::Channel<client::Msg>,
     mut input: UnboundedReceiver<Input>,
-    events: UnboundedSender<SessionEvent>,
+    events: EventTx,
     mut charset: Option<Charset>,
 ) -> Result<(), String> {
     let (mut reader, writer) = channel.split();
@@ -1036,7 +1052,9 @@ async fn pump(
                         Some(charset) => charset.decode(&data),
                         None => data.to_vec(),
                     };
-                    let _ = events.unbounded_send(SessionEvent::Output(data));
+                    for block in data.chunks(32 * 1024) {
+                        if events.0.clone().send(SessionEvent::Output(block.to_vec())).await.is_err() { return Ok(()); }
+                    }
                 }
                 Some(ChannelMsg::ExitStatus { exit_status }) if exit_status != 0 => {
                     return Err(format!("Remote shell exited with code {exit_status}"));
@@ -1070,6 +1088,36 @@ async fn pump(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_output_delivers_bytes_in_order_and_closes() {
+        let (_, _, events, mut session) = channels();
+        let mut rx = session.take_events().unwrap();
+        let producer = std::thread::spawn(move || {
+            for n in 0..128 {
+                events.send(SessionEvent::Output(vec![n; 4096])).unwrap();
+            }
+            events.send(SessionEvent::Closed(None)).unwrap();
+        });
+        futures::executor::block_on(async {
+            for n in 0..128 {
+                assert!(matches!(rx.next().await, Some(SessionEvent::Output(bytes)) if bytes == [n; 4096]));
+            }
+            assert!(matches!(rx.next().await, Some(SessionEvent::Closed(None))));
+            assert!(rx.next().await.is_none());
+        });
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn ipv6_keeps_the_configured_port() {
+        let mut host = crate::vault::tests::host(1, "db", None);
+        host.address = "2001:db8::1".into();
+        host.port = Some(2222);
+        for target in [SshTarget::for_host(&host, &Default::default()), SshTarget::new("[2001:db8::1]:2222", None)] {
+            assert_eq!((target.host.as_str(), target.port), ("2001:db8::1", 2222));
+        }
+    }
 
     #[test]
     fn a_saved_host_carries_its_environment_agent_and_charset() {
@@ -1129,7 +1177,7 @@ pub(crate) mod tests {
     }
 
     /// Waits up to 100 ms for the next event without needing a runtime.
-    async fn tokio_timeout(events: &mut UnboundedReceiver<SessionEvent>) -> Option<SessionEvent> {
+    async fn tokio_timeout(events: &mut Receiver<SessionEvent>) -> Option<SessionEvent> {
         let timer = futures::FutureExt::fuse(async_sleep(Duration::from_millis(100)));
         let next = futures::FutureExt::fuse(events.next());
         futures::pin_mut!(timer, next);
@@ -1175,15 +1223,27 @@ pub(crate) mod tests {
         /// when `root` is set, serves that directory over SFTP.
         #[derive(Default)]
         struct Echo {
+            fault: Option<SftpFault>,
             rsa_user_key: Option<PublicKey>,
             root: Option<std::path::PathBuf>,
             channel: Option<Channel<Msg>>,
             sftp: std::collections::HashSet<ChannelId>,
+            #[cfg(windows)]
+            modes: Modes,
         }
 
         /// SFTP over a local directory: listings, file reads and writes,
         /// folders, renames and deletes, enough for the SFTP tab.
+        #[cfg(windows)]
+        type Modes = Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u32>>>;
+
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        pub enum SftpFault { PublicDirectory, MissingAttributes, DenyMode }
+
         struct Files {
+            fault: Option<SftpFault>,
+            #[cfg(windows)]
+            modes: Modes,
             root: std::path::PathBuf,
             listed: std::collections::HashSet<String>,
             open: std::collections::HashMap<String, std::fs::File>,
@@ -1204,7 +1264,19 @@ pub(crate) mod tests {
             }
 
             fn attrs(&self, path: &std::path::Path) -> Result<FileAttributes, StatusCode> {
-                std::fs::symlink_metadata(path).map(|m| FileAttributes::from(&m)).map_err(|_| StatusCode::NoSuchFile)
+                let attrs = std::fs::symlink_metadata(path).map(|m| FileAttributes::from(&m)).map_err(|_| StatusCode::NoSuchFile)?;
+                #[cfg(windows)]
+                let attrs = {
+                    let mut attrs = attrs;
+                    if let Some(mode) = self.modes.lock().unwrap().get(path) {
+                        attrs.permissions = attrs.permissions.map(|p| (p & !0o777) | mode);
+                    }
+                    attrs
+                };
+                if self.fault == Some(SftpFault::PublicDirectory) && attrs.is_dir() {
+                    return Ok(FileAttributes { permissions: attrs.permissions.map(|p| p | 0o055), ..attrs });
+                }
+                Ok(attrs)
             }
 
             fn file(&mut self, handle: &str) -> Result<&mut std::fs::File, StatusCode> {
@@ -1246,8 +1318,14 @@ pub(crate) mod tests {
                 Ok(Name { id, files })
             }
 
-            async fn open(&mut self, id: u32, path: String, flags: OpenFlags, _: FileAttributes) -> Result<Handle, StatusCode> {
-                let file = std::fs::OpenOptions::new()
+            async fn open(&mut self, id: u32, path: String, flags: OpenFlags, attrs: FileAttributes) -> Result<Handle, StatusCode> {
+                let mut options = std::fs::OpenOptions::new();
+                #[cfg(unix)]
+                std::os::unix::fs::OpenOptionsExt::mode(&mut options, attrs.permissions.unwrap_or(0o666));
+                #[cfg(windows)]
+                if let Some(mode) = attrs.permissions { self.modes.lock().unwrap().insert(self.local(&path), mode); }
+                let file = options
+                    .create_new(flags.contains(OpenFlags::EXCLUDE))
                     .read(flags.contains(OpenFlags::READ))
                     .write(flags.contains(OpenFlags::WRITE))
                     .create(flags.contains(OpenFlags::CREATE))
@@ -1285,23 +1363,24 @@ pub(crate) mod tests {
             }
 
             async fn setstat(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, StatusCode> {
+                if self.fault == Some(SftpFault::DenyMode) { return Err(StatusCode::PermissionDenied); }
                 #[cfg(unix)]
                 if let Some(mode) = attrs.permissions {
                     use std::os::unix::fs::PermissionsExt;
                     std::fs::set_permissions(self.local(&path), std::fs::Permissions::from_mode(mode & 0o7777)).map_err(failed)?;
                 }
-                #[cfg(not(unix))]
-                {
-                    let _ = path;
-                    if attrs.permissions.is_some() {
-                        return Err(StatusCode::OpUnsupported);
-                    }
-                }
+                #[cfg(windows)]
+                if let Some(mode) = attrs.permissions { self.modes.lock().unwrap().insert(self.local(&path), mode); }
                 Ok(ok(id))
             }
 
-            async fn mkdir(&mut self, id: u32, path: String, _: FileAttributes) -> Result<Status, StatusCode> {
-                std::fs::create_dir(self.local(&path)).map_err(failed)?;
+            async fn mkdir(&mut self, id: u32, path: String, attrs: FileAttributes) -> Result<Status, StatusCode> {
+                let mut builder = std::fs::DirBuilder::new();
+                #[cfg(unix)]
+                std::os::unix::fs::DirBuilderExt::mode(&mut builder, attrs.permissions.unwrap_or(0o777));
+                builder.create(self.local(&path)).map_err(failed)?;
+                #[cfg(windows)]
+                if let Some(mode) = attrs.permissions { self.modes.lock().unwrap().insert(self.local(&path), mode); }
                 Ok(ok(id))
             }
 
@@ -1326,6 +1405,7 @@ pub(crate) mod tests {
             }
 
             async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, StatusCode> {
+                if self.fault == Some(SftpFault::MissingAttributes) && path.ends_with("/keep") { return Err(StatusCode::PermissionDenied); }
                 Ok(Attrs { id, attrs: self.attrs(&self.local(&path))? })
             }
 
@@ -1374,7 +1454,7 @@ pub(crate) mod tests {
                     ("sftp", Some(root), Some(stream)) => {
                         session.channel_success(channel)?;
                         self.sftp.insert(channel);
-                        let files = Files { root, listed: Default::default(), open: Default::default(), next: 0 };
+                        let files = Files { root, fault: self.fault, #[cfg(windows)] modes: self.modes.clone(), listed: Default::default(), open: Default::default(), next: 0 };
                         tokio::spawn(russh_sftp::server::run(stream.into_stream(), files));
                     }
                     _ => session.channel_failure(channel)?,
@@ -1488,6 +1568,10 @@ pub(crate) mod tests {
         }
 
         pub(super) fn start_with(root: Option<std::path::PathBuf>, rsa_user_key: Option<PublicKey>) -> u16 {
+            start_with_fault(root, rsa_user_key, None)
+        }
+
+        pub fn start_with_fault(root: Option<std::path::PathBuf>, rsa_user_key: Option<PublicKey>, fault: Option<SftpFault>) -> u16 {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             listener.set_nonblocking(true).unwrap();
@@ -1501,7 +1585,7 @@ pub(crate) mod tests {
                         ..Default::default()
                     });
                     let (socket, _) = listener.accept().await.unwrap();
-                    let running = server::run_stream(config, socket, Echo { root, rsa_user_key, channel: None, sftp: Default::default() }).await.unwrap();
+                    let running = server::run_stream(config, socket, Echo { root, rsa_user_key, fault, #[cfg(windows)] modes: Default::default(), channel: None, sftp: Default::default() }).await.unwrap();
                     let _ = running.await;
                 });
             });
@@ -1798,7 +1882,7 @@ pub(crate) mod tests {
         let known_hosts = dir.path().join("known_hosts");
         let port = server::start();
         let other = russh::keys::PrivateKey::from(russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[8; 32]));
-        learn_known_hosts_path("127.0.0.1", port, other.public_key(), &known_hosts).unwrap();
+        crate::known_hosts::learn("127.0.0.1", port, other.public_key(), &known_hosts).unwrap();
 
         let mut session = ssh(target(port, known_hosts), 80, 24);
         let output = collect_until(&mut session, "<closed");

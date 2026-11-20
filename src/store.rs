@@ -15,7 +15,9 @@ mod macos;
 
 const MAGIC: &[u8] = b"TMNVLT1\n";
 const NONCE: usize = 24;
+#[cfg(any(target_os = "macos", windows, test))]
 const KEYRING_SERVICE: &str = "termian-native";
+#[cfg(any(target_os = "macos", windows, test))]
 const KEYRING_USER: &str = "vault-key";
 
 #[cfg(any(target_os = "macos", test))]
@@ -243,7 +245,9 @@ impl Store {
 
     fn decode(&self, bytes: &[u8]) -> Result<Vault, String> {
         let plain = self.decrypt(bytes)?;
-        serde_json::from_slice(&plain).map_err(|e| format!("vault file is damaged: {e}"))
+        let mut vault = serde_json::from_slice(&plain).map_err(|e| format!("vault file is damaged: {e}"))?;
+        crate::portable::scrub_cached_secrets(&mut vault);
+        Ok(vault)
     }
 
     /// The saved vault, or `None` when nothing was saved yet.
@@ -340,10 +344,12 @@ fn wrapped_header(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
     Ok((&bytes[..end], &bytes[start..end]))
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn legacy_entry() -> Result<keyring::Entry, keyring::Error> {
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_USER)
 }
 
+#[cfg(any(target_os = "macos", windows))]
 fn read_legacy_key() -> Result<Key, keyring::Error> {
     use base64::{engine::general_purpose::STANDARD, Engine};
     let saved = Zeroizing::new(legacy_entry()?.get_password()?);
@@ -357,6 +363,7 @@ fn read_legacy_key() -> Result<Key, keyring::Error> {
     }
 }
 
+#[cfg(any(target_os = "macos", windows, test))]
 fn random_key() -> Result<Key, String> {
     let mut key = Zeroizing::new([0; 32]);
     getrandom::getrandom(&mut *key).map_err(|e| e.to_string())?;

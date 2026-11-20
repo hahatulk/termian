@@ -9,6 +9,7 @@ use termian_native::snippets::{self, Coverage, PackageChoice, LABEL_LIMIT, MAX_T
 use termian_native::theme;
 use termian_native::vault::{GroupId, HostId, Snippet, SnippetPackage};
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{field_box, menu_panel, menu_row};
@@ -195,6 +196,7 @@ impl Shell {
         if let Some(package) = open {
             let crumb = div()
                 .id("snippets-crumb-all")
+                .rounded_sm().icon_feedback()
                 .text_color(rgb(theme::ACCENT))
                 .child("All snippets")
                 .on_click(cx.listener(|shell, _, _, cx| {
@@ -220,6 +222,7 @@ impl Shell {
         let add = tool_button("new-snippet", "snippets", "NEW SNIPPET").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_snippet(window, cx)));
         let arrow = div()
             .id("new-snippet-menu")
+            .surface_feedback(theme::INPUT)
             .h(px(26.))
             .px_2()
             .flex()
@@ -560,6 +563,7 @@ impl Shell {
                 d.child(
                     div()
                         .id("snippet-package-remove")
+                        .rounded_sm().icon_feedback()
                         .px_2()
                         .text_sm()
                         .text_color(rgb(theme::ACCENT))
@@ -663,7 +667,7 @@ impl Shell {
                 .flex()
                 .items_center()
                 .child(div().flex_1().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child("Targets"))
-                .child(div().id("snippet-edit-targets").text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme::ACCENT)).child("Edit").on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))),
+                .child(div().id("snippet-edit-targets").rounded_sm().icon_feedback().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme::ACCENT)).child("Edit").on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))),
         )
         .children(targets.into_iter().map(|h| host_row(format!("target-{}", h.id), host_tile(h), h.display_label().to_owned(), h.subtitle()).bg(rgb(theme::BACKGROUND))))
     }
@@ -674,6 +678,7 @@ impl Shell {
         let adding = editor.route == Route::AddTargets;
         let back = div()
             .id("targets-back")
+            .surface_feedback(theme::SURFACE)
             .size(px(28.))
             .flex()
             .items_center()
@@ -715,7 +720,7 @@ impl Shell {
         if !searching {
             if let Some(group) = editor.picker_group {
                 let mut crumbs = div().pb_2().flex().items_center().gap_2().text_sm().child(
-                    div().id("targets-crumb-root").text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(|shell, _, _, cx| {
+                    div().id("targets-crumb-root").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(editor) = &mut shell.snippet_editor {
                             editor.picker_group = None;
                         }
@@ -725,7 +730,7 @@ impl Shell {
                 for g in self.vault.breadcrumbs(Some(group)) {
                     let target = g.id;
                     crumbs = crumbs.child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(
-                        div().id(SharedString::from(format!("targets-crumb-{target}"))).text_color(rgb(if target == group { theme::TEXT } else { theme::ACCENT })).child(g.label.clone()).on_click(cx.listener(move |shell, _, _, cx| {
+                        div().id(SharedString::from(format!("targets-crumb-{target}"))).rounded_sm().icon_feedback().text_color(rgb(if target == group { theme::TEXT } else { theme::ACCENT })).child(g.label.clone()).on_click(cx.listener(move |shell, _, _, cx| {
                             if let Some(editor) = &mut shell.snippet_editor {
                                 editor.picker_group = Some(target);
                             }
@@ -742,7 +747,7 @@ impl Shell {
                     let id = group.id;
                     let count = self.vault.hosts_under(Some(id)).len();
                     let state = snippets::coverage(&self.vault, id, &editor.picked);
-                    let check = div().id(SharedString::from(format!("targets-group-check-{id}"))).p_1().child(checkbox(state)).on_click(cx.listener(move |shell, _, _, cx| {
+                    let check = div().id(SharedString::from(format!("targets-group-check-{id}"))).rounded_sm().icon_feedback().p_1().child(checkbox(state)).on_click(cx.listener(move |shell, _, _, cx| {
                         cx.stop_propagation();
                         if let Some(editor) = &mut shell.snippet_editor {
                             snippets::toggle_group(&shell.vault, id, &mut editor.picked);

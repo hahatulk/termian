@@ -160,7 +160,7 @@ async fn run(
     let sftp = Arc::new(sftp);
     // A second, raw session reads directory long names, the only place SFTP
     // v3 names the owner and group. Listings work without it.
-    let raw = raw_session(&handle).await;
+    let raw = raw_session(&handle).await.map(Arc::new);
     let home = sftp.canonicalize(".").await.unwrap_or_else(|_| "/".into());
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
     let _ = events.unbounded_send(RemoteEvent::Connected { home });
@@ -183,7 +183,7 @@ async fn run(
                 }
             }
             Work::Transfer { id, job, controls } => {
-                let remote = Fs::Remote(sftp.clone());
+                let remote = Fs::Remote(sftp.clone(), raw.clone());
                 let (source, target) = match job.direction {
                     Direction::Upload => (Fs::Local, remote),
                     Direction::Download => (remote, Fs::Local),
@@ -194,7 +194,7 @@ async fn run(
                 }));
             }
             Work::Operate(operations) => {
-                let (fs, events) = (Fs::Remote(sftp.clone()), events.clone());
+                let (fs, events) = (Fs::Remote(sftp.clone(), raw.clone()), events.clone());
                 tokio::spawn(async move {
                     let _ = events.unbounded_send(RemoteEvent::Changed(operate(&fs, operations).await));
                 });
@@ -382,7 +382,11 @@ mod tests {
 
     /// Logs in to a fresh test server that serves `root`.
     fn connected(root: &std::path::Path, state: &std::path::Path) -> (RemoteFs, UnboundedReceiver<RemoteEvent>) {
-        let port = server::start_with_sftp(root.to_path_buf());
+        connected_with_fault(root, state, None)
+    }
+
+    fn connected_with_fault(root: &std::path::Path, state: &std::path::Path, fault: Option<server::SftpFault>) -> (RemoteFs, UnboundedReceiver<RemoteEvent>) {
+        let port = server::start_with_fault(Some(root.to_path_buf()), None, fault);
         let target = SshTarget {
             host: "127.0.0.1".into(),
             port,
@@ -464,6 +468,41 @@ mod tests {
         assert_eq!(std::fs::read(back.path().join("deep/data.bin")).unwrap(), big);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn upload_stops_on_unverified_directory_or_refused_mode() {
+        for fault in [server::SftpFault::PublicDirectory, server::SftpFault::DenyMode] {
+            let (served, local, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+            std::fs::write(local.path().join("file"), b"new").unwrap();
+            std::fs::write(served.path().join("file"), b"existing").unwrap();
+            let (mut remote, mut events) = connected_with_fault(served.path(), state.path(), Some(fault));
+            let mut replacing = job(Direction::Upload, local.path().to_str().unwrap(), "/", "file", false);
+            replacing.planned.destination = Destination::Replace;
+            let id = remote.transfer(replacing);
+            let seen = finish(&mut remote, &mut events, id, Control::Cancel);
+            if fault == server::SftpFault::PublicDirectory {
+                assert!(matches!(seen.last(), Some(TransferEvent::CommitFailed { error }) if error.contains("private directory")));
+            } else {
+                assert!(seen.iter().any(|e| matches!(e, TransferEvent::Failed { .. })));
+                assert_eq!(seen.last(), Some(&TransferEvent::Cancelled));
+            }
+            assert_eq!(std::fs::read(served.path().join("file")).unwrap(), b"existing");
+            assert_eq!(std::fs::read_dir(served.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn failed_attributes_restore_remaining_directory() {
+        let (served, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        std::fs::create_dir(served.path().join("folder")).unwrap();
+        std::fs::write(served.path().join("folder/keep"), b"contents").unwrap();
+        let (remote, mut events) = connected_with_fault(served.path(), state.path(), Some(server::SftpFault::MissingAttributes));
+        remote.operate(vec![Operation::Remove { path: "/folder".into(), is_dir: true }]);
+        assert!(matches!(next(&mut events), RemoteEvent::Changed(Err(_))));
+        assert_eq!(std::fs::read(served.path().join("folder/keep")).unwrap(), b"contents");
+        assert_eq!(std::fs::read_dir(served.path()).unwrap().count(), 1);
+    }
+
     #[test]
     fn discard_stops_a_transfer() {
         let (served, local, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -475,6 +514,28 @@ mod tests {
         let seen = finish(&mut remote, &mut events, id, Control::Cancel);
         assert_eq!(seen.last(), Some(&TransferEvent::Cancelled));
         assert!(std::fs::metadata(served.path().join("big.bin")).map_or(true, |m| m.len() < 4_000_000));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_merge_changes_modes_only_for_new_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let (served, local, state) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let existing = served.path().join("tree/old");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o711)).unwrap();
+        let source = local.path().join("tree/old/new");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("file"), b"copy").unwrap();
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let (mut remote, mut events) = connected(served.path(), state.path());
+        let mut merging = job(Direction::Upload, local.path().to_str().unwrap(), "/", "tree", true);
+        merging.planned.destination = Destination::Merge;
+        let id = remote.transfer(merging);
+        assert_eq!(finish(&mut remote, &mut events, id, Control::Cancel).last(), Some(&TransferEvent::Finished));
+        assert_eq!(existing.metadata().unwrap().permissions().mode() & 0o777, 0o711);
+        assert_eq!(existing.join("new").metadata().unwrap().permissions().mode() & 0o777, 0o751);
+        assert_eq!(std::fs::read(existing.join("new/file")).unwrap(), b"copy");
     }
 
     #[test]
@@ -514,6 +575,11 @@ mod tests {
         std::fs::create_dir_all(served.path().join("logs/2026")).unwrap();
         std::fs::write(served.path().join("logs/2026/a.log"), b"x").unwrap();
         std::fs::write(served.path().join("notes.txt"), b"x").unwrap();
+        #[cfg(unix)]
+        {
+            std::fs::write(state.path().join("keep"), b"kept").unwrap();
+            std::os::unix::fs::symlink(state.path(), served.path().join("logs/link")).unwrap();
+        }
         let (remote, mut events) = connected(served.path(), state.path());
 
         remote.operate(vec![
@@ -528,6 +594,8 @@ mod tests {
         assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(served.path().join("todo.txt")).unwrap().permissions()) & 0o777, 0o640);
         assert!(served.path().join("todo.txt").exists() && served.path().join("new").is_dir());
         assert!(!served.path().join("logs").exists());
+        #[cfg(unix)]
+        assert_eq!(std::fs::read(state.path().join("keep")).unwrap(), b"kept");
 
         remote.operate(vec![Operation::Remove { path: "/nothing".into(), is_dir: false }]);
         assert!(matches!(next(&mut events), RemoteEvent::Changed(Err(_))));

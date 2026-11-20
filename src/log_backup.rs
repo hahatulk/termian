@@ -35,6 +35,7 @@ struct Uploaded {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Outcome {
+    pub pending_snapshot: bool,
     pub uploaded: usize,
     pub unchanged: usize,
     pub ready: Vec<String>,
@@ -75,7 +76,9 @@ pub fn backup(cloud: &Cloud, logs_dir: &Path, history: &[HistoryEntry]) -> Resul
     if history.iter().all(|entry| entry.remote_log || entry.log.is_none()) {
         return Ok(Outcome::default());
     }
-    let generation = cloud.log_generation()?;
+    let Some((generation, revision)) = cloud.log_generation()? else {
+        return Ok(Outcome { pending_snapshot: true, ..Outcome::default() });
+    };
     let prefix = format!("{}:{generation}:", cloud.storage_key());
     let mut ledger = read_ledger(&ledger_file);
     let mut outcome = Outcome::default();
@@ -105,7 +108,7 @@ pub fn backup(cloud: &Cloud, logs_dir: &Path, history: &[HistoryEntry]) -> Resul
             continue;
         }
         let payload = json!({"format": FORMAT, "version": 1, "name": name, "modified": current.modified, "meta": meta(entry, &name, &log.key), "file": STANDARD.encode(&file)});
-        if !cloud.put_log(&name, &payload, &generation)? {
+        if !cloud.put_log(&name, &payload, &generation, &revision)? {
             outcome.unsupported = true;
             break;
         }
@@ -277,6 +280,8 @@ mod tests {
         fs::write(logs.join("a-1.log"), b"TMNLOG1 first").unwrap();
         let history = vec![entry(1, "a-1"), entry(2, "missing-2")];
 
+        assert!(backup(&cloud, &logs, &history).unwrap().pending_snapshot);
+        cloud.upload(&serde_json::json!({}), crate::cloud::Condition::Create).unwrap();
         assert_eq!(backup(&cloud, &logs, &history).unwrap(), Outcome { uploaded: 1, ready: vec!["a-1.log".into()], ..Outcome::default() });
         assert_eq!(backup(&cloud, &logs, &history).unwrap(), Outcome { unchanged: 1, ready: vec!["a-1.log".into()], ..Outcome::default() }, "nothing twice");
         fs::write(logs.join("a-1.log"), b"TMNLOG1 first and more").unwrap();
@@ -316,7 +321,14 @@ mod tests {
         let active_id = a.record_connection(entry(0, "open"));
         fs::write(source.join("open.log"), b"TMNLOG1\n").unwrap();
 
-        assert_eq!(prepare_logs(&mut a, &source, &[active_id].into_iter().collect()), None);
+        let active = [active_id].into_iter().collect();
+        let client = cloud.validate().unwrap();
+        assert!(client.fetch().unwrap().is_none());
+        assert_eq!(prepare_logs(&mut a, &source, &active).as_deref(), Some("Журналы будут отправлены при следующей синхронизации после создания снимка."));
+        sync(&mut a, &backups).unwrap();
+        assert!(client.fetch().unwrap().is_some());
+        assert!(!restore(&client, &target, a.history_entry_mut(a_id).unwrap().log.as_ref().unwrap()).unwrap());
+        assert_eq!(prepare_logs(&mut a, &source, &active), None);
         sync(&mut a, &backups).unwrap();
         b.record_connection(HistoryEntry { label: "device-local".into(), ..HistoryEntry::default() });
         sync(&mut b, &backups).unwrap();
@@ -371,6 +383,12 @@ mod tests {
         let mut file = b"TMNLOG1\n".to_vec();
         file.extend(session_log::encode_record(b"test output", &[7; 32]));
         fs::write(logs.join(session_log::file_name(&name)), file).unwrap();
+        let client = config.validate().unwrap();
+        assert!(client.fetch().unwrap().is_none(), "this test requires an empty test server");
+        assert_eq!(crate::self_cloud::prepare_logs(&mut source, &logs, &Default::default()).as_deref(), Some("Журналы будут отправлены при следующей синхронизации после создания снимка."));
+        crate::self_cloud::sync(&mut source, &backups).unwrap();
+        assert!(client.fetch().unwrap().is_some());
+        assert!(client.get_log(&session_log::file_name(&name)).unwrap().is_none());
         assert_eq!(crate::self_cloud::prepare_logs(&mut source, &logs, &Default::default()), None);
         crate::self_cloud::sync(&mut source, &backups).unwrap();
         crate::self_cloud::sync(&mut target, &backups).unwrap();

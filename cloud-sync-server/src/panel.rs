@@ -446,12 +446,16 @@ fn rotate(state: &Shared, request: &Rotation) -> Result<String, &'static str> {
     if old_revisions.is_dir() {
         let dest = stage.path().join("revisions");
         fs::create_dir(&dest).map_err(|_| "storage")?;
-        for entry in fs::read_dir(old_revisions).map_err(|_| "storage")? {
+        for entry in fs::read_dir(&old_revisions).map_err(|_| "storage")? {
             let entry = entry.map_err(|_| "storage")?;
             if entry.path().extension().is_some_and(|ext| ext == "snapshot") {
                 let path = dest.join(entry.file_name());
-                fs::copy(entry.path(), &path).map_err(|_| "storage")?;
+                if !entry.file_type().map_err(|_| "storage")?.is_file() { return Err("storage"); }
+                let bytes = fs::read(entry.path()).map_err(|_| "storage")?;
+                durable_replace(&dest, &path, &bytes).map_err(|_| "storage")?;
+                if fs::read(&path).map_err(|_| "storage")? != bytes { return Err("storage"); }
                 preserve_modified(&entry, path).map_err(|_| "storage")?;
+                replaced_files.push(entry.path());
             }
         }
         sync_directory(&dest).map_err(|_| "storage")?;
@@ -466,10 +470,15 @@ fn rotate(state: &Shared, request: &Rotation) -> Result<String, &'static str> {
             eprintln!("Could not remove superseded encrypted data after password rotation");
         }
     }
-    if source_logs.is_dir() {
-        let _ = sync_directory(&source_logs);
+    for dir in [&source_logs, &old_revisions] {
+        if dir.is_dir() {
+            let _ = sync_directory(dir);
+            let _ = fs::remove_dir(dir);
+        }
     }
     let _ = sync_directory(&cfg.dir);
+    if cfg.dir != state.cfg.dir { let _ = fs::remove_dir(&cfg.dir); }
+    let _ = sync_directory(&state.cfg.dir);
     Ok(crate::digest(&snapshot))
 }
 

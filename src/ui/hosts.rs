@@ -83,10 +83,10 @@ pub(super) fn card(id: SharedString, tile: Div, title: String, subtitle: String)
         .rounded_lg()
         .bg(rgb(theme::SURFACE))
         .border_2()
-        .border_color(rgb(theme::SURFACE))
+        .border_color(gpui::transparent_black())
         .cursor_pointer()
-        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)).border_color(rgb(0x5a627f)))
-        .active(|s| s.bg(rgb(theme::INPUT)).border_color(rgb(theme::ACCENT)))
+        .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
+        .active(|s| s.bg(rgb(theme::INPUT)))
         .child(tile)
         .child(
             div()
@@ -300,6 +300,7 @@ impl Shell {
             })))
             .child(tool_button("serial", "serial", "SERIAL").on_click(cx.listener(|shell, _, window, cx| shell.open_serial(window, cx))))
             .child(div().flex_1())
+            .child(self.ping_all_button(cx))
             .children(self.listing_controls("hosts", false, true, window, cx));
 
         let mut body = div().id("hosts-scroll").flex_1().overflow_y_scroll().px(px(super::sections::BODY_PADDING)).pb_5();
@@ -372,6 +373,7 @@ impl Shell {
             .when(last, |d| d.border_1().border_color(rgb(theme::ACCENT)))
             .group(group)
             .child(edit)
+            .child(self.ping_dot(host, cx))
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
                 if event.is_keyboard() || event.click_count() >= 2 {
                     shell.connect_host(id, window, cx);

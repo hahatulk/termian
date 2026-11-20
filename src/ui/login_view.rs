@@ -1,8 +1,6 @@
 //! Connection screen shown while an SSH login runs, as in the legacy client:
 //! host header, progress (connect, the host key point while it is checked,
-//! terminal), the pending question and the connection log. After a failure
-//! the bar turns red and the log is shown with Close, Edit host, Verbose (-v)
-//! and Start over. Shared by terminal and SFTP tabs.
+//! terminal), the pending question and the connection log.
 
 use std::time::Duration;
 
@@ -15,7 +13,9 @@ use termian_native::theme;
 
 use super::text_input::{self, Mode};
 use super::assets::icon;
+use super::dialog::{self, Kind};
 use super::hosts::os_tile;
+use super::pointer::PointerFeedback;
 
 /// Blue of the progress bar in the legacy screen.
 const PROGRESS: u32 = 0x3d8af7;
@@ -38,7 +38,6 @@ pub struct LoginTarget<'a> {
 pub struct LoginActions<V: 'static> {
     pub answer: fn(&mut V, Answer, &mut Window, &mut Context<V>),
     pub close: fn(&mut V, &mut Window, &mut Context<V>),
-    /// «Start over».
     pub retry: fn(&mut V, &mut Window, &mut Context<V>),
     pub toggle_logs: fn(&mut V, &mut Context<V>),
     pub key: fn(&mut V, &KeyDownEvent, &mut Window, &mut Context<V>),
@@ -46,7 +45,6 @@ pub struct LoginActions<V: 'static> {
     pub submit: fn(&mut V, &mut Window, &mut Context<V>),
     /// «Edit host» after a failure, for saved hosts.
     pub edit_host: Option<fn(&mut V, &mut Window, &mut Context<V>)>,
-    /// «Verbose (-v)»: start over with `debug1:` lines in the log.
     pub verbose: Option<fn(&mut V, &mut Window, &mut Context<V>)>,
     /// «Continue & Save» on the Username question: keep the typed username
     /// in the host, then continue.
@@ -55,7 +53,8 @@ pub struct LoginActions<V: 'static> {
     pub ui: Option<fn(&mut V, LoginUi, &mut Context<V>)>,
 }
 
-fn button(id: &str, label: &str, primary: bool) -> Stateful<Div> {
+fn button(id: &str, label: &str, primary: bool, enabled: bool) -> Stateful<Div> {
+    let background = if primary { CONNECTED } else { theme::SURFACE_ACTIVE };
     div()
         .id(SharedString::from(id.to_owned()))
         .px_4()
@@ -66,7 +65,8 @@ fn button(id: &str, label: &str, primary: bool) -> Stateful<Div> {
         .rounded_md()
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .text_color(rgb(0xffffff))
-        .bg(rgb(if primary { 0x4cae63 } else { theme::SURFACE_ACTIVE }))
+        .bg(rgb(background))
+        .when(enabled, |d| d.surface_feedback(background))
         .child(label.to_owned())
 }
 
@@ -143,13 +143,13 @@ fn progress_bar(state: &LoginState) -> Div {
     let track = WIDTH - STEP;
     let place = |d: Div, x: f32| d.absolute().top_0().left(px(x));
     let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
-    let bar = div().relative().w(px(WIDTH)).h(px(STEP));
     if state.error.is_some() {
-        return bar
-            .child(line().w(px(track)).bg(rgb(FAILED)))
+        return div().relative().w_full().h(px(STEP))
+            .child(line().right(px(STEP / 2.)).bg(rgb(FAILED)))
             .child(place(step("connect", FAILED, false), 0.))
-            .child(place(step("terminal", FAILED, false), track));
+            .child(step("terminal", FAILED, false).absolute().top_0().right_0());
     }
+    let bar = div().relative().w(px(WIDTH)).h(px(STEP));
     let progress = state.progress();
     let spinning = state.question.is_none();
     let head = match state.stage {
@@ -194,7 +194,7 @@ pub fn render_connected(label: &str, subtitle: String, os: Option<&str>, key: u6
         .gap_3()
         .child(os_tile(os).size(px(40.)))
         .child(div().flex_1().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child(label.to_owned())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
-        .child(button("connected-logs", "Show logs", false));
+        .child(button("connected-logs", "Show logs", false, false));
     let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
     let bar = div()
         .relative()
@@ -229,9 +229,11 @@ pub fn render<V: 'static>(
     // After a failure the log is always shown and the header button copies it.
     let header_button = if let Some(error) = &state.error {
         let text = state.logs.iter().chain(std::iter::once(error)).cloned().collect::<Vec<_>>().join("\n");
-        button("copy-logs", "Copy logs", false).on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone())))
+        button("copy-logs", "Copy logs", false, true)
+            .flex_none()
+            .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone())))
     } else {
-        button("show-logs", if state.show_logs { "Hide logs" } else { "Show logs" }, false)
+        button("show-logs", if state.show_logs { "Hide logs" } else { "Show logs" }, false, true)
             .on_click(cx.listener(move |view, _, _, cx| toggle_logs(view, cx)))
     };
     let header = div()
@@ -239,14 +241,15 @@ pub fn render<V: 'static>(
         .flex()
         .items_center()
         .gap_3()
-        .child(os_tile(target.os).size(px(40.)))
+        .child(os_tile(target.os).size(px(40.)).flex_none())
         .child(
             div()
                 .flex_1()
+                .min_w_0()
                 .flex()
                 .flex_col()
-                .child(div().text_color(rgb(theme::TEXT)).child(target.label.to_owned()))
-                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(target.subtitle.clone())),
+                .child(div().truncate().text_color(rgb(theme::TEXT)).child(target.label.to_owned()))
+                .child(div().truncate().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(target.subtitle.clone())),
         )
         .when(!state.asks_username(), |d| d.child(header_button));
 
@@ -270,8 +273,8 @@ pub fn render<V: 'static>(
             .children(state.logs.iter().map(|line| log_line(line)))
             .children(extra.map(|error| div().child(format!("😨 {error}"))))
     };
-    let close_button = |id: &str| button(id, "Close", false).on_click(cx.listener(move |view, _, window, cx| close(view, window, cx)));
-    let start_over = || button("login-retry", "Start over", true).on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx)));
+    let close_button = |id: &str| button(id, "Close", false, true).on_click(cx.listener(move |view, _, window, cx| close(view, window, cx)));
+    let start_over = || button("login-retry", "Start over", true, true).on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx)));
 
     let mut body = div().w_full().pt_6().flex().flex_col().gap_4();
     let title = |text: &str| div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT_MUTED)).child(text.to_owned());
@@ -298,15 +301,24 @@ pub fn render<V: 'static>(
                 )
                 .child(log_box(Some(error)));
         }
-        let mut buttons = div().w_full().flex().gap_2().child(close_button("login-close"));
-        if let Some(edit_host) = actions.edit_host {
-            buttons = buttons.child(button("login-edit-host", "Edit host", false).on_click(cx.listener(move |view, _, window, cx| edit_host(view, window, cx))));
+        let main_actions = div().flex().gap_3()
+            .child(close_button("login-close").flex_1().min_w_0().h(px(42.)).px_2())
+            .child(button("login-retry", "Retry", true, true)
+                .flex_1().min_w_0().h(px(42.)).px_2().gap_2().flex_row_reverse()
+                .child(svg().path(icon("sync")).size(px(14.)).flex_none().text_color(rgb(0xffffff)))
+                .on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx))));
+        let secondary = |id, label| dialog::button(id, label, Kind::Text, false)
+            .h(px(32.)).px_2().text_sm().text_color(rgb(theme::TEXT_MUTED));
+        let mut footer = div().flex().flex_col().gap_1().child(main_actions);
+        if actions.edit_host.is_some() || actions.verbose.is_some() {
+            let secondary_actions = div().flex().flex_wrap().justify_center().gap_x_2()
+                .children(actions.edit_host.map(|edit_host| secondary("login-edit-host", "Edit host")
+                    .on_click(cx.listener(move |view, _, window, cx| edit_host(view, window, cx)))))
+                .children(actions.verbose.map(|verbose| secondary("login-verbose", "Retry with verbose logs")
+                    .on_click(cx.listener(move |view, _, window, cx| verbose(view, window, cx)))));
+            footer = footer.child(secondary_actions);
         }
-        buttons = buttons.child(div().flex_1());
-        if let Some(verbose) = actions.verbose {
-            buttons = buttons.child(button("login-verbose", "Verbose (-v)", false).on_click(cx.listener(move |view, _, window, cx| verbose(view, window, cx))));
-        }
-        body = body.child(div().flex().flex_col().gap_2().child(buttons).child(div().flex().child(start_over())));
+        body = body.child(footer);
     } else {
         match &state.question {
             Some(Question::HostKey(info)) => {
@@ -320,14 +332,14 @@ pub fn render<V: 'static>(
                         div()
                             .flex()
                             .gap_3()
-                            .child(button("login-close", "Close", false).on_click(cx.listener(move |view, _, window, cx| {
+                            .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| {
                                 answer(view, Answer::HostKey(HostKeyDecision::Reject), window, cx)
                             })))
                             .child(div().flex_1())
-                            .child(button("login-once", "Continue", false).on_click(cx.listener(move |view, _, window, cx| {
+                            .child(button("login-once", "Continue", false, true).on_click(cx.listener(move |view, _, window, cx| {
                                 answer(view, Answer::HostKey(HostKeyDecision::Once), window, cx)
                             })))
-                            .child(button("login-save", "Add and continue", true).on_click(cx.listener(
+                            .child(button("login-save", "Add and continue", true, true).on_click(cx.listener(
                                 move |view, _, window, cx| answer(view, Answer::HostKey(HostKeyDecision::Save), window, cx),
                             ))),
                     );
@@ -350,11 +362,11 @@ pub fn render<V: 'static>(
                     div()
                         .flex()
                         .gap_3()
-                        .child(button("login-close", "Close", false).on_click(cx.listener(move |view, _, window, cx| {
+                        .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| {
                             answer(view, Answer::Text(None), window, cx)
                         })))
                         .child(div().flex_1())
-                        .child(button("login-submit", "Continue", true).on_click(cx.listener(move |view, _, window, cx| {
+                        .child(button("login-submit", "Continue", true, true).on_click(cx.listener(move |view, _, window, cx| {
                             submit(view, window, cx)
                         }))),
                 );
@@ -373,13 +385,21 @@ pub fn render<V: 'static>(
         }
     }
 
-    div().size_full().flex().justify_center().bg(rgb(theme::TITLE_BAR)).child(
-        div().w(px(WIDTH)).pt(px(110.)).flex().flex_col().child(header).child(bar).child(body).with_animation(
+    let failed = state.error.is_some();
+    let content = div()
+        .when(failed, |d| d.w_full().max_w(px(WIDTH)).min_w_0().pb_4())
+        .when(!failed, |d| d.w(px(WIDTH)))
+        .pt(px(110.)).flex().flex_col().child(header).child(bar).child(body).with_animation(
             "login-in",
             Animation::new(Duration::from_millis(250)).with_easing(gpui::ease_out_quint()),
             |d, t| d.opacity(t),
-        ),
-    )
+        );
+    let screen = div().size_full().bg(rgb(theme::TITLE_BAR));
+    if failed {
+        screen.child(div().id("login-failure-scroll").size_full().overflow_y_scroll().px_4().flex().items_start().justify_center().child(content))
+    } else {
+        screen.flex().justify_center().child(content)
+    }
 }
 
 /// The legacy Username question: an outlined field with a floating label,
@@ -486,12 +506,12 @@ fn username_question<V: 'static>(
             .relative()
             .flex()
             .child(
-                primary(button("login-continue-save", "Continue & Save", true))
+                primary(button("login-continue-save", "Continue & Save", true, !empty))
                     .rounded_r_none()
                     .when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| continue_save(view, window, cx)))),
             )
             .child(
-                primary(button("login-continue-menu", "", true))
+                primary(button("login-continue-menu", "", true, !empty))
                     .px_2()
                     .rounded_l_none()
                     .border_l_1()
@@ -525,7 +545,7 @@ fn username_question<V: 'static>(
                 )
             }),
         None => div().child(
-            primary(button("login-submit", "Continue", true)).when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| submit(view, window, cx)))),
+            primary(button("login-submit", "Continue", true, !empty)).when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| submit(view, window, cx)))),
         ),
     };
 
@@ -540,7 +560,7 @@ fn username_question<V: 'static>(
                 .pt_4()
                 .flex()
                 .items_center()
-                .child(button("login-close", "Close", false).on_click(cx.listener(move |view, _, window, cx| answer(view, Answer::Text(None), window, cx))))
+                .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| answer(view, Answer::Text(None), window, cx))))
                 .child(div().flex_1())
                 .child(continue_button),
         )

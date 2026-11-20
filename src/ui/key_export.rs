@@ -14,6 +14,7 @@ use termian_native::session::{SshOptions, SshTarget};
 use termian_native::theme;
 use termian_native::vault::HostId;
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{field_box, menu_row};
@@ -236,6 +237,7 @@ impl Shell {
             Ok(_) => {
                 let picker = field_box(form.hosts_open)
                     .id("export-host")
+                    .surface_feedback(theme::INPUT)
                     .border_dashed()
                     .child(div().flex_1().text_color(rgb(if host.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(host.map(|h| h.display_label().to_owned()).unwrap_or_default()))
                     .child(div().text_xs().text_color(rgb(theme::ACCENT)).child("Select Host"))
@@ -282,6 +284,7 @@ impl Shell {
                     );
                 let advanced = div()
                     .id("export-advanced")
+                    .rounded_sm().icon_feedback()
                     .flex()
                     .items_center()
                     .gap_1()

@@ -581,7 +581,10 @@ async fn put_log(
         _ => return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large\n").into_response(),
     };
     let supplied = headers.get(LOG_GENERATION_HEADER).cloned();
+    let revision = headers.get("x-termian-snapshot-revision").cloned();
     let result = tokio::task::spawn_blocking(move || with_storage(&state, |cfg| {
+        let Some(snapshot) = current(cfg)? else { return Ok(false) };
+        if !revision.is_some_and(|r| r.as_bytes() == etag(&digest(&snapshot)).as_bytes()) { return Ok(false); }
         let active = storage_generation(&state, cfg);
         if !supplied.as_ref().map_or(active == INITIAL_GENERATION, |value| value.as_bytes() == active.as_bytes()) {
             return Ok(false);
@@ -594,7 +597,7 @@ async fn put_log(
     .await;
     match result {
         Ok(Ok(true)) => (StatusCode::OK, "stored\n").into_response(),
-        Ok(Ok(false)) => (StatusCode::PRECONDITION_FAILED, "key generation changed\n").into_response(),
+        Ok(Ok(false)) => (StatusCode::PRECONDITION_FAILED, "snapshot revision or key generation mismatch\n").into_response(),
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "storage error\n").into_response(),
     }
 }
@@ -608,28 +611,34 @@ struct ClearLogs {
 
 async fn delete_logs(State(state): State<Shared>, Query(query): Query<ClearLogs>) -> Response {
     let since = SystemTime::UNIX_EPOCH + Duration::from_millis(query.since.unwrap_or(0));
-    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| Ok(clear_logs(cfg, since)))).await {
-        Ok(Ok(removed)) => {
+    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| clear_logs(cfg, since))).await {
+        Ok(Ok((removed, failed))) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-            (StatusCode::OK, headers, format!("{{\"removed\":{removed}}}")).into_response()
+            (if failed == 0 { StatusCode::OK } else { StatusCode::INTERNAL_SERVER_ERROR }, headers, format!("{{\"removed\":{removed},\"failed\":{failed}}}")).into_response()
         }
         _ => (StatusCode::INTERNAL_SERVER_ERROR, "storage error\n").into_response(),
     }
 }
 
-fn clear_logs(cfg: &Config, since: SystemTime) -> usize {
-    let Ok(entries) = fs::read_dir(logs_dir(cfg)) else {
-        return 0;
+fn clear_logs(cfg: &Config, since: SystemTime) -> io::Result<(usize, usize)> {
+    let entries = match fs::read_dir(logs_dir(cfg)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok((0, 0)),
+        Err(error) => return Err(error),
     };
-    entries
-        .filter_map(Result::ok)
-        .filter(|entry| valid_log_name(&entry.file_name().to_string_lossy()))
-        .filter(|entry| {
-            entry.metadata().and_then(|meta| meta.modified()).is_ok_and(|modified| modified >= since)
-        })
-        .filter(|entry| fs::remove_file(entry.path()).is_ok())
-        .count()
+    let (mut removed, mut failed) = (0, 0);
+    for entry in entries {
+        let result = entry.and_then(|entry| {
+            if valid_log_name(&entry.file_name().to_string_lossy()) && entry.metadata()?.modified()? >= since {
+                fs::remove_file(entry.path())?;
+                removed += 1;
+            }
+            Ok(())
+        });
+        if result.is_err() { failed += 1; }
+    }
+    Ok((removed, failed))
 }
 
 /// Delete logs not uploaded within the retention period; returns how many.
@@ -790,6 +799,9 @@ mod tests {
 
         fs::write(&log_path, current_log).unwrap();
         let modified = fs::metadata(&log_path).unwrap().modified().unwrap();
+        let revisions = shared.cfg.dir.join("revisions");
+        fs::create_dir_all(&revisions).unwrap();
+        fs::write(revisions.join("earlier.snapshot"), &original).unwrap();
         let done = panel.clone().oneshot(rotation_request(&revision, "", Some(TOKEN))).await.unwrap();
         assert_eq!(done.status(), StatusCode::OK);
         let new_revision = json_body(done).await["revision"].as_str().unwrap().to_owned();
@@ -799,6 +811,8 @@ mod tests {
 
         let restarted = state(dir.path(), 1024 * 1024);
         let active = active_config(&restarted.cfg).unwrap();
+        assert_eq!(fs::read(active.dir.join("revisions/earlier.snapshot")).unwrap(), original);
+        assert!(!revisions.join("earlier.snapshot").exists());
         let log_path = logs_dir(&active).join("test.log");
         let stored = fs::read(&log_path).unwrap();
         assert_eq!(fs::metadata(&log_path).unwrap().modified().unwrap(), modified);
@@ -818,6 +832,7 @@ mod tests {
         }
         let mut log = log_request("PUT", "current.log", Body::from(stored));
         log.headers_mut().insert(LOG_GENERATION_HEADER, generation);
+        log.headers_mut().insert("x-termian-snapshot-revision", etag(&new_revision).parse().unwrap());
         assert_eq!(sync.clone().oneshot(log).await.unwrap().status(), StatusCode::OK);
         let bytes = downloaded.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(panel::open_envelope(&bytes, "7").unwrap(), snapshot);
@@ -1177,9 +1192,24 @@ mod tests {
         axum::http::Request::builder()
             .method(method)
             .uri(format!("/v1/logs/{name}"))
+            .header("x-termian-snapshot-revision", etag(&digest(b"snapshot")))
             .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(body)
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn log_cleanup_reports_partial_failure() {
+        let dir = TempDir::new().unwrap();
+        let shared = state(dir.path(), 1024);
+        let logs = logs_dir(&shared.cfg);
+        fs::create_dir_all(logs.join("blocked.log")).unwrap();
+        fs::write(logs.join("ok.log"), b"test").unwrap();
+        let mut req = request("DELETE", Body::empty());
+        *req.uri_mut() = "/v1/logs".parse().unwrap();
+        let response = make_app(shared).oneshot(req).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(json_body(response).await, serde_json::json!({"removed": 1, "failed": 1}));
     }
 
     #[tokio::test]
@@ -1188,6 +1218,14 @@ mod tests {
         let app = app(dir.path(), 1024);
         let response = app.clone().oneshot(log_request("GET", "a-1.log", Body::empty())).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(app.clone().oneshot(log_request("PUT", "a-1.log", Body::from("log"))).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+        app.clone().oneshot(request("PUT", Body::from("snapshot"))).await.unwrap();
+        for revision in [None, Some("stale")] {
+            let mut req = log_request("PUT", "a-1.log", Body::from("log"));
+            req.headers_mut().remove("x-termian-snapshot-revision");
+            if let Some(value) = revision { req.headers_mut().insert("x-termian-snapshot-revision", value.parse().unwrap()); }
+            assert_eq!(app.clone().oneshot(req).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+        }
         for body in ["first", "second"] {
             let response = app.clone().oneshot(log_request("PUT", "a-1.log", Body::from(body))).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
@@ -1195,9 +1233,8 @@ mod tests {
         let response = app.clone().oneshot(log_request("GET", "a-1.log", Body::empty())).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), &b"second"[..]);
-        // No snapshot or snapshot revision is created by log uploads.
         let response = app.clone().oneshot(request("GET", Body::empty())).await.unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[header::ETAG], etag(&digest(b"snapshot")));
         assert!(!dir.path().join("revisions").exists());
 
         let response = app.clone().oneshot(log_request("PUT", ".hidden", Body::from("x"))).await.unwrap();

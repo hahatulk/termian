@@ -236,25 +236,38 @@ pub fn match_ids(local: &Value, remote: Option<&Value>, ids: &mut Ids) {
         claimed.insert(key_of(kind, sync_id));
         true
     };
-    let by_name = |kind: &str, snapshot: &Value| -> HashMap<String, Value> {
+    fn by_name<'a>(kind: &str, snapshot: &'a Value) -> HashMap<String, &'a Value> {
+        let mut configs = HashMap::new();
+        let mut identities = HashMap::new();
+        if kind == "hosts" {
+            for (collection, index) in [("sshConfigs", &mut configs), ("identities", &mut identities)] {
+                index.extend(records(snapshot, collection).filter_map(|r| Some((token(ref_id(r)?), r))));
+            }
+        }
         let mut names = HashMap::new();
-        let mut seen: HashMap<String, usize> = HashMap::new();
+        let mut duplicates = HashSet::new();
         for record in records(snapshot, kind) {
-            let label = label_of(kind, record).to_lowercase();
+            let label = ["label", "name"].iter().find_map(|k| record[*k].as_str().filter(|s| !s.is_empty()))
+                .or_else(|| (kind == "proxies").then(|| record["hostname"].as_str()).flatten())
+                .unwrap_or_default().trim().to_lowercase();
             if label.is_empty() {
                 continue;
             }
-            let count = seen.entry(label.clone()).or_default();
-            names.insert(format!("{label}#{count}"), record.clone());
-            *count += 1;
+            let name = if kind == "hosts" {
+                let config = ref_id(&record["ssh_config"]).and_then(|id| configs.get(&token(id)).copied()).unwrap_or(&Value::Null);
+                let identity = ref_id(&config["identity"]).and_then(|id| identities.get(&token(id)).copied()).unwrap_or(&Value::Null);
+                json!([label, record["address"].as_str().unwrap_or_default().to_ascii_lowercase(), config["port"].as_u64().unwrap_or(22), identity["username"].as_str().unwrap_or_default()]).to_string()
+            } else { label };
+            if names.insert(name.clone(), record).is_some() { duplicates.insert(name); }
         }
+        names.retain(|key, _| !duplicates.contains(key));
         names
-    };
+    }
     for kind in LABELED {
         let theirs = by_name(kind, remote);
         for (name, record) in by_name(kind, local) {
             if let Some(other) = theirs.get(&name) {
-                bind(ids, kind, ref_id(&record), ref_id(other));
+                bind(ids, kind, ref_id(record), ref_id(other));
             }
         }
     }
@@ -793,7 +806,7 @@ fn validate_with_budget(snapshot: &Value, limit: usize) -> Result<Value, String>
             return fail(format!("workspaceTemplates[{i}].workspaceTerminals must be an array"));
         };
         for (j, terminal) in terminals.iter().enumerate() {
-            has("hosts", terminal.get("host"), &format!("workspaceTemplates[{i}].workspaceTerminals[{j}].host"), false)?;
+            has("hosts", terminal.get("host"), &format!("workspaceTemplates[{i}].workspaceTerminals[{j}].host"), terminal["protocol"] == "local")?;
         }
     }
     // Parent cycles would make import ordering unsafe.
@@ -1146,8 +1159,22 @@ mod tests {
 
         let mut c = TestDevice::new("C", 900);
         c.add_host("web", 2200, None);
-        assert_eq!(sync(&mut c, &cloud).resolved_conflicts, 1);
-        assert_eq!(c.host_mut("web")["ssh_config"]["port"], 22);
+        assert_eq!(sync(&mut c, &cloud).resolved_conflicts, 0);
+        assert_eq!(records(&c.data, "hosts").filter(|h| h["label"] == "web").count(), 2);
+    }
+
+    #[test]
+    fn first_merge_keeps_different_addresses_and_ambiguous_hosts() {
+        for (local_count, remote_count, different_address) in [(1, 1, true), (1, 2, false), (2, 1, false)] {
+            let cloud = TestServer::default();
+            let (mut a, mut b) = (TestDevice::new("A", 1), TestDevice::new("B", 500));
+            for _ in 0..remote_count { a.add_host("web", 22, None); }
+            for _ in 0..local_count { b.add_host("web", 22, None); }
+            if different_address { b.host_mut("web")["address"] = json!("second.lan"); }
+            sync(&mut a, &cloud);
+            sync(&mut b, &cloud);
+            assert_eq!(b.labels("hosts").len(), local_count + remote_count);
+        }
     }
 
     #[test]

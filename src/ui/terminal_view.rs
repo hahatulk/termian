@@ -285,6 +285,10 @@ impl TerminalView {
     }
 
     /// Records everything the session prints to an encrypted session log.
+    pub fn stop_log(&mut self) {
+        if let Some(log) = self.log.take() { log.finish(); }
+    }
+
     pub fn with_log(mut self, log: Option<termian_native::session_log::SessionLog>) -> Self {
         self.log = log;
         self
@@ -312,11 +316,21 @@ impl TerminalView {
 
     /// A recorded session, read-only.
     pub fn replay(data: Vec<u8>, note: Option<&str>, settings: &TerminalSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let mut view = Self::build(session::replay(data), None, settings, window, cx);
+        let mut view = Self::build(session::replay(Vec::new()), None, settings, window, cx);
         view.closed = true;
-        if let Some(note) = note {
-            view.terminal.feed(format!("\r\n\x1b[31m{note}\x1b[0m\r\n").as_bytes());
-        }
+        let note = note.map(str::to_owned);
+        cx.spawn_in(window, async move |this, cx| {
+            for bytes in data.chunks(32 * 1024) {
+                if this.update(cx, |view, cx| { view.terminal.feed(bytes); cx.notify(); }).is_err() { return; }
+                cx.background_executor().timer(std::time::Duration::from_millis(1)).await;
+            }
+            if let Some(note) = note {
+                let _ = this.update(cx, |view, cx| {
+                    view.terminal.feed(format!("\r\n\x1b[31m{note}\x1b[0m\r\n").as_bytes());
+                    cx.notify();
+                });
+            }
+        }).detach();
         view
     }
 
@@ -326,16 +340,19 @@ impl TerminalView {
                 while let Some(event) = events.next().await {
                     let alive = this.update_in(cx, |view, window, cx| {
                         if view.generation != generation {
-                            return;
+                            return None;
                         }
-                        view.handle(event, window, cx);
+                        let pending = view.handle(event, window, cx);
                         if std::mem::take(&mut view.ended) {
                             cx.emit(TerminalEvent::Ended);
                         }
                         cx.notify();
+                        pending
                     });
-                    if alive.is_err() {
-                        break;
+                    match alive {
+                        Err(_) => break,
+                        Ok(Some(write)) => cx.background_executor().spawn(async move { write(); }).await,
+                        Ok(None) => {}
                     }
                 }
             })
@@ -343,7 +360,7 @@ impl TerminalView {
         }
     }
 
-    fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) -> Option<Box<dyn FnOnce() + Send>> {
         match event {
             SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
                 // A first connection or a reconnect from the connection screen hands over with the legacy animation.
@@ -413,9 +430,6 @@ impl TerminalView {
                 for event in events {
                     self.shell_event(event, cx);
                 }
-                if let Some(log) = &self.log {
-                    log.append(&bytes);
-                }
                 self.terminal.feed(&bytes);
                 if self.frozen.is_some() && !self.terminal.alt_screen() {
                     self.frozen = None;
@@ -427,6 +441,7 @@ impl TerminalView {
                 if !replies.is_empty() {
                     self.session.write(&replies);
                 }
+                return self.log.as_ref().and_then(|log| log.queue(bytes));
             }
             SessionEvent::Closed(Some(reason))
                 if reason.starts_with(session::CONNECTION_LOST) && self.was_ready && self.settings.autoreconnect && self.connection.is_some() =>
@@ -454,6 +469,7 @@ impl TerminalView {
                 self.terminal.feed(b"\r\n\x1b[2m[Session closed]\x1b[0m\r\n");
             }
         }
+        None
     }
 
     /// Legacy search field keys: typing searches up from the last match,
@@ -956,7 +972,6 @@ impl TerminalView {
         cx.emit(TerminalEvent::EditHost);
     }
 
-    /// «Verbose (-v)»: starts over with `debug1:` lines and the log open.
     fn login_verbose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(connection) = self.connection.as_mut() {
             connection.target.options.verbose = true;

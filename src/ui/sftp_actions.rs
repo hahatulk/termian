@@ -430,6 +430,10 @@ impl Shell {
     pub fn open_entry(&mut self, side: Side, entry: &Entry, app: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dir) = self.panel_dir(side) else { return };
         let app = app.or_else(|| self.sftp.actions.associations.app_for(&entry.name).map(PathBuf::from));
+        #[cfg(windows)]
+        if self.sftp.is_host(side) && app.is_none() {
+            return self.open_entry_with(side, entry.clone(), window, cx);
+        }
         match self.sftp.is_host(side) {
             false => {
                 if let Err(error) = open_path(Path::new(&join(&dir, &entry.name)), app.as_deref()) {
@@ -1112,6 +1116,7 @@ impl Shell {
                 .child(
                     div()
                         .id(SharedString::from(format!("failed-{}-{id}-{in_dialog}", side_key(conn))))
+                        .rounded_sm().icon_feedback()
                         .flex()
                         .items_center()
                         .gap_1()
@@ -1238,6 +1243,7 @@ impl Shell {
             .child(
                 div()
                     .id("edits-toggle")
+                    .rounded_sm().icon_feedback()
                     .px_2()
                     .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| {
                         s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))

@@ -43,7 +43,7 @@ Protection: requests with a `Host` outside the allow-list are rejected (DNS rebi
 
 Pause cloud sync and log backups on every client before rotating. Open the web panel with the current password, enter the sync token and the new password twice, then confirm. The new password must be non-empty and at most 4096 UTF-8 bytes. Opening an existing snapshot accepts its original password, including an empty password. The server re-encrypts the current snapshot and session logs together. If a log still uses another password, rotation stops without changing the active files.
 
-In each native client, enter the new password in «Своё облако» and choose «Сменить пароль». The client verifies that the new password opens the snapshot before saving it. Future uploads use the new password. Historical revisions and older client `.json` backups still require their original passwords. Current client `.bin` backups use the local Vault key. Rotation does not erase old copies outside the live storage. After rotation, keep `.active-storage` and its `sealed-*` storage directory together when backing up the server. Older server binaries cannot read that layout.
+In each native client, enter the new password in «Своё облако» and choose «Сменить пароль». The client verifies that the new password opens the snapshot before saving it. Future uploads use the new password. Historical revisions and older client `.json` backups still require their original passwords. Current client `.bin` backups use the local Vault key. After switching to the new generation, the server removes the revision files it copied and verified from the preceding generation. Rotation does not erase older inactive generations or external backups. After rotation, keep `.active-storage` and its `sealed-*` storage directory together when backing up the server. Older server binaries cannot read that layout.
 
 ### Failed authorization limit
 
@@ -74,11 +74,11 @@ location / {
 | `PUT /v1/snapshot` | Replace snapshot; returns new `ETag` |
 | `GET /v1/logs/<name>` | Download a session log backup or 404 |
 | `PUT /v1/logs/<name>` | Store or replace a session log backup |
-| `DELETE /v1/logs?since=<ms>` | Delete logs uploaded at or after a Unix time in milliseconds (`0` or none: all); returns `{"removed": n}` |
+| `DELETE /v1/logs?since=<ms>` | Delete logs uploaded at or after a Unix time in milliseconds (`0` or none: all); returns `{"removed": n, "failed": 0}` on success. Partial deletion returns HTTP 500 with both counts |
 
 For conditional writes, `If-Match` checks an existing revision, while `If-None-Match: *` permits creation only if absent. Both merge and forced upload use a conditional write. After password rotation, replacing the snapshot requires its exact current ETag. Older clients that upload unconditionally receive HTTP 412. A failed precondition returns HTTP 412. The last 10 revisions are retained in `revisions/`.
 
-Session logs are encrypted by the client (sealed with the encryption password, like the snapshot) and stored in `logs/`, separately from the snapshot and its revisions. Names may contain only letters, digits, `.`, `_` and `-`. Logs not updated for `SYNC_LOG_RETENTION_DAYS` (default `60`) are deleted at start and then every 6 hours. The snapshot response also includes `X-Termian-Key-Generation`. Clients check that their password opens the snapshot when one exists, then send that generation with each log upload. After password rotation, the server rejects missing or stale generations with HTTP 412. Update the server before updating clients.
+Session logs are encrypted by the client (sealed with the encryption password, like the snapshot) and stored in `logs/`, separately from the snapshot and its revisions. Names may contain only letters, digits, `.`, `_` and `-`. Logs not updated for `SYNC_LOG_RETENTION_DAYS` (default `60`) are deleted at start and then every 6 hours. The snapshot response also includes `X-Termian-Key-Generation`. For `PUT /v1/logs/<name>`, the client first decrypts the current snapshot and sends its `ETag` in `X-Termian-Snapshot-Revision` along with `X-Termian-Key-Generation`. The server returns HTTP 412 if there is no snapshot or the revision is missing or stale. After password rotation it also requires the current generation. Older clients that omit the revision cannot upload logs to this server. For a new store, sync once to create the snapshot, then sync again to upload logs.
 
 ## Security
 

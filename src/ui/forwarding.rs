@@ -14,6 +14,7 @@ use termian_native::session::SshTarget;
 use termian_native::theme;
 use termian_native::vault::{ForwardingRule, RuleKind};
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{card, field_box, menu_panel, menu_row};
@@ -334,6 +335,7 @@ impl Shell {
         let chosen = editor.rule.host.and_then(|h| self.vault.host(h)).map(|h| h.display_label().to_owned());
         let picker = field_box(editor.hosts_open)
             .id("rule-host")
+            .surface_feedback(theme::INPUT)
             .border_dashed()
             .child(div().flex_1().text_color(rgb(if chosen.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(chosen.unwrap_or_else(|| "Hosts".into())))
             .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
@@ -414,6 +416,7 @@ impl Shell {
                     .rounded_sm()
                     .text_sm()
                     .when(k == kind, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .surface_feedback(if k == kind { theme::SURFACE_ACTIVE } else { theme::INPUT })
                     .child(kind_name(k))
                     .on_click(cx.listener(move |shell, _, _, cx| shell.set_rule_kind(k, cx)))
             })));
@@ -467,7 +470,7 @@ impl Shell {
             }
         };
         let back = (step != Step::Kind).then(|| {
-            div().id("wizard-back").flex().items_center().gap_1().cursor_pointer().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("‹ Back").on_click(cx.listener(|shell, _, window, cx| {
+            div().id("wizard-back").flex().items_center().gap_1().rounded_sm().icon_feedback().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("‹ Back").on_click(cx.listener(|shell, _, window, cx| {
                 if let Some(editor) = &mut shell.rules.editor {
                     if let Some(step) = editor.wizard {
                         editor.wizard = Some(wizard::back(editor.rule.kind, step));
@@ -527,6 +530,7 @@ impl Shell {
                     .text_sm()
                     .text_color(rgb(theme::TEXT))
                     .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
+                    .surface_feedback(if selected { theme::SURFACE_ACTIVE } else { theme::INPUT })
                     .child(kind_name(kind))
                     .on_click(cx.listener(move |shell, _, _, cx| shell.set_rule_kind(kind, cx)))
             }))
@@ -576,7 +580,7 @@ impl Shell {
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child("Need help configuring the port forwarding rule?")
-                    .child(div().id("rule-open-wizard").cursor_pointer().text_color(rgb(theme::ACCENT)).child("Open Port Forwarding Wizard").on_click(cx.listener(|shell, _, window, cx| {
+                    .child(div().id("rule-open-wizard").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("Open Port Forwarding Wizard").on_click(cx.listener(|shell, _, window, cx| {
                         if let Some(editor) = &mut shell.rules.editor {
                             editor.wizard = Some(Step::Kind);
                             editor.hosts_open = false;

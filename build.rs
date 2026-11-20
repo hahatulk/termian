@@ -19,8 +19,24 @@ fn xcrun(args: &[&str]) -> String {
 fn main() {
     println!("cargo:rerun-if-changed=src/store/macos.swift");
     println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
-        return;
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("windows") => {
+            let assets =
+                PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+                    .join("assets/app");
+            println!("cargo:rerun-if-changed=assets/app/icon.ico");
+            println!("cargo:rerun-if-changed=assets/app/termian.rc");
+            embed_resource::compile_for(
+                "assets/app/termian.rc",
+                ["termian-native"],
+                embed_resource::ParamsIncludeDirs([assets]),
+            )
+            .manifest_required()
+            .expect("compile Termian Windows icon");
+            return;
+        }
+        Ok("macos") => {}
+        _ => return,
     }
     let out = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR"));
     let sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"]);

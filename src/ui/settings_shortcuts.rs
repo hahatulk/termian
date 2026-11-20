@@ -8,6 +8,7 @@ use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Context, Div, FontWeight,
 use termian_native::shortcuts::{self, ShortcutSettings, ACTIONS};
 use termian_native::theme;
 
+use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
 use super::settings::{action_button, Field, Menu, SettingsWindow, MUTED};
 
@@ -243,6 +244,7 @@ impl SettingsWindow {
                                 d.child(
                                     div()
                                         .id(SharedString::from(format!("shortcut-scheme-remove-{choice}")))
+                                        .rounded_sm().icon_feedback()
                                         .text_color(rgb(0xec706f))
                                         .child("✕")
                                         .on_click(cx.listener(move |settings, _, _, cx| {

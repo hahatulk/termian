@@ -10,6 +10,7 @@ use termian_native::serial::{self, FlowControl, Parity, SerialOptions, BAUD_RATE
 use termian_native::session_log::SessionLog;
 use termian_native::theme;
 
+use crate::ui::pointer::PointerFeedback;
 use super::{TerminalEvent, TerminalView};
 use super::text_input::{self, Mode};
 use crate::ui::assets::icon;
@@ -211,6 +212,7 @@ impl TerminalView {
                     .items_center()
                     .rounded_md()
                     .bg(rgb(if active { theme::ACCENT } else { theme::INPUT }))
+                    .surface_feedback(if active { theme::ACCENT } else { theme::INPUT })
                     .text_color(rgb(if active { 0xffffff } else { theme::TEXT }))
                     .child(text.clone())
                     .on_click(cx.listener(move |view, _, _, cx| {
@@ -240,6 +242,7 @@ impl TerminalView {
             .p(px(10.))
             .rounded_lg()
             .bg(rgb(theme::SURFACE))
+            .surface_feedback(theme::SURFACE)
             .flex()
             .flex_col()
             .gap(px(12.))

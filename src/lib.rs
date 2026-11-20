@@ -16,7 +16,11 @@ pub mod log_backup;
 pub mod log_comment;
 pub mod login;
 pub mod motion;
+#[cfg(target_os = "android")]
+mod mobile;
 pub mod palette;
+#[cfg(not(target_os = "android"))]
+pub mod ping;
 pub mod portable;
 pub mod privacy_password;
 pub mod remote_fs;

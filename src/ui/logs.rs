@@ -13,7 +13,7 @@ use super::sections::{bare_page, empty_state};
 use super::text_input::{self, Mode};
 use crate::Shell;
 
-const LOG_COLUMNS: [f32; 6] = [0.25, 0.15, 0.20, 0.10, 0.15, 0.15];
+const LOG_COLUMNS: [f32; 5] = [0.18, 0.26, 0.13, 0.18, 0.25];
 
 /// Sorting and the one Saved cell being edited.
 #[derive(Default)]
@@ -382,19 +382,19 @@ impl Shell {
             .when(self.logs_view.oldest_first, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
         let mut header = div().h(px(48.)).flex_none().flex().items_center().border_b_1().border_color(rgb(theme::SURFACE_ACTIVE));
         for (index, label, glyph) in [
-            (0, "User", "person"), (1, "Action", "connect"), (2, "Host", "hosts"),
-            (3, "Time", "calendar"), (4, "Device", "local"), (5, "Location", "navigate"),
+            (0, "User", "person"), (1, "Host", "hosts"), (2, "Time", "calendar"),
+            (3, "Device", "local"), (4, "Location", "navigate"),
         ] {
             header = header.child(log_column(index)
                 .child(svg().path(icon(glyph)).size(px(12.)).flex_none().text_color(rgb(theme::TEXT_MUTED)))
                 .child(div().text_color(rgb(theme::TEXT)).child(label))
-                .when(index == 3, |d| d.child(div().id("logs-sort-time").px_1().rounded_sm()
+                .when(index == 2, |d| d.child(div().id("logs-sort-time").px_1().rounded_sm()
                     .icon_feedback().child(arrow())
                     .on_click(cx.listener(|shell, _, _, cx| {
                         shell.logs_view.oldest_first = !shell.logs_view.oldest_first;
                         cx.notify();
                     }))))
-                .when(index == 5, |d| d.child(div().id("logs-sort-saved").ml_auto().px_1().rounded_sm()
+                .when(index == 4, |d| d.child(div().id("logs-sort-saved").ml_auto().px_1().rounded_sm()
                     .icon_feedback()
                     .child(svg().path(icon(if self.logs_view.saved_first { "bookmark_filled" } else { "bookmark" })).size(px(13.)).text_color(rgb(theme::TEXT_MUTED)))
                     .on_click(cx.listener(|shell, _, _, cx| {
@@ -406,7 +406,7 @@ impl Shell {
         let items = self.logs_view.list.items.clone();
         let shell = cx.entity();
         let body = list(self.logs_view.list.state.clone(), move |ix, _, cx| match &items[ix] {
-            LogItem::Day(date) => div().px_2().py(px(10.)).text_xs().font_weight(FontWeight::MEDIUM)
+            LogItem::Day(date) => div().w_full().px_2().py(px(10.)).text_xs().font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme::TEXT)).child(date.clone()).into_any_element(),
             LogItem::Session { index, stripe, first, last, .. } => shell.update(cx, |shell, cx| {
                 let row = &shell.vault.history[*index];
@@ -424,7 +424,7 @@ impl Shell {
             }),
         }).flex_1().min_h_0().pb_3();
         div().id("logs-horizontal").size_full().min_w_0().overflow_x_scroll().px(px(10.)).child(
-            div().size_full().min_w(px(925.)).flex().flex_col().child(header).child(body)
+            div().size_full().min_w(px(800.)).flex().flex_col().child(header).child(body)
         ).into_any_element()
     }
 
@@ -438,12 +438,12 @@ impl Shell {
             os_tile_sized(os, 34., 17.).rounded(px(10.))
         };
         let duration = entry.disconnected_at.map(|end| duration_label(entry.connected_at, end));
-        let action = if entry.connected { "Connected" } else { "Recorded" };
         let device = if entry.device.is_empty() { "Unknown device" } else { entry.device.as_str() };
         let background = if stripe { theme::SURFACE_ACTIVE } else { theme::SURFACE };
         div()
             .id(SharedString::from(format!("log-{id}")))
             .group(SharedString::from(format!("log-row-{id}")))
+            .w_full()
             .min_h(px(50.))
             .py(px(5.))
             .flex()
@@ -451,11 +451,10 @@ impl Shell {
             .bg(rgb(background))
             .surface_feedback(background)
             .child(log_column(0).child(log_tile("person", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value("No account", None)))
-            .child(log_column(1).child(log_tile("connect", 0x2b4d48, theme::ACCENT)).child(log_value(action, None)))
-            .child(log_column(2).child(tile).child(log_value(&entry.label, Some(&entry.subtitle))))
-            .child(log_column(3).child(log_value(&clock_label(entry.connected_at), duration.as_deref())))
-            .child(log_column(4).child(log_tile("local", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value(device, None)))
-            .child(log_column(5).flex_col().items_start().gap_0()
+            .child(log_column(1).child(tile).child(log_value(&entry.label, Some(&entry.subtitle))))
+            .child(log_column(2).child(log_value(&clock_label(entry.connected_at), duration.as_deref())))
+            .child(log_column(3).child(log_tile("local", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value(device, None)))
+            .child(log_column(4).flex_col().items_start().gap_0()
                 .child(div().w_full().truncate().text_color(rgb(theme::TEXT_MUTED)).child("Location unavailable"))
                 .child(self.render_log_saved_cell(entry, cx)))
             .on_click(cx.listener(move |shell, _, window, cx| shell.open_log(id, window, cx)))

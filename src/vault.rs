@@ -346,6 +346,8 @@ const HISTORY_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Vault {
+    #[serde(default)]
+    pub retired_host_id: u64,
     pub groups: Vec<Group>,
     pub hosts: Vec<Host>,
     pub keys: Vec<SshKey>,
@@ -678,8 +680,8 @@ impl Vault {
     /// A free id for a new record of any kind.
     pub fn next_id(&self) -> u64 {
         let ids = self.groups.iter().map(|g| g.id).chain(self.hosts.iter().map(|h| h.id)).chain(self.rules.iter().map(|r| r.id));
-        let ids = ids.chain(self.identities.iter().map(|i| i.id));
-        ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).chain(self.packages.iter().map(|p| p.id)).max().unwrap_or(0) + 1
+        let ids = ids.chain(self.history.iter().filter_map(|entry| entry.host)).chain(self.shell_history.iter().filter_map(|entry| entry.host));
+        ids.chain(self.keys.iter().map(|k| k.id)).chain(self.identities.iter().map(|i| i.id)).chain(self.snippets.iter().map(|s| s.id)).chain(self.packages.iter().map(|p| p.id)).max().unwrap_or(0).max(self.retired_host_id) + 1
     }
 
     /// When each saved host was last connected (legacy `hostInteractions`).
@@ -750,6 +752,11 @@ impl Vault {
         let (removed, kept): (Vec<Host>, Vec<Host>) =
             std::mem::take(&mut self.hosts).into_iter().partition(|h| h.group.is_some_and(|g| groups.contains(&g)));
         self.hosts = kept;
+        self.unlink_hosts(&removed.iter().map(|h| h.id).collect());
+        for id in &groups {
+            self.portable.remove(&format!("groups|{id}"));
+            self.portable.remove(&format!("sshConfigs-of-group|{id}"));
+        }
         self.groups.retain(|g| !groups.contains(&g.id));
         removed
     }
@@ -786,6 +793,7 @@ impl Vault {
     /// Removes an identity and unlinks it from hosts.
     pub fn remove_identity(&mut self, id: u64) {
         self.identities.retain(|i| i.id != id);
+        self.portable.remove(&format!("identities|{id}"));
         for host in &mut self.hosts {
             if host.identity == Some(id) {
                 host.identity = None;
@@ -820,6 +828,8 @@ impl Vault {
     /// Removes a key and unlinks it from hosts.
     pub fn remove_key(&mut self, id: u64) {
         self.keys.retain(|k| k.id != id);
+        self.portable.remove(&format!("sshKeys|{id}"));
+        for identity in &mut self.identities { if identity.key == Some(id) { identity.key = None; } }
         for host in &mut self.hosts {
             if host.key == Some(id) {
                 host.key = None;
@@ -829,10 +839,49 @@ impl Vault {
 
     pub fn remove_host(&mut self, id: HostId) -> Option<Host> {
         let index = self.hosts.iter().position(|h| h.id == id)?;
-        for snippet in &mut self.snippets {
-            snippet.targets.retain(|t| *t != id);
-        }
+        self.unlink_hosts(&[id].into_iter().collect());
         Some(self.hosts.remove(index))
+    }
+
+    fn unlink_hosts(&mut self, ids: &std::collections::HashSet<u64>) {
+        let Some(highest) = ids.iter().max() else { return };
+        self.retired_host_id = self.retired_host_id.max(*highest);
+        for rule in &mut self.rules {
+            if rule.host.is_some_and(|id| ids.contains(&id)) { rule.host = None; }
+        }
+        for snippet in &mut self.snippets { snippet.targets.retain(|id| !ids.contains(id)); }
+        for id in ids {
+            for kind in ["hosts", "identities-of-host", "sshConfigs-of-host"] {
+                self.portable.remove(&format!("{kind}|{id}"));
+            }
+        }
+        let keep = |host: &serde_json::Value| !host["local_id"].as_u64().is_some_and(|id| ids.contains(&id));
+        if let Some(templates) = self.foreign.get_mut("workspaceTemplates").and_then(|v| v.as_array_mut()) {
+            for template in templates {
+                if let Some(panes) = template.get_mut("workspaceTerminals").and_then(|v| v.as_array_mut()) {
+                    panes.retain(|pane| keep(&pane["host"]));
+                }
+            }
+        }
+        let clear_chain = |config: &mut serde_json::Value| {
+            if let Some(hosts) = config.pointer_mut("/host_chain/hosts_chain").and_then(|v| v.as_array_mut()) {
+                hosts.retain(keep);
+            }
+        };
+        for (name, value) in &mut self.portable {
+            match name.split('|').next() {
+                Some("sshConfigs-of-host" | "sshConfigs-of-group") => clear_chain(value),
+                Some("hosts" | "groups") => {
+                    for field in ["ssh_config", "telnet_config"] {
+                        if let Some(config) = value.get_mut(field) { clear_chain(config); }
+                    }
+                }
+                _ => {}
+            }
+        }
+        for config in self.foreign.get_mut("telnetConfigs").and_then(|v| v.as_array_mut()).into_iter().flatten() {
+            clear_chain(config);
+        }
     }
 
     pub fn snippet(&self, id: u64) -> Option<&Snippet> {

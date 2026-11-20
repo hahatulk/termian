@@ -6,6 +6,7 @@ use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, 
 use termian_native::theme;
 use termian_native::vault::{Group, GroupId};
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{card, field_box, menu_panel, menu_row};
@@ -173,14 +174,12 @@ impl Shell {
         let label = text_input::field(label, "group-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx);
 
         let parent = group.parent.map(|p| self.vault.group_path(p));
-        let picker = div()
+        let picker = field_box(editor.parents_open)
             .id("group-parent")
-            .child(
-                field_box(editor.parents_open)
-                    .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                    .child(div().flex_1().text_color(rgb(if parent.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(parent.unwrap_or_else(|| "Parent Group".into())))
-                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
-            )
+            .surface_feedback(theme::INPUT)
+            .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(div().flex_1().text_color(rgb(if parent.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(parent.unwrap_or_else(|| "Parent Group".into())))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.group_editor {
                     editor.parents_open = !editor.parents_open;

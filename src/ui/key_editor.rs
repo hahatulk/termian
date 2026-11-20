@@ -7,6 +7,7 @@ use termian_native::keys::{self, KeyCheck};
 use termian_native::theme;
 use termian_native::vault::SshKey;
 
+use super::pointer::PointerFeedback;
 use super::dialog::{self, Kind};
 use super::text_input::{self, Mode};
 use crate::Shell;
@@ -325,7 +326,7 @@ impl Shell {
             div().text_color(rgb(theme::TEXT_MUTED)).child("Generating a key...")
         } else {
             form.child(self.key_field(Field::Passphrase, "Passphrase", editor.key.passphrase.as_deref().unwrap_or(""), true, window, cx))
-                .child(div().id("keygen-save-passphrase").flex().items_center().justify_between().cursor_pointer().text_color(rgb(theme::TEXT))
+                .child(div().id("keygen-save-passphrase").flex().items_center().justify_between().rounded_sm().icon_feedback().text_color(rgb(theme::TEXT))
                     .child("Save passphrase").child(super::settings_terminal::toggle(options.save_passphrase))
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(g) = shell.key_editor.as_mut().and_then(|e| e.generation.as_mut()) { g.save_passphrase = !g.save_passphrase; }

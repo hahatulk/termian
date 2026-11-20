@@ -469,17 +469,52 @@ pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Valu
     vault.keys = keys;
     vault.identities = identities;
     vault.groups = groups;
+    if let Some(highest) = vault.hosts.iter().map(|host| host.id).max() {
+        vault.retired_host_id = vault.retired_host_id.max(highest);
+    }
     vault.hosts = hosts;
     vault.snippets = snippets;
     vault.packages = packages;
     vault.rules = rules;
     vault.portable = portable;
     vault.foreign = foreign;
+    scrub_cached_secrets(vault);
     vault.secrets_missing = false;
     Ok(Value::Object(pairs.into_iter().map(|(k, v)| (k.to_owned(), Value::Array(v))).collect::<Map<_, _>>()))
 }
 
-/// The native vault as the device side of a sync.
+pub(crate) fn scrub_cached_secrets(vault: &mut Vault) {
+    fn clean(record: &mut Value, kind: &str) {
+        let Some(fields) = record.as_object_mut() else { return };
+        let children: &[(&str, &str)] = match kind {
+            "identities" | "identities-of-host" => {
+                fields.remove("password");
+                &[("ssh_key", "sshKeys")]
+            }
+            "sshKeys" => {
+                fields.remove("private_key");
+                fields.remove("passphrase");
+                &[]
+            }
+            "hosts" | "groups" => &[("ssh_config", "config"), ("telnet_config", "config")],
+            "config" | "telnetConfigs" | "sshConfigs-of-host" | "sshConfigs-of-group" => &[("identity", "identities"), ("proxy", "proxies")],
+            "proxies" => &[("identity", "identities")],
+            _ => &[],
+        };
+        for &(field, kind) in children {
+            if let Some(child) = fields.get_mut(field) { clean(child, kind); }
+        }
+    }
+    for (name, value) in &mut vault.portable {
+        clean(value, name.split('|').next().unwrap_or(""));
+    }
+    for name in FOREIGN {
+        for record in vault.foreign.get_mut(name).and_then(Value::as_array_mut).into_iter().flatten() {
+            clean(record, name);
+        }
+    }
+}
+
 pub struct VaultDevice<'a> {
     pub vault: &'a mut Vault,
     pub now: String,
@@ -543,6 +578,66 @@ mod tests {
             "packages": vault.packages.iter().map(|p| p.label.clone()).collect::<Vec<_>>(),
             "rules": vault.rules.iter().map(|r| json!([r.label, label_of_host(r.host), r.port, r.destination, r.destination_port])).collect::<Vec<_>>(),
         })
+    }
+
+    #[test]
+    fn group_removal_unlinks_hosts_and_local_panes_still_export() {
+        let mut vault = sample();
+        vault.foreign = json!({"workspaceTemplates": [{"local_id": 50, "label": "mixed", "workspaceTerminals": [
+            {"protocol": "local"}, {"protocol": "ssh", "host": {"local_id": 5}}
+        ]}]});
+        let mut invalid = export(&vault, NOW);
+        invalid["workspaceTemplates"][0]["workspaceTerminals"][0]["protocol"] = json!("ssh");
+        assert!(validate_snapshot(&invalid).is_err());
+        validate_snapshot(&export(&vault, NOW)).unwrap();
+        assert_eq!(vault.remove_group(1).len(), 2);
+        assert!(vault.rules[0].host.is_none());
+        assert!(vault.snippets[0].targets.is_empty());
+        let snapshot = validate_snapshot(&export(&vault, NOW)).unwrap();
+        assert_eq!(snapshot["workspaceTemplates"][0]["workspaceTerminals"].as_array().unwrap().len(), 1);
+        assert_eq!(snapshot["workspaceTemplates"][0]["workspaceTerminals"][0]["protocol"], "local");
+    }
+
+    #[test]
+    fn imported_deletion_retires_the_old_host_id() {
+        let mut vault = sample();
+        vault.hosts[0].id = 900;
+        import(&mut vault, &empty_snapshot(NOW), &Ids::new()).unwrap();
+        assert!(vault.hosts.is_empty());
+        let persisted: Vault = serde_json::from_value(serde_json::to_value(&vault).unwrap()).unwrap();
+        assert!(persisted.next_id() > 900);
+    }
+
+    #[test]
+    fn old_cache_loses_duplicate_secrets_and_keeps_extension_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::new(dir.path().join("vault.bin"), [7; 32]);
+        let snapshot = validate_snapshot(&export(&sample(), NOW)).unwrap();
+        let mut vault = Vault::default();
+        import(&mut vault, &snapshot, &Ids::new()).unwrap();
+        let key_id = vault.keys[0].id;
+        let identity = vault.identities[0].id;
+        let host = vault.hosts[0].id;
+        vault.portable.get_mut(&key("identities", identity)).unwrap()["password"] = json!("old-pw");
+        vault.portable.get_mut(&key("sshKeys", key_id)).unwrap()["private_key"] = json!("old-private");
+        vault.portable.get_mut(&key("hosts", host)).unwrap()["extension"] = json!({"identity": {"password": "extension value"}});
+        store.save(&vault).unwrap();
+        let mut loaded = store.load().unwrap().unwrap();
+        let cached = serde_json::to_string(&loaded.portable).unwrap();
+        for duplicate in ["old-pw", "old-private", "PRIVATE", "\"secret\"", "\"pw\""] { assert!(!cached.contains(duplicate)); }
+        store.save(&loaded).unwrap();
+        loaded = store.load().unwrap().unwrap();
+        let snapshot = validate_snapshot(&export(&loaded, NOW)).unwrap();
+        assert_eq!(snapshot["hosts"][0]["extension"]["identity"]["password"], "extension value");
+        assert_eq!(shape(&loaded), shape(&sample()));
+        assert_eq!(snapshot["sshKeys"][0]["private_key"], "PRIVATE");
+        assert!(snapshot["identities"].as_array().unwrap().iter().any(|i| i["password"] == "pw"));
+        loaded.remove_key(key_id);
+        assert!(loaded.identities[0].key.is_none());
+        loaded.remove_identity(identity);
+        assert!(!loaded.portable.contains_key(&key("sshKeys", key_id)));
+        assert!(!loaded.portable.contains_key(&key("identities", identity)));
+        validate_snapshot(&export(&loaded, NOW)).unwrap();
     }
 
     #[test]

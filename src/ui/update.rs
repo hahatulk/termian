@@ -41,7 +41,6 @@ impl Shell {
 
     /// First check after 20 s, then every 6 hours, until an update is installed.
     pub fn start_updates(&mut self, cx: &mut Context<Self>) {
-        updater::remove_replaced_exe();
         if !updater::enabled() {
             self.update.status.state = State::Disabled;
             return;

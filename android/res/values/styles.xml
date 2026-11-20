@@ -1,0 +1,13 @@
+<resources>
+    <style name="Termian" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:colorAccent">#21B568</item>
+        <item name="android:windowBackground">#1E2133</item>
+        <item name="android:navigationBarColor">#151826</item>
+        <item name="android:statusBarColor">#151826</item>
+        <item name="android:alertDialogTheme">@style/TermianDialog</item>
+    </style>
+    <style name="TermianDialog" parent="android:style/Theme.Material.Dialog.Alert">
+        <item name="android:colorAccent">#75DFA9</item>
+        <item name="android:colorBackground">#292C3F</item>
+    </style>
+</resources>

@@ -521,6 +521,7 @@ impl Shell {
             .child(
                 div()
                     .id(SharedString::from(format!("pick-local-{key}")))
+                    .surface_feedback(theme::SURFACE_ACTIVE)
                     .h(px(30.))
                     .px_3()
                     .flex()
@@ -574,12 +575,13 @@ impl Shell {
         if !searching {
             if let Some(open) = group {
                 let mut crumbs = div().px_3().pt_4().flex().items_center().gap_2().text_sm().child(
-                    div().id(SharedString::from(format!("pick-crumb-root-{key}"))).text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(set_group(None))),
+                    div().id(SharedString::from(format!("pick-crumb-root-{key}"))).rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(set_group(None))),
                 );
                 for g in self.vault.breadcrumbs(Some(open)) {
                     crumbs = crumbs.child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(
                         div()
                             .id(SharedString::from(format!("pick-crumb-{key}-{}", g.id)))
+                            .rounded_sm().icon_feedback()
                             .text_color(rgb(if g.id == open { theme::TEXT } else { theme::ACCENT }))
                             .child(g.label.clone())
                             .on_click(cx.listener(set_group(Some(g.id)))),
@@ -717,6 +719,7 @@ impl Shell {
                     row.child(
                         div()
                             .id(SharedString::from(format!("choose-host-{key}")))
+                            .surface_feedback(theme::INPUT)
                             .px_2()
                             .py_1()
                             .rounded_sm()
@@ -827,6 +830,7 @@ impl Shell {
                 });
                 div()
                     .id(SharedString::from(format!("sort-{key}-{label}")))
+                    .rounded_sm().icon_feedback()
                     .when(width == 0., |d| d.flex_1())
                     .when(width > 0., |d| d.w(px(width)).flex_none())
                     .flex()

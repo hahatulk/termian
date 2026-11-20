@@ -176,13 +176,20 @@ impl Shell {
     }
 
     /// Records sessions again, or stops and deletes this vault's logs.
-    pub fn set_logs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
-        if !enabled {
-            session_log::delete_all(&mut self.vault.history, &self.logs_dir);
-        }
+    pub fn set_logs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) -> Result<(), String> {
+        if self.log_sync_busy() { return Err("Дождитесь завершения синхронизации.".into()); }
         self.vault.logs_disabled = !enabled;
-        self.save_vault();
+        let mut failed = 0;
+        if !enabled {
+            for pane in self.workspaces.values().flat_map(|w| w.panes.values()) {
+                pane.view.update(cx, |view, _| view.stop_log());
+            }
+            failed = session_log::delete_all(&mut self.vault.history, &self.logs_dir).failed;
+        }
         cx.notify();
+        self.store.save(&self.vault)?;
+        if failed != 0 { return Err(format!("Запись отключена. Не удалось удалить журналов: {failed}.")); }
+        Ok(())
     }
 }
 
@@ -432,7 +439,8 @@ impl SettingsWindow {
             let _ = this.update(cx, |settings, cx| {
                 settings.logs_busy = false;
                 settings.logs_period = None;
-                settings.logs_result = Some((true, session_log::cleared_text(cleared, remote)));
+                let complete = cleared.failed == 0 && matches!(remote, None | Some(Ok(termian_native::cloud::LogsRemoved::Removed(_))));
+                settings.logs_result = Some((complete, session_log::cleared_text(cleared, remote)));
                 cx.notify();
             });
         })
@@ -718,13 +726,13 @@ impl SettingsWindow {
                         .on_click(cx.listener(|settings, _, _, cx| {
                             settings.menu = None;
                             settings.disable_logs = false;
-                            settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(true, cx));
+                            settings.logs_result = settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(true, cx)).err().map(|e| (false, e));
                         }))
                         .into_any_element(),
                     super::settings_terminal::menu_item("settings-logs-disabled".into(), "Disabled", !enabled)
                         .on_click(cx.listener(move |settings, _, _, cx| {
                             settings.menu = None;
-                            settings.disable_logs = enabled;
+                            settings.disable_logs = enabled || settings.shell.read(cx).vault.history.iter().any(|e| e.log.is_some());
                             cx.notify();
                         }))
                         .into_any_element(),
@@ -763,13 +771,14 @@ impl SettingsWindow {
                                     .border_color(rgb(ERROR_TONE))
                                     .on_click(cx.listener(|settings, _, _, cx| {
                                         settings.disable_logs = false;
-                                        settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(false, cx));
+                                        settings.logs_result = settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(false, cx)).err().map(|e| (false, e));
                                     })),
                             ),
                     )
                     .into_any_element(),
             );
         }
+        if let Some((false, message)) = &self.logs_result { card.push(notice(false, message.clone()).into_any_element()); }
         vec![div().w_full().max_w(px(700.)).mx_auto().mt(px(30.)).p(px(15.)).rounded(px(15.)).bg(rgb(CARD)).children(card).into_any_element()]
     }
 

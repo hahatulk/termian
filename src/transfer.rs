@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use futures::channel::mpsc::{TryRecvError, UnboundedReceiver};
 use futures::StreamExt;
 use russh_sftp::client::fs::Metadata;
-use russh_sftp::client::SftpSession;
+use russh_sftp::client::{RawSftpSession, SftpSession};
 use russh_sftp::protocol::OpenFlags;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 
@@ -253,7 +253,7 @@ pub struct Job {
 #[derive(Clone)]
 pub(crate) enum Fs {
     Local,
-    Remote(Arc<SftpSession>),
+    Remote(Arc<SftpSession>, Option<Arc<RawSftpSession>>),
 }
 
 trait ReadSeek: AsyncRead + AsyncSeek + Unpin + Send {}
@@ -285,7 +285,7 @@ impl Fs {
                 let path = path.to_owned();
                 tokio::task::spawn_blocking(move || list_local(&path)).await.map_err(text)?
             }
-            Fs::Remote(sftp) => crate::remote_fs::list(sftp, path).await,
+            Fs::Remote(sftp, _) => crate::remote_fs::list(sftp, path).await,
         }
     }
 
@@ -299,7 +299,7 @@ impl Fs {
                 let mode = None;
                 Ok((meta.len(), mode))
             }
-            Fs::Remote(sftp) => {
+            Fs::Remote(sftp, _) => {
                 let meta = sftp.metadata(path).await.map_err(|e| at(path, e))?;
                 Ok((meta.size.unwrap_or(0), meta.permissions.map(|p| p & 0o7777)))
             }
@@ -314,7 +314,7 @@ impl Fs {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
                 Err(e) => Err(at(path, e)),
             },
-            Fs::Remote(sftp) => match sftp.symlink_metadata(path).await {
+            Fs::Remote(sftp, _) => match sftp.symlink_metadata(path).await {
                 Ok(meta) => Ok(Some(meta.is_dir() && !meta.is_symlink())),
                 Err(russh_sftp::client::error::Error::Status(status))
                     if status.status_code == russh_sftp::protocol::StatusCode::NoSuchFile => Ok(None),
@@ -326,7 +326,7 @@ impl Fs {
     fn valid_name(&self, name: &str) -> bool {
         match self {
             Fs::Local => valid_local_name(name),
-            Fs::Remote(_) => valid_entry_name(name),
+            Fs::Remote(..) => valid_entry_name(name),
         }
     }
 
@@ -334,9 +334,9 @@ impl Fs {
         match self {
             Fs::Local => tempfile::Builder::new().prefix(".termian-copy-").tempdir_in(dir)
                 .map(|dir| dir.keep().to_string_lossy().into_owned()).map_err(|e| at(dir, e)),
-            Fs::Remote(sftp) => {
+            Fs::Remote(..) => {
                 let path = join(dir, &format!(".termian-copy-{}", uuid::Uuid::new_v4()));
-                sftp.create_dir(&path).await.map_err(|e| at(&path, e))?;
+                self.private_dir(&path).await?;
                 Ok(path)
             }
         }
@@ -345,15 +345,14 @@ impl Fs {
     async fn open(&self, path: &str) -> Result<Reader, String> {
         match self {
             Fs::Local => Ok(Box::new(tokio::fs::File::open(path).await.map_err(|e| at(path, e))?)),
-            Fs::Remote(sftp) => Ok(Box::new(sftp.open(path).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp, _) => Ok(Box::new(sftp.open(path).await.map_err(|e| at(path, e))?)),
         }
     }
 
-    /// Creates or truncates a file.
     async fn create(&self, path: &str) -> Result<Writer, String> {
         match self {
-            Fs::Local => Ok(Box::new(tokio::fs::File::create(path).await.map_err(|e| at(path, e))?)),
-            Fs::Remote(sftp) => Ok(Box::new(sftp.create(path).await.map_err(|e| at(path, e))?)),
+            Fs::Local => Ok(Box::new(tokio::fs::OpenOptions::new().write(true).create_new(true).open(path).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp, _) => Ok(Box::new(sftp.open_with_flags_and_attributes(path, OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE, Metadata { permissions: Some(0o600), ..Default::default() }).await.map_err(|e| at(path, e))?)),
         }
     }
 
@@ -361,34 +360,50 @@ impl Fs {
     async fn open_write(&self, path: &str) -> Result<Writer, String> {
         match self {
             Fs::Local => Ok(Box::new(tokio::fs::OpenOptions::new().write(true).open(path).await.map_err(|e| at(path, e))?)),
-            Fs::Remote(sftp) => Ok(Box::new(sftp.open_with_flags(path, OpenFlags::WRITE).await.map_err(|e| at(path, e))?)),
+            Fs::Remote(sftp, _) => Ok(Box::new(sftp.open_with_flags(path, OpenFlags::WRITE).await.map_err(|e| at(path, e))?)),
         }
     }
 
-    async fn set_mode(&self, path: &str, mode: u32) {
+    async fn set_mode(&self, path: &str, mode: u32) -> Result<(), String> {
+        #[cfg(not(unix))]
+        if matches!(self, Fs::Local) { return Ok(()); }
+        self.chmod(path, mode & 0o777).await
+    }
+
+    async fn private_dir(&self, path: &str) -> Result<(), String> {
         match self {
-            #[cfg(unix)]
-            Fs::Local => {
-                let _ = tokio::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).await;
+            Fs::Remote(sftp, Some(raw)) => {
+                raw.mkdir(path, Metadata { permissions: Some(0o700), ..Default::default() }).await.map_err(|e| at(path, e))?;
+                let check = sftp.symlink_metadata(path).await.map_err(|e| at(path, e)).and_then(|meta| {
+                    if meta.is_dir() && meta.permissions.map(|p| p & 0o777) == Some(0o700) { Ok(()) }
+                    else { Err(at(path, "SFTP server did not create a private directory")) }
+                });
+                if check.is_err() { let _ = sftp.remove_dir(path).await; }
+                check
             }
-            #[cfg(not(unix))]
-            Fs::Local => {}
-            Fs::Remote(sftp) => {
-                let _ = sftp.set_metadata(path, Metadata { permissions: Some(mode), ..Default::default() }).await;
+            Fs::Remote(_, None) => Err(at(path, "cannot create directory with private permissions")),
+            Fs::Local => {
+                let mut builder = tokio::fs::DirBuilder::new();
+                #[cfg(unix)]
+                builder.mode(0o700);
+                builder.create(path).await.map_err(|e| at(path, e))
             }
         }
     }
 
     /// Creates a folder; an existing one is fine.
     pub(crate) async fn make_dir(&self, path: &str) -> Result<(), String> {
-        let created = match self {
-            Fs::Local => tokio::fs::create_dir(path).await.map_err(text),
-            Fs::Remote(sftp) => sftp.create_dir(path).await.map_err(text),
-        };
-        match created {
+        match self.create_dir(path).await {
             Err(_) if self.is_dir(path).await => Ok(()),
-            other => other.map_err(|e| at(path, e)),
+            other => other,
         }
+    }
+
+    async fn create_dir(&self, path: &str) -> Result<(), String> {
+        match self {
+            Fs::Local => tokio::fs::create_dir(path).await.map_err(text),
+            Fs::Remote(sftp, _) => sftp.create_dir(path).await.map_err(text),
+        }.map_err(|e| at(path, e))
     }
 
     async fn is_dir(&self, path: &str) -> bool {
@@ -403,30 +418,50 @@ impl Fs {
                 let removed = if meta.is_dir() || is_reparse_point(&meta) { tokio::fs::remove_dir_all(path).await } else { tokio::fs::remove_file(path).await };
                 removed.map_err(|e| at(path, e))
             }
-            Fs::Remote(sftp) => {
-                let link = sftp.symlink_metadata(path).await.is_ok_and(|m| m.is_symlink());
-                if is_dir && !link {
-                    // Depth first, iteratively: deep trees must not overflow the stack.
+            Fs::Remote(sftp, _) => {
+                let meta = sftp.symlink_metadata(path).await.map_err(|e| at(path, e))?;
+                if !is_dir || !meta.is_dir() || meta.is_symlink() {
+                    return sftp.remove_file(path).await.map_err(|e| at(path, e));
+                }
+                let parent = crate::files::parent(path).ok_or_else(|| at(path, "cannot remove a root directory"))?;
+                let scratch = self.stage(&parent).await?;
+                let mut moved: Vec<(String, String)> = Vec::new();
+                let result = async {
                     let mut stack = vec![(path.to_owned(), false)];
-                    while let Some((dir, emptied)) = stack.pop() {
-                        if emptied {
+                    while let Some((dir, finish)) = stack.pop() {
+                        if finish {
                             sftp.remove_dir(&dir).await.map_err(|e| at(&dir, e))?;
+                            moved.pop();
                             continue;
                         }
-                        stack.push((dir.clone(), true));
-                        for entry in crate::remote_fs::list(sftp, &dir).await? {
-                            let child = join(&dir, &entry.name);
-                            if entry.is_dir && !entry.is_link {
-                                stack.push((child, false));
-                            } else {
-                                sftp.remove_file(&child).await.map_err(|e| at(&child, e))?;
-                            }
+                        let meta = sftp.symlink_metadata(&dir).await.map_err(|e| at(&dir, e))?;
+                        if !meta.is_dir() || meta.is_symlink() {
+                            sftp.remove_file(&dir).await.map_err(|e| at(&dir, e))?;
+                            continue;
+                        }
+                        let isolated = join(&scratch, &uuid::Uuid::new_v4().to_string());
+                        sftp.rename(&dir, &isolated).await.map_err(|e| at(&dir, e))?;
+                        moved.push((isolated.clone(), dir));
+                        let meta = sftp.symlink_metadata(&isolated).await.map_err(|e| at(&isolated, e))?;
+                        if !meta.is_dir() || meta.is_symlink() {
+                            return Err(at(&isolated, "directory changed during removal"));
+                        }
+                        stack.push((isolated.clone(), true));
+                        for entry in crate::remote_fs::list(sftp, &isolated).await? {
+                            stack.push((join(&isolated, &entry.name), false));
                         }
                     }
                     Ok(())
-                } else {
-                    sftp.remove_file(path).await.map_err(|e| at(path, e))
+                }.await;
+                if result.is_err() {
+                    for (isolated, original) in moved.into_iter().rev() {
+                        if self.kind(&original).await != Ok(None) || sftp.rename(&isolated, &original).await.is_err() {
+                            return Err(at(&scratch, "removal stopped; remaining files were kept here"));
+                        }
+                    }
                 }
+                sftp.remove_dir(&scratch).await.map_err(|e| at(&scratch, e))?;
+                result
             }
         }
     }
@@ -437,7 +472,7 @@ impl Fs {
             Fs::Local => tokio::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(mode)).await.map_err(|e| at(path, e)),
             #[cfg(not(unix))]
             Fs::Local => Err(at(path, "permissions are not supported here")),
-            Fs::Remote(sftp) => {
+            Fs::Remote(sftp, _) => {
                 sftp.set_metadata(path, Metadata { permissions: Some(mode), ..Default::default() }).await.map_err(|e| at(path, e))
             }
         }
@@ -446,7 +481,7 @@ impl Fs {
     pub(crate) async fn rename(&self, from: &str, to: &str) -> Result<(), String> {
         match self {
             Fs::Local => tokio::fs::rename(from, to).await.map_err(|e| at(from, e)),
-            Fs::Remote(sftp) => sftp.rename(from, to).await.map_err(|e| at(from, e)),
+            Fs::Remote(sftp, _) => sftp.rename(from, to).await.map_err(|e| at(from, e)),
         }
     }
 }
@@ -479,7 +514,7 @@ async fn scan(fs: &Fs, target: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part
         let (size, mode) = fs.size(root).await?;
         return Ok(vec![Part { relative: String::new(), is_dir: false, size, mode }]);
     }
-    let mut parts = vec![Part { relative: String::new(), is_dir: true, size: 0, mode: None }];
+    let mut parts = vec![Part { relative: String::new(), is_dir: true, size: 0, mode: fs.size(root).await?.1 }];
     let mut pending = vec![String::new()];
     while let Some(relative) = pending.pop() {
         let dir = if relative.is_empty() { root.to_owned() } else { join(root, &relative) };
@@ -697,18 +732,18 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
             if copied != size {
                 return Err(Stop::Error(at(from, "source size changed during the transfer")));
             }
-            writer.shutdown().await.map_err(|e| Stop::Error(format!("{to}: {e}")))
+            writer.shutdown().await.map_err(|e| Stop::Error(format!("{to}: {e}")))?;
+            if let Some(mode) = mode {
+                self.target.set_mode(to, mode).await.map_err(Stop::Error)?;
+            }
+            Ok(())
         }
         .await;
         if result.is_err() {
             // The next attempt will recount the validated partial file.
             self.progress.bytes_done -= copied;
         }
-        result?;
-        if let Some(mode) = mode {
-            self.target.set_mode(to, mode & 0o777).await;
-        }
-        Ok(())
+        result
     }
 
     /// Reports a failure and waits for the user's decision.
@@ -719,7 +754,7 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
 }
 
 fn move_new(from: &Path, to: &Path) -> io::Result<()> {
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "android"))]
     {
         use std::{ffi::CString, os::unix::ffi::OsStrExt};
         let from = CString::new(from.as_os_str().as_bytes())?;
@@ -728,6 +763,8 @@ fn move_new(from: &Path, to: &Path) -> io::Result<()> {
         let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
         #[cfg(target_os = "linux")]
         let result = unsafe { libc::renameat2(libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) };
+        #[cfg(target_os = "android")]
+        let result = unsafe { libc::syscall(libc::SYS_renameat2, libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) };
         if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
     #[cfg(windows)]
@@ -743,14 +780,14 @@ fn move_new(from: &Path, to: &Path) -> io::Result<()> {
         let (from, to) = (wide(from)?, wide(to)?);
         if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-    { Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive rename unavailable")) }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "android", windows)))]
+    { let _ = (from, to); Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive rename unavailable")) }
 }
 
 async fn publish_new(target: &Fs, from: &str, to: &str) -> Result<(), String> {
     match target {
         Fs::Local => move_new(Path::new(from), Path::new(to)).map_err(|e| at(to, e)),
-        Fs::Remote(_) => {
+        Fs::Remote(..) => {
             if target.kind(to).await?.is_some() {
                 return Err(at(to, "destination appeared during the transfer"));
             }
@@ -783,16 +820,24 @@ async fn commit(target: &Fs, stage: &str, from: &str, to: &str, parts: &[Part], 
         }
         Destination::Merge => {}
     }
+    let mut created = Vec::new();
     for part in &parts[1..] {
         let dst = join(to, &part.relative);
         if part.is_dir {
-            target.make_dir(&dst).await?;
+            match target.kind(&dst).await? {
+                None => { target.private_dir(&dst).await?; created.push((dst, part.mode)); }
+                Some(true) => {}
+                Some(false) => return Err(at(&dst, "not a directory")),
+            }
         } else {
             if target.kind(&dst).await? == Some(true) {
                 return Err(at(&dst, "cannot replace a directory with a file during merge"));
             }
             publish_replace(target, &join(from, &part.relative), &dst, &backup).await?;
         }
+    }
+    for (dir, mode) in created.into_iter().rev() {
+        if let Some(mode) = mode { target.set_mode(&dir, mode).await?; }
     }
     Ok(())
 }
@@ -807,7 +852,7 @@ async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, fro
         let (from, to) = (path(from), path(&staged));
         let mut started = false;
         loop {
-            let result = if part.is_dir { run.target.make_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.size, part.mode, &mut started).await };
+            let result = if part.is_dir { run.target.private_dir(&to).await.map_err(Stop::Error) } else { run.copy_file(&from, &to, part.size, part.mode, &mut started).await };
             let error = match result {
                 Ok(()) => break,
                 Err(Stop::Cancelled) => return TransferEvent::Cancelled,
@@ -827,6 +872,14 @@ async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, fro
     if run.cancelled() {
         return TransferEvent::Cancelled;
     }
+    if destination != Destination::Merge {
+        for part in parts.iter().rev().filter(|p| p.is_dir) {
+            let path = if part.relative.is_empty() { staged.clone() } else { join(&staged, &part.relative) };
+            if let Some(mode) = part.mode {
+                if let Err(error) = run.target.set_mode(&path, mode).await { return TransferEvent::CommitFailed { error }; }
+            }
+        }
+    }
     match commit(run.target, stage, &staged, to, parts, destination).await {
         Ok(()) => TransferEvent::Finished,
         Err(error) => TransferEvent::CommitFailed { error },
@@ -845,7 +898,7 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
             Ok(local) => Some(local),
             Err(error) => return emit(TransferEvent::CommitFailed { error: at(&job.source_dir, error) }),
         },
-        Fs::Remote(_) => None,
+        Fs::Remote(..) => None,
     };
     let mut run = Run { source: &source, local, target: &target, controls: &mut controls, emit: &emit, progress: Progress::default(), started: now, reported: now };
 
@@ -879,6 +932,18 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn staging_rejects_colliding_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("Report");
+        let alias = dir.path().join("report");
+        std::fs::write(&existing, b"first").unwrap();
+        let collision = if alias.exists() { &alias } else { &existing };
+        assert!(Fs::Local.create(collision.to_str().unwrap()).await.is_err());
+        assert_eq!(std::fs::read(existing).unwrap(), b"first");
+        assert!(Fs::Local.create_dir(dir.path().to_str().unwrap()).await.is_err());
+    }
 
     #[tokio::test]
     async fn create_preserves_a_destination_created_while_copying() {
@@ -973,6 +1038,10 @@ mod tests {
         let now = Instant::now();
         let mut run = Run { source: &Fs::Local, local: Some(LocalSource::new(dir.path()).unwrap()), target: &Fs::Local, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
         let mut started = false;
+        assert!(matches!(run.copy_file(source, target, 8, None, &mut started).await, Err(Stop::Error(_))));
+        assert!(!started);
+        assert_eq!(tokio::fs::read(target).await.unwrap(), b"old contents");
+        tokio::fs::remove_file(target).await.unwrap();
         assert!(matches!(run.copy_file(source, target, 8, None, &mut started).await, Err(Stop::Cancelled)));
         assert!(started);
         assert_eq!(tokio::fs::read(target).await.unwrap(), b"");
@@ -983,6 +1052,7 @@ mod tests {
         assert!(run.copy_file(source, target, 8, None, &mut started).await.is_ok());
         assert_eq!(tokio::fs::read(target).await.unwrap(), b"abcdefgh");
         assert_eq!(run.progress.bytes_done, 8);
+        tokio::fs::remove_file(target).await.unwrap();
         let mut started = false;
         assert!(matches!(run.copy_file(source, target, 4, None, &mut started).await, Err(Stop::Error(_))));
         assert!(tokio::fs::metadata(target).await.unwrap().len() <= 4);
@@ -1011,7 +1081,7 @@ mod tests {
         let handle = connect(&target, prompter).await.unwrap();
         let channel = handle.channel_open_session().await.unwrap();
         channel.request_subsystem(true, "sftp").await.unwrap();
-        let remote = Fs::Remote(Arc::new(SftpSession::new(channel.into_stream()).await.unwrap()));
+        let remote = Fs::Remote(Arc::new(SftpSession::new(channel.into_stream()).await.unwrap()), None);
         let local_fs = Fs::Local;
         let (control, mut controls) = futures::channel::mpsc::unbounded();
         let now = Instant::now();

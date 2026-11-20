@@ -3,9 +3,10 @@
 //! where length counts the nonce and the box. Each log has its own random key,
 //! kept in the history entry of the vault. A torn last record is ignored.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
+use std::sync::mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use crypto_secretbox::{aead::Aead, KeyInit, Nonce, XSalsa20Poly1305};
@@ -142,8 +143,16 @@ pub fn read(dir: &Path, name: &str, key: &[u8; 32]) -> Result<(Vec<u8>, Option<&
     if !valid_name(name) {
         return Err(MISSING_LOG.into());
     }
-    match std::fs::read(dir.join(file_name(name))) {
-        Ok(bytes) => Ok(decode_log(&bytes, key, requires_chain(name))),
+    const LIMIT: u64 = 64 * 1024 * 1024;
+    let too_large = || "Файл журнала больше 64 МиБ. Просмотр недоступен.".to_string();
+    match std::fs::File::open(dir.join(file_name(name))) {
+        Ok(file) => {
+            if file.metadata().map_err(|e| e.to_string())?.len() > LIMIT { return Err(too_large()); }
+            let mut bytes = Vec::new();
+            file.take(LIMIT + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
+            if bytes.len() as u64 > LIMIT { return Err(too_large()); }
+            Ok(decode_log(&bytes, key, requires_chain(name)))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(MISSING_LOG.into()),
         Err(error) => Err(error.to_string()),
     }
@@ -224,7 +233,9 @@ enum Message {
 /// Appends a session's output on a background thread, flushing every 64 KiB
 /// or once a second. Dropping it finishes the log.
 pub struct SessionLog {
-    sender: Sender<Message>,
+    sender: SyncSender<Message>,
+    pending: Arc<Mutex<Option<Message>>>,
+    worker: Option<std::thread::JoinHandle<()>>,
 }
 
 impl SessionLog {
@@ -241,8 +252,8 @@ impl SessionLog {
         let mut hash = transcript();
         hash.update(&header);
         file.write_all(&header).map_err(|e| e.to_string())?;
-        let (sender, receiver) = channel::<Message>();
-        std::thread::spawn(move || {
+        let (sender, receiver) = sync_channel::<Message>(16);
+        let worker = std::thread::spawn(move || {
             let write_log = || -> std::io::Result<()> {
                 let mut pending = Vec::new();
                 loop {
@@ -271,19 +282,48 @@ impl SessionLog {
                 eprintln!("[Termian] Session log recording stopped: {error}");
             }
         });
-        Ok(Self { sender })
+        Ok(Self { sender, pending: Arc::default(), worker: Some(worker) })
+    }
+
+    fn flush_pending(pending: &Mutex<Option<Message>>, sender: &SyncSender<Message>) {
+        let mut slot = pending.lock().unwrap();
+        if let Some(message) = slot.take() { let _ = sender.send(message); }
+    }
+
+    pub fn finish(mut self) {
+        Self::flush_pending(&self.pending, &self.sender);
+        let _ = self.sender.send(Message::Finish);
+        if let Some(worker) = self.worker.take() { let _ = worker.join(); }
+    }
+
+    pub fn queue(&self, data: Vec<u8>) -> Option<Box<dyn FnOnce() + Send>> {
+        if data.is_empty() { return None; }
+        Self::flush_pending(&self.pending, &self.sender);
+        match self.sender.try_send(Message::Data(data)) {
+            Err(TrySendError::Full(message)) => {
+                let sender = self.sender.clone();
+                let pending = self.pending.clone();
+                *pending.lock().unwrap() = Some(message);
+                Some(Box::new(move || Self::flush_pending(&pending, &sender)))
+            }
+            _ => None
+        }
     }
 
     pub fn append(&self, data: &[u8]) {
-        if !data.is_empty() {
-            let _ = self.sender.send(Message::Data(data.to_vec()));
+        Self::flush_pending(&self.pending, &self.sender);
+        for block in data.chunks(32 * 1024) {
+            if self.sender.send(Message::Data(block.to_vec())).is_err() { break; }
         }
     }
 }
 
 impl Drop for SessionLog {
     fn drop(&mut self) {
-        let _ = self.sender.send(Message::Finish);
+        if self.worker.is_some() {
+            Self::flush_pending(&self.pending, &self.sender);
+            let _ = self.sender.send(Message::Finish);
+        }
     }
 }
 
@@ -310,6 +350,7 @@ pub struct Cleared {
     pub entries: usize,
     /// Log files deleted.
     pub files: usize,
+    pub failed: usize,
 }
 
 /// The legacy cleanup: connections started since `since` (Unix ms, 0 = all)
@@ -317,30 +358,55 @@ pub struct Cleared {
 /// then goes too, except logs of the connections that stay.
 pub fn clear(history: &mut Vec<crate::vault::HistoryEntry>, dir: &Path, since: u64) -> Cleared {
     let started = |entry: &crate::vault::HistoryEntry| since == 0 || (entry.connected_at.max(0) as u64).saturating_mul(1000) >= since;
-    let before = history.len();
-    history.retain(|entry| !started(entry));
-    let keep: std::collections::HashSet<String> = history.iter().filter_map(|e| e.log.as_ref()).map(|log| file_name(&log.name)).collect();
-    let mut files = 0;
-    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+    let keep: std::collections::HashSet<_> = history.iter().filter(|e| !started(e)).filter_map(|e| e.log.as_ref()).map(|l| file_name(&l.name)).collect();
+    let selected: std::collections::HashSet<_> = history.iter().filter(|e| started(e)).filter_map(|e| e.log.as_ref()).map(|l| file_name(&l.name)).collect();
+    let mut failed_names = std::collections::HashSet::new();
+    let mut result = Cleared::default();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => return Cleared { failed: 1, ..Default::default() },
+    };
+    let mut incomplete = false;
+    for entry in entries.into_iter().flatten() {
+        let Ok(entry) = entry else { result.failed += 1; incomplete = true; continue };
         let name = entry.file_name().to_string_lossy().into_owned();
-        let modified = entry.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map_or(0, |d| d.as_millis() as u64);
-        if name.ends_with(".log") && (since == 0 || modified >= since) && !keep.contains(&name) && std::fs::remove_file(entry.path()).is_ok() {
-            files += 1;
+        if !name.ends_with(".log") || keep.contains(&name) { continue; }
+        let remove = || -> std::io::Result<bool> {
+            if since != 0 && !selected.contains(&name) {
+                let modified = entry.metadata()?.modified()?.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default();
+                if modified.as_millis() < since as u128 { return Ok(false); }
+            }
+            std::fs::remove_file(entry.path())?;
+            Ok(true)
+        };
+        match remove() {
+            Ok(deleted) => result.files += usize::from(deleted),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => { result.failed += 1; failed_names.insert(name); }
         }
     }
-    Cleared { entries: before - history.len(), files }
+    let before = history.len();
+    history.retain(|e| !started(e) || e.log.as_ref().is_some_and(|log| incomplete || failed_names.contains(&file_name(&log.name))));
+    result.entries = before - history.len();
+    result
 }
 
 /// Settings → Logs → «Disable Logs»: the logs of this vault are deleted; the
 /// connections stay in history without them. Returns how many files went.
-pub fn delete_all(history: &mut [crate::vault::HistoryEntry], dir: &Path) -> usize {
-    let mut files = 0;
+pub fn delete_all(history: &mut [crate::vault::HistoryEntry], dir: &Path) -> Cleared {
+    let mut counts = Cleared::default();
     for entry in history.iter_mut() {
-        if let Some(log) = entry.log.take() {
-            files += usize::from(valid_name(&log.name) && std::fs::remove_file(dir.join(file_name(&log.name))).is_ok());
+        let Some(log) = &entry.log else { continue };
+        if !valid_name(&log.name) { counts.failed += 1; continue; }
+        match std::fs::remove_file(dir.join(file_name(&log.name))) {
+            Ok(()) => counts.files += 1,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => { counts.failed += 1; continue; }
         }
+        entry.log = None;
     }
-    files
+    counts
 }
 
 /// Result line under the cleanup buttons; `remote` is the cloud's answer, if
@@ -352,7 +418,8 @@ pub fn cleared_text(cleared: Cleared, remote: Option<Result<crate::cloud::LogsRe
         Some(Ok(crate::cloud::LogsRemoved::Unsupported)) => " Сервер не поддерживает удаление логов.".into(),
         Some(Ok(crate::cloud::LogsRemoved::Removed(n))) => format!(" В облаке удалено логов: {n}."),
     };
-    format!("Удалено записей: {}, лишних файлов: {}.{cloud}", cleared.entries, cleared.files)
+    let partial = if cleared.failed == 0 { String::new() } else { format!(" Ошибок очистки на устройстве: {}.", cleared.failed) };
+    format!("Удалено записей: {}, лишних файлов: {}.{partial}{cloud}", cleared.entries, cleared.files)
 }
 
 #[cfg(test)]
@@ -391,6 +458,23 @@ mod tests {
         assert!(bytes.starts_with(MAGIC));
         assert!(!bytes.windows(5).any(|w| w == b"hello"), "output is encrypted");
         assert_eq!(read(dir.path(), "conn-1", &key).unwrap(), (b"hello world\r\n".to_vec(), None));
+    }
+
+    #[test]
+    fn finish_drains_queued_output_before_a_late_writer_runs() {
+        let (sender, receiver) = sync_channel(1);
+        let log = SessionLog { sender, pending: Arc::default(), worker: None };
+        assert!(log.queue(vec![1]).is_none());
+        let delayed = log.queue(vec![2]).unwrap();
+        let worker = std::thread::spawn(move || {
+            for byte in [1, 2] {
+                assert!(matches!(receiver.recv(), Ok(Message::Data(data)) if data == [byte]));
+            }
+            assert!(matches!(receiver.recv(), Ok(Message::Finish)));
+        });
+        log.finish();
+        delayed();
+        worker.join().unwrap();
     }
 
     #[test]
@@ -493,6 +577,44 @@ mod tests {
     }
 
     #[test]
+    fn disable_logs_keeps_failed_files_for_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut history = [crate::vault::HistoryEntry { log: Some(crate::vault::LogRef { name: "open".into(), key: String::new() }), ..Default::default() }];
+        let path = dir.path().join("open.log");
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(delete_all(&mut history, dir.path()).failed, 1);
+        assert!(history[0].log.is_some());
+        std::fs::remove_dir(&path).unwrap();
+        let log = SessionLog::start(dir.path(), "open", [1; 32]).unwrap();
+        for n in 0..100u8 { log.append(&[n; 4096]); }
+        log.finish();
+        let expected: Vec<_> = (0..100u8).flat_map(|n| [n; 4096]).collect();
+        assert_eq!(read(dir.path(), "open", &[1; 32]).unwrap(), (expected, None));
+        assert_eq!(delete_all(&mut history, dir.path()), Cleared { files: 1, ..Default::default() });
+        assert!(history[0].log.is_none());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_history_for_a_failed_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("notes.log")).unwrap();
+        let mut history = vec![crate::vault::HistoryEntry {
+            log: Some(crate::vault::LogRef { name: "notes".into(), key: String::new() }), ..Default::default()
+        }];
+        assert_eq!(clear(&mut history, dir.path(), 0), Cleared { entries: 0, files: 0, failed: 1 });
+        assert_eq!(history.len(), 1);
+    }
+
+    #[test]
+    fn playback_refuses_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("long.log")).unwrap();
+        file.set_len(64 * 1024 * 1024 + 1).unwrap();
+        assert!(read(dir.path(), "long", &[0; 32]).unwrap_err().contains("64 МиБ"));
+    }
+
+    #[test]
     fn cleanup_removes_recent_connections_and_their_logs() {
         use crate::vault::{HistoryEntry, LogRef};
         let dir = tempfile::tempdir().unwrap();
@@ -508,21 +630,21 @@ mod tests {
         earlier.set_modified(now - Duration::from_secs(7200)).unwrap();
 
         let cleared = clear(&mut history, dir.path(), period_start(PERIODS[0].3, now));
-        assert_eq!(cleared, Cleared { entries: 1, files: 2 }, "recent.log and the orphan written within the hour");
+        assert_eq!(cleared, Cleared { entries: 1, files: 2, failed: 0 }, "recent.log and the orphan written within the hour");
         assert_eq!(history.iter().map(|e| e.id).collect::<Vec<_>>(), [2, 3]);
         assert!(dir.path().join("old-but-written.log").exists(), "kept: its connection started earlier");
         assert!(dir.path().join("earlier.log").exists() && !dir.path().join("orphan.log").exists());
 
         let mut copy = history.clone();
-        assert_eq!(delete_all(&mut copy, dir.path()), 2);
+        assert_eq!(delete_all(&mut copy, dir.path()).files, 2);
         assert!(copy.iter().all(|e| e.log.is_none()) && copy.len() == 2, "connections stay");
         for name in ["earlier", "old-but-written"] {
             std::fs::write(dir.path().join(format!("{name}.log")), b"x").unwrap();
         }
-        assert_eq!(clear(&mut history, dir.path(), 0), Cleared { entries: 2, files: 2 });
+        assert_eq!(clear(&mut history, dir.path(), 0), Cleared { entries: 2, files: 2, failed: 0 });
         assert!(history.is_empty() && dir.path().join("notes.txt").exists());
         assert_eq!(period_start(Duration::ZERO, now), 0);
-        assert_eq!(cleared_text(Cleared { entries: 3, files: 1 }, None), "Удалено записей: 3, лишних файлов: 1.");
+        assert_eq!(cleared_text(Cleared { entries: 3, files: 1, failed: 0 }, None), "Удалено записей: 3, лишних файлов: 1.");
         assert!(cleared_text(Cleared::default(), Some(Ok(crate::cloud::LogsRemoved::Removed(4)))).ends_with(" В облаке удалено логов: 4."));
         assert!(cleared_text(Cleared::default(), Some(Ok(crate::cloud::LogsRemoved::Unsupported))).ends_with("не поддерживает удаление логов."));
     }

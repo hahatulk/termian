@@ -229,6 +229,7 @@ impl Shell {
         let focused = focus.is_focused(window) && panel.saving.is_none();
         let new = div()
             .id("panel-new-snippet")
+            .surface_feedback(theme::INPUT)
             .h(px(30.))
             .px_2()
             .flex()
@@ -519,6 +520,7 @@ impl Shell {
         };
         let search = div()
             .id("panel-terminal-search")
+            .surface_feedback(theme::INPUT)
             .h(px(32.))
             .px_2()
             .flex()
@@ -554,6 +556,7 @@ impl Shell {
             .child(
                 div()
                     .id("panel-autocomplete")
+                    .rounded_sm().icon_feedback()
                     .flex()
                     .items_center()
                     .gap(px(5.))
@@ -616,6 +619,7 @@ impl Shell {
         };
         let font_header = div()
             .id("panel-font-header")
+            .rounded_sm().icon_feedback()
             .h(px(28.))
             .flex()
             .items_center()
@@ -633,6 +637,7 @@ impl Shell {
         let font = panel.font_open.then(|| {
             let picker = div()
                 .id("panel-font-family")
+                .surface_feedback(theme::INPUT)
                 .h(px(36.))
                 .px_3()
                 .flex()
@@ -705,7 +710,7 @@ impl Shell {
                 .gap(px(10.))
                 .rounded(px(6.))
                 .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)))
-                .when(!active, |d| d.hover(|s| s.bg(rgb(theme::SURFACE))))
+                .surface_feedback(if active { theme::SURFACE_ACTIVE } else { theme::BACKGROUND })
                 .child(swatch)
                 .child(
                     div()

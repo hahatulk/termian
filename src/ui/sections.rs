@@ -4,6 +4,7 @@
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, ClickEvent, Context, Div, SharedString, Stateful};
 use termian_native::theme;
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::hosts::{card, section_title, tile, tool_button};
 use crate::Shell;
@@ -89,6 +90,7 @@ impl Shell {
         // The split button's arrow, as in the legacy Keychain toolbar.
         let menu = div()
             .id("key-menu")
+            .surface_feedback(theme::INPUT)
             .h(px(26.))
             .px_2()
             .flex()

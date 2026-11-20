@@ -39,8 +39,10 @@ pub struct Shell {
     /// Encrypted session logs (`session-logs-v2`).
     logs_dir: std::path::PathBuf,
     vault_error: Option<String>,
+    log_read_pending: bool,
     host_editor: Option<ui::host_editor::HostEditor>,
     host_menu: Option<ui::host_editor::HostMenu>,
+    host_pings: ui::ping::HostPings,
     key_editor: Option<ui::key_editor::KeyEditor>,
     key_export: Option<ui::key_export::ExportForm>,
     identity_editor: Option<ui::identity_editor::IdentityEditor>,
@@ -266,11 +268,12 @@ impl Shell {
         }
         // Logs older than 60 days are deleted at start (FR-L5).
         session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
-        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error: None, section: Section::Hosts,
+        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error: None, log_read_pending: false, section: Section::Hosts,
             editor_motion: ui::motion::Tween::at(0.),
             editor_reveal: 0.,
             host_editor: None,
             host_menu: None,
+            host_pings: Default::default(),
             key_editor: None,
             key_export: None,
             identity_editor: None,
@@ -555,18 +558,30 @@ impl Shell {
     }
 
     fn open_log_file(&mut self, history: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.log_read_pending { return; }
         let Some(entry) = self.vault.history.iter().find(|e| e.id == history) else { return };
-        let Some(log) = &entry.log else { return };
+        let Some(log) = entry.log.clone() else { return };
         let key: Option<[u8; 32]> = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &log.key).ok().and_then(|k| k.try_into().ok());
-        let (data, note) = match key.map(|key| session_log::read(&self.logs_dir, &log.name, &key)) {
-            Some(Ok((data, error))) => (data, error.map(str::to_owned)),
-            Some(Err(error)) => (Vec::new(), Some(error)),
-            None => (Vec::new(), Some(session_log::UNREADABLE_LOG.to_owned())),
-        };
-        let title = session_log::log_tab_title(&entry.label, entry.connected_at);
-        let settings = self.vault.terminal.clone();
-        let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &settings, window, cx));
-        self.add_terminal(title, view, None, ui::workspace::Origin::None, cx);
+        let (dir, name) = (self.logs_dir.clone(), log.name.clone());
+        self.log_read_pending = true;
+        let task = cx.background_spawn(async move {
+            key.ok_or_else(|| session_log::UNREADABLE_LOG.to_string()).and_then(|key| session_log::read(&dir, &name, &key))
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |shell, window, cx| {
+                shell.log_read_pending = false;
+                if shell.privacy_locked() { return; }
+                let Some(entry) = shell.vault.history.iter().find(|e| e.id == history && e.log.as_ref() == Some(&log)) else { return };
+                let (data, note) = match result {
+                    Ok((data, error)) => (data, error.map(str::to_owned)),
+                    Err(error) => (Vec::new(), Some(error)),
+                };
+                let title = session_log::log_tab_title(&entry.label, entry.connected_at);
+                let view = cx.new(|cx| TerminalView::replay(data, note.as_deref(), &shell.vault.terminal, window, cx));
+                shell.add_terminal(title, view, None, ui::workspace::Origin::None, cx);
+            });
+        }).detach();
     }
 
     /// «SERIAL» / «Open Serial Connection»: a tab with the legacy serial form.
@@ -737,7 +752,7 @@ impl Render for VaultStartup {
             .child(div().text_lg().child(if self.opening { "Opening vault…" } else { "Vault locked" }))
             .children(self.error.as_ref().map(|error| div().text_sm().child(error.clone())))
             .when(!self.opening, |view| view.child(
-                div().id("retry-vault").cursor_pointer().px_4().py_2().rounded_md().bg(rgb(0x3c454a))
+                div().id("retry-vault").px_4().py_2().rounded_md().bg(rgb(0x3c454a)).surface_feedback(0x3c454a)
                     .on_click(cx.listener(|startup, _, window, cx| startup.open(window, cx)))
                     .child("Try Again"),
             ))
@@ -760,6 +775,10 @@ fn open_main_window(store: Store, vault: Vault, cx: &mut App) {
         |window, cx| {
             let shell = cx.new(|cx| Shell::new(store, vault, cx));
             shell.update(cx, |shell, cx| {
+                cx.on_app_quit(|shell, _| {
+                    shell.sftp.actions.edits.discard_all();
+                    async {}
+                }).detach();
                 shell.install_privacy(window, cx);
                 shell.start_cloud(cx);
                 shell.start_updates(cx);

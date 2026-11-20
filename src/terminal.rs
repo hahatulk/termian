@@ -63,6 +63,7 @@ pub fn blend(color: u32, under: u32, alpha: u8) -> u32 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
     pub text: String,
+    pub columns: usize,
     pub fg: u32,
     pub bg: u32,
     pub bold: bool,
@@ -324,7 +325,7 @@ impl Terminal {
         let (columns, rows) = self.size();
         let look = &self.look;
         // Cells first, so highlighting can recolour by character position.
-        let mut cells: Vec<Vec<(char, u32, u32, bool)>> = vec![Vec::new(); rows];
+        let mut cells: Vec<Vec<(char, u32, u32, bool, usize)>> = vec![Vec::new(); rows];
         for indexed in content.display_iter {
             let row = indexed.point.line.0 + offset;
             if row < 0 || row as usize >= rows || indexed.point.column.0 >= columns {
@@ -344,7 +345,7 @@ impl Terminal {
                 bg = look.selection;
             }
             let ch = if cell.flags.contains(Flags::HIDDEN) { ' ' } else { cell.c };
-            cells[row as usize].push((ch, fg, bg, bold));
+            cells[row as usize].push((ch, fg, bg, bold, if cell.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 }));
         }
         let mut lines: Vec<Vec<Run>> = vec![Vec::new(); rows];
         for (row, mut cells) in cells.into_iter().enumerate() {
@@ -357,10 +358,13 @@ impl Terminal {
                 }
             }
             let line = &mut lines[row];
-            for (ch, fg, bg, bold) in cells {
+            for (ch, fg, bg, bold, width) in cells {
                 match line.last_mut() {
-                    Some(run) if run.fg == fg && run.bg == bg && run.bold == bold => run.text.push(ch),
-                    _ => line.push(Run { text: ch.to_string(), fg, bg, bold }),
+                    Some(run) if run.fg == fg && run.bg == bg && run.bold == bold => {
+                        run.text.push(ch);
+                        run.columns += width;
+                    }
+                    _ => line.push(Run { text: ch.to_string(), columns: width, fg, bg, bold }),
                 }
             }
         }

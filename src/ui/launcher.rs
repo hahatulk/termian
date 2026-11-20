@@ -280,10 +280,7 @@ impl Shell {
             .bg(rgb(theme::TITLE_BAR))
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::DIALOG_ROW }))
-            .map(super::keyboard::target)
-            .cursor_pointer()
-            .hover(|s| s.border_color(rgb(if focused { theme::ACCENT } else { 0x65708d })))
-            .active(|s| s.border_color(rgb(theme::ACCENT)))
+            .surface_feedback(theme::TITLE_BAR)
             .child(div().flex_1().child(text_input::text("launcher-search", query, "Search hosts or tabs", focused, Mode::Line, cx)))
             .child(div().mx(px(5.)).text_color(rgb(theme::TEXT_MUTED)).child(PALETTE_SHORTCUT))
             .on_click(cx.listener(|shell, _, window, cx| shell.open_palette(String::new(), window, cx)));

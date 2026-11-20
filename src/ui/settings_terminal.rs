@@ -485,6 +485,7 @@ impl SettingsWindow {
             let key = name.to_lowercase();
             div()
                 .id(SharedString::from(format!("term-theme-{key}")))
+                .icon_feedback()
                 .p(px(4.))
                 .rounded(px(10.))
                 .border_2()
@@ -563,10 +564,10 @@ impl SettingsWindow {
                 .child(
                     div()
                         .id("term-script")
+                        .rounded_sm().icon_feedback()
                         .py(px(10.))
                         .flex()
                         .justify_between()
-                        .cursor_pointer()
                         .child(heading("Detect OS Script"))
                         .child(div().text_color(rgb(MUTED)).child(if self.script_open { "▼" } else { "▶" }))
                         .on_click(cx.listener(|settings, _, _, cx| {
@@ -587,13 +588,13 @@ impl SettingsWindow {
             heading("Local Terminal Path").into_any_element(),
             div()
                 .id("term-shell")
+                .icon_feedback()
                 .mt(px(20.))
                 .pb(px(4.))
                 .flex()
                 .justify_between()
                 .border_b_1()
                 .border_color(rgb(0x4a4e66))
-                .cursor_pointer()
                 .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).truncate().child(selected_shell.clone()))
                 .child(arrow(shell_open))
                 .on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Shell, cx)))
@@ -618,6 +619,7 @@ impl SettingsWindow {
                             d.child(
                                 div()
                                     .id(SharedString::from(format!("term-shell-remove-{index}")))
+                                    .rounded_sm().icon_feedback()
                                     .ml(px(8.))
                                     .text_color(rgb(0xec706f))
                                     .child("✕")

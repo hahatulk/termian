@@ -121,6 +121,12 @@ impl Edits {
     }
 }
 
+impl Drop for Edits {
+    fn drop(&mut self) {
+        self.discard_all();
+    }
+}
+
 fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
@@ -265,6 +271,16 @@ mod tests {
         assert!(edits.changed().is_empty());
         edits.discard(file.id);
         assert!(edits.is_empty() && !file.local_path.exists());
+    }
+
+    #[test]
+    fn closing_edits_removes_downloaded_files() {
+        let root = tempfile::tempdir().unwrap();
+        let mut edits = Edits::new(root.path().to_owned());
+        let path = edits.prepare("/notes.txt").unwrap().local_path.clone();
+        std::fs::write(&path, b"notes").unwrap();
+        drop(edits);
+        assert!(!path.parent().unwrap().exists());
     }
 
     #[test]

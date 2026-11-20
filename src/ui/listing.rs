@@ -86,8 +86,9 @@ impl Shell {
     pub(crate) fn cards(&self, key: &str) -> Div {
         const MIN_CARD: f32 = 220.;
         const GAP: f32 = 12.;
+        let max_columns = if key == "hosts" { 4 } else { 8 };
         let columns = match self.listing(key).view {
-            ViewMode::Grid => (((self.cards_width.get() + GAP) / (MIN_CARD + GAP)).floor() as u16).clamp(1, 8),
+            ViewMode::Grid => (((self.cards_width.get() + GAP) / (MIN_CARD + GAP)).floor() as u16).clamp(1, max_columns),
             ViewMode::List => 1,
         };
         div().grid().grid_cols(columns).gap_3()

@@ -5,6 +5,7 @@ use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, 
 use termian_native::theme;
 use termian_native::vault::Identity;
 
+use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
 use super::host_editor::{field_box, menu_row};
@@ -165,6 +166,7 @@ impl Shell {
         let chosen = identity.key.and_then(|k| self.vault.key(k)).map(|k| format!("{} ({})", k.label, k.kind));
         let picker = field_box(editor.keys_open)
             .id("identity-key")
+            .surface_feedback(theme::INPUT)
             .child(svg().path(icon("keychain")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
             .child(div().flex_1().text_color(rgb(if chosen.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(chosen.unwrap_or_else(|| "Key".into())))
             .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))

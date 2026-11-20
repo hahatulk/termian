@@ -310,8 +310,10 @@ impl Cloud {
         Ok((Some(Remote { snapshot: open(&body, &self.passphrase)?, revision }), false, generation))
     }
 
-    pub(crate) fn log_generation(&self) -> Result<String, String> {
-        self.fetch_with_headers()?.2.ok_or_else(|| "Сервер не поддерживает проверку пароля при отправке журналов. Обновите сервер.".into())
+    pub(crate) fn log_generation(&self) -> Result<Option<(String, String)>, String> {
+        let (remote, _, generation) = self.fetch_with_headers()?;
+        let Some(remote) = remote else { return Ok(None) };
+        Ok(Some((generation.ok_or("Обновите сервер для отправки журналов.")?, remote.revision.ok_or("Нет ревизии снимка.")?)))
     }
 
     pub(crate) fn storage_key(&self) -> String {
@@ -320,16 +322,26 @@ impl Cloud {
 
     /// `DELETE /v1/logs?since=` (Unix ms, 0 = all): the cloud copies of session logs.
     pub fn delete_logs(&self, since: u64) -> Result<LogsRemoved, String> {
+        #[derive(Deserialize)]
+        struct Counts { removed: u64, #[serde(default)] failed: u64 }
+        let counts = |response: ureq::Response| {
+            serde_json::from_reader::<_, Counts>(response.into_reader().take(1024)).map_err(|_| "Сервер вернул неверный результат очистки.".to_owned())
+        };
         let mut endpoint = self.endpoint.clone();
         let path = endpoint.path().trim_end_matches("/snapshot").to_owned();
         endpoint.set_path(&format!("{path}/logs"));
         endpoint.set_query(Some(&format!("since={since}")));
         match self.request_to("DELETE", &endpoint).call() {
             Ok(response) if (200..300).contains(&response.status()) => {
-                let body: Value = response.into_string().ok().and_then(|text| serde_json::from_str(&text).ok()).unwrap_or_default();
-                Ok(LogsRemoved::Removed(body["removed"].as_u64().unwrap_or(0)))
+                let result = counts(response)?;
+                if result.failed != 0 { return Err(format!("Удалено: {}. Ошибок: {}.", result.removed, result.failed)); }
+                Ok(LogsRemoved::Removed(result.removed))
             }
             Err(ureq::Error::Status(404 | 405, _)) => Ok(LogsRemoved::Unsupported),
+            Err(ureq::Error::Status(500, response)) => match counts(response) {
+                Ok(result) => Err(format!("Удалено: {}. Ошибок: {}.", result.removed, result.failed)),
+                Err(_) => Err("Сервер не смог очистить журналы.".into()),
+            },
             Ok(response) => Err(status_error("Очистка логов в облаке", response.status(), None)),
             Err(ureq::Error::Status(code, response)) => Err(status_error("Очистка логов в облаке", code, response.header("retry-after"))),
             Err(error) => Err(error.to_string()),
@@ -346,9 +358,9 @@ impl Cloud {
 
     /// Stores a session log backup sealed like a snapshot. `Ok(false)`: the
     /// server is older than the logs API (404/405).
-    pub(crate) fn put_log(&self, name: &str, payload: &Value, generation: &str) -> Result<bool, String> {
+    pub(crate) fn put_log(&self, name: &str, payload: &Value, generation: &str, revision: &str) -> Result<bool, String> {
         let body = seal(payload, &self.passphrase)?;
-        let request = self.request_to("PUT", &self.log_endpoint(name)).set(LOG_GENERATION, generation);
+        let request = self.request_to("PUT", &self.log_endpoint(name)).set(LOG_GENERATION, generation).set("x-termian-snapshot-revision", revision);
         match request.set("content-type", "application/octet-stream").send_bytes(&body) {
             Ok(response) if (200..300).contains(&response.status()) => Ok(true),
             Err(ureq::Error::Status(404 | 405, _)) => Ok(false),

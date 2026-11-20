@@ -12,6 +12,7 @@ use termian_native::vault::{GroupId, Host, HostId};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
+use super::host_settings::CredentialsMenu;
 use super::hosts::host_tile;
 use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
@@ -44,11 +45,7 @@ pub struct HostEditor {
     tag: String,
     port: String,
     groups_open: bool,
-    pub(super) keys_open: bool,
-    /// The picker was opened from «Certificate»: only keys with a certificate.
-    pub(super) certificates_only: bool,
-    /// The «+ SSH.id, Key, Certificate, FIDO2» menu is open.
-    pub(super) key_menu: bool,
+    pub(super) credentials_menu: Option<CredentialsMenu>,
     menu_open: bool,
     /// "Remove a host" is showing.
     confirm_remove: bool,
@@ -182,9 +179,7 @@ impl Shell {
             tag: String::new(),
             port,
             groups_open: false,
-            keys_open: false,
-            certificates_only: false,
-            key_menu: false,
+            credentials_menu: None,
             menu_open: false,
             confirm_remove: false,
             confirm_discard: false,
@@ -279,6 +274,21 @@ impl Shell {
             return;
         }
         let stroke = &event.keystroke;
+        if editor.credentials_menu.is_some() {
+            match stroke.key.as_str() {
+                "escape" => {
+                    editor.credentials_menu = None;
+                    cx.stop_propagation();
+                    cx.notify();
+                    return;
+                }
+                "tab" => {
+                    editor.credentials_menu = None;
+                    cx.notify();
+                }
+                _ => return,
+            }
+        }
         if !self.editor_focus.is_focused(window) && stroke.key != "escape" {
             super::keyboard::tab(event, window, cx, Some(&self.editor_focus));
             return;
@@ -286,9 +296,10 @@ impl Shell {
         let mods = stroke.modifiers;
         if stroke.key == "tab" && !mods.control && !mods.alt && !mods.platform {
             const ORDER: [Field; 6] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password];
-            let next = ORDER.iter().position(|f| *f == editor.field)
+            let order = if editor.host.identity.and_then(|id| self.vault.identity(id)).is_some() { &ORDER[..4] } else { &ORDER[..] };
+            let next = order.iter().position(|f| *f == editor.field)
                 .and_then(|at| if mods.shift { at.checked_sub(1) } else { Some(at + 1) })
-                .and_then(|at| ORDER.get(at));
+                .and_then(|at| order.get(at));
             if let Some(next) = next {
                 editor.field = *next;
                 cx.stop_propagation();
@@ -430,14 +441,12 @@ impl Shell {
         );
 
         let group_label = host.group.and_then(|g| self.vault.group(g)).map(|g| g.label.clone());
-        let group_picker = div()
+        let group_picker = field_box(editor.groups_open)
             .id("editor-group")
-            .child(
-                field_box(editor.groups_open)
-                    .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                    .child(div().flex_1().text_color(rgb(if group_label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(group_label.clone().unwrap_or_else(|| "Parent Group".into())))
-                    .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED))),
-            )
+            .surface_feedback(theme::INPUT)
+            .child(svg().path(icon("group")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(div().flex_1().text_color(rgb(if group_label.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(group_label.clone().unwrap_or_else(|| "Parent Group".into())))
+            .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.host_editor {
                     editor.groups_open = !editor.groups_open;
@@ -475,6 +484,7 @@ impl Shell {
             .children(host.tags.iter().enumerate().map(|(i, tag)| {
                 div()
                     .id(SharedString::from(format!("editor-tag-{i}")))
+                    .surface_feedback(theme::SURFACE_ACTIVE)
                     .px_2()
                     .py(px(2.))
                     .flex()
@@ -522,7 +532,7 @@ impl Shell {
                     .border_color(rgb(theme::SURFACE_ACTIVE))
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .hover(|s| s.text_color(rgb(theme::TEXT)))
+                    .icon_feedback()
                     .child(tag.clone())
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if let Some(editor) = &mut shell.host_editor {

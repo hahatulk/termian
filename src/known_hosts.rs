@@ -2,6 +2,7 @@
 //! sees it: entries to list and remove, and «Import» from `~/.ssh/known_hosts`.
 
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// The file SSH connections check and learn host keys in; the demo
@@ -48,20 +49,62 @@ pub fn read(path: &Path) -> Vec<Entry> {
     fs::read_to_string(path).map(|t| parse(&t)).unwrap_or_default()
 }
 
+fn writer_lock(path: &Path) -> io::Result<fs::File> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let mut name = path.as_os_str().to_owned();
+    name.push(".lock");
+    let lock = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(name)?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn publish(path: &Path, text: &str) -> io::Result<()> {
+    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    let mut stage = tempfile::NamedTempFile::new_in(dir)?;
+    stage.write_all(text.as_bytes())?;
+    stage.as_file().sync_all()?;
+    stage.persist(path)?;
+    #[cfg(unix)]
+    fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
+pub(crate) fn learn(host: &str, port: u16, key: &russh::keys::PublicKey, path: &Path) -> io::Result<()> {
+    let _lock = writer_lock(path)?;
+    match check(host, port, key, path)? {
+        Trust::Match => return Ok(()),
+        Trust::Changed(_) => return Err(io::Error::other("host key changed while awaiting confirmation")),
+        Trust::Unknown => {}
+    }
+    if host.is_empty() || host.contains(|c: char| c.is_whitespace() || c.is_control())
+        || host.contains([',', '*', '?', '|', '!']) || host.starts_with(['@', '#']) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid SSH host name"));
+    }
+    let mut text = read_for_trust(path)?.unwrap_or_default();
+    if !text.is_empty() && !text.ends_with('\n') { text.push('\n'); }
+    let host = if port == 22 { host.to_owned() } else { format!("[{host}]:{port}") };
+    let public = key.to_openssh().map_err(io::Error::other)?;
+    text.push_str(&format!("{host} {public}\n"));
+    publish(path, &text)
+}
+
 /// Removes the lines of `entries` from the file.
 pub fn remove(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
+    let _lock = writer_lock(path)?;
     let text = fs::read_to_string(path)?;
     let kept: Vec<&str> = text.lines().filter(|l| !entries.iter().any(|e| e.line == l.trim())).collect();
     let mut out = kept.join("\n");
     if !out.is_empty() {
         out.push('\n');
     }
-    fs::write(path, out)
+    publish(path, &out)
 }
 
 /// Adds the host key lines of `from` that `to` does not have yet; returns how many.
 pub fn import(from: &Path, to: &Path) -> std::io::Result<usize> {
     let incoming = parse(&fs::read_to_string(from)?);
+    let _lock = writer_lock(to)?;
     let mut text = read_for_trust(to)?.unwrap_or_default();
     let existing = parse(&text);
     let mut added = 0;
@@ -76,10 +119,7 @@ pub fn import(from: &Path, to: &Path) -> std::io::Result<usize> {
         text.push('\n');
         added += 1;
     }
-    if let Some(dir) = to.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    fs::write(to, text)?;
+    if added > 0 { publish(to, &text)?; }
     Ok(added)
 }
 
@@ -137,7 +177,10 @@ fn host_list_matches(names: &str, host: &str) -> bool {
         let name = entry.strip_prefix('!').unwrap_or(entry);
         let matches = if let Some((salt, hash)) = name.strip_prefix("|1|").and_then(|value| value.split_once('|')) {
             let (Ok(salt), Ok(hash)) = (STANDARD.decode(salt), STANDARD.decode(hash)) else { continue };
-            Hmac::<Sha1>::new_from_slice(&salt).is_ok_and(|mac| mac.chain_update(host).verify_slice(&hash).is_ok())
+            Hmac::<Sha1>::new_from_slice(&salt).is_ok_and(|mac| {
+                mac.clone().chain_update(host).verify_slice(&hash).is_ok()
+                    || mac.chain_update(host.to_ascii_lowercase()).verify_slice(&hash).is_ok()
+            })
         } else {
             host_glob(name.as_bytes(), host.as_bytes())
         };
@@ -199,6 +242,15 @@ mod tests {
 
     #[test]
     fn hostname_patterns_respect_exclusions_ports_and_revocation() {
+        use base64::{engine::general_purpose::STANDARD, Engine};
+        use hmac::{Hmac, KeyInit, Mac};
+        let salt = [3; 20];
+        for host in ["node.example", "[node.example]:2222"] {
+            let hash = Hmac::<sha1::Sha1>::new_from_slice(&salt).unwrap().chain_update(host).finalize().into_bytes();
+            let pattern = format!("|1|{}|{}", STANDARD.encode(salt), STANDARD.encode(hash));
+            assert!(host_list_matches(&pattern, &host.to_ascii_uppercase()));
+            assert!(!host_list_matches(&pattern, "other.example"));
+        }
         assert!(host_list_matches("[*.example]:2222", "[NODE.example]:2222"));
         assert!(!host_list_matches("[*.example]:2222", "[node.example]:22"));
         assert!(!host_list_matches("!node.example", "other.example"));

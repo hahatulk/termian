@@ -262,11 +262,22 @@ impl Header {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct UploadPreview {
+    server: String,
+    condition: Condition,
+}
+
 /// Compares this device with the cloud without changing either side.
-pub fn preview(vault: &Vault) -> Result<Preview, String> {
-    let Some(config) = vault.cloud.clone().filter(|c| c.validate().is_ok()) else { return Ok(Preview::Unconfigured) };
+pub fn checked_preview(vault: &Vault) -> Result<(Preview, Option<UploadPreview>), String> {
+    let Some(config) = vault.cloud.clone().filter(|c| c.validate().is_ok()) else { return Ok((Preview::Unconfigured, None)) };
     let client = config.validate()?;
-    let Some(remote) = client.fetch().map_err(|e| config.redact(&e))? else { return Ok(Preview::Empty) };
+    let (remote, can_create) = client.fetch_for_sync().map_err(|e| config.redact(&e))?;
+    let ticket = |condition| UploadPreview { server: sync::server_key(&config.url), condition };
+    let Some(remote) = remote else {
+        return Ok((Preview::Empty, can_create.then(|| ticket(Condition::Create))));
+    };
+    let ticket = remote.revision.map(|revision| ticket(Condition::Revision(revision)));
     let remote = sync::validate_snapshot(&remote.snapshot)?;
     let server = sync::server_key(&config.url);
     let saved = vault.sync_state.clone().filter(|s| s.server == server);
@@ -276,13 +287,13 @@ pub fn preview(vault: &Vault) -> Result<Preview, String> {
     let local = sync::to_sync_form(&exported, &mut ids);
     let base = saved.map(|s| sync::Base { local: s.local, remote: s.remote });
     let merged = sync::merge_snapshots(&local, Some(&remote), base.as_ref(), ConflictPolicy::Preview, &now());
-    Ok(if !merged.conflicts.is_empty() {
+    Ok((if !merged.conflicts.is_empty() {
         Preview::Conflicts(merged.conflicts)
     } else if merged.changes.is_empty() {
         Preview::Synced
     } else {
         Preview::Changes(merged.changes)
-    })
+    }, ticket))
 }
 
 /// What the settings form sends: secrets are write-only, an empty field keeps the saved one.
@@ -355,7 +366,9 @@ pub fn prepare_logs(vault: &mut Vault, logs_dir: &Path, active: &std::collection
     match crate::log_backup::backup(&client, logs_dir, &vault.history) {
         Ok(outcome) => {
             crate::log_backup::prepare_catalog(vault, &outcome.ready, active);
-            if outcome.unsupported {
+            if outcome.pending_snapshot {
+                Some("Журналы будут отправлены при следующей синхронизации после создания снимка.".into())
+            } else if outcome.unsupported {
                 Some("Сервер не поддерживает отправку логов.".into())
             } else if outcome.skipped > 0 {
                 Some(format!("Логов больше 34 МиБ пропущено: {}", outcome.skipped))
@@ -404,7 +417,7 @@ pub fn sync(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String>
 }
 
 /// «Отправить»: the cloud snapshot is replaced with this device's data.
-pub fn upload(vault: &mut Vault) -> Result<String, String> {
+pub fn upload_checked(vault: &mut Vault, preview: UploadPreview) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
@@ -418,15 +431,38 @@ pub fn upload(vault: &mut Vault) -> Result<String, String> {
         None if can_create => Condition::Create,
         None => return Err("Сервер не подтвердил безопасное создание снимка.".into()),
     };
-    client.upload(&snapshot, condition).map_err(|e| config.redact(&e))?;
+    if preview.server != sync::server_key(&config.url) || preview.condition != condition {
+        return Err(cloud::REVISION_CHANGED.into());
+    }
+    client.upload(&snapshot, preview.condition).map_err(|e| config.redact(&e))?;
     vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&snapshot)), remote: sync::digests_of(Some(&snapshot)), ids });
     Ok("Данные загружены".into())
 }
 
+#[cfg(test)]
+pub(crate) fn upload(vault: &mut Vault) -> Result<String, String> {
+    let ticket = checked_preview(vault)?.1.ok_or("missing upload preview")?;
+    upload_checked(vault, ticket)
+}
+
+#[cfg(test)]
+fn preview(vault: &Vault) -> Result<Preview, String> {
+    checked_preview(vault).map(|(preview, _)| preview)
+}
+
+#[cfg(test)]
+pub(crate) fn download(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String> {
+    let ticket = checked_preview(vault)?.1.ok_or("Нет ревизии снимка.")?;
+    download_checked(vault, backups, ticket)
+}
+
 /// «Получить»: the local data is replaced with the cloud snapshot, after a backup.
-pub fn download(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String> {
+pub fn download_checked(vault: &mut Vault, backups: &CloudBackups, preview: UploadPreview) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     let remote = client.fetch().map_err(|e| config.redact(&e))?.ok_or("В облаке ещё нет данных")?;
+    if preview.server != sync::server_key(&config.url) || remote.revision.map(Condition::Revision) != Some(preview.condition) {
+        return Err(cloud::REVISION_CHANGED.into());
+    }
     let snapshot = sync::validate_snapshot(&remote.snapshot)?;
     backups.save(vault)?;
     let server = sync::server_key(&config.url);
@@ -685,6 +721,39 @@ mod tests {
         changes.url = other.url;
         save_config(&mut vault, changes).unwrap();
         assert_eq!(vault.cloud.unwrap().url, "https://other.example");
+    }
+
+    #[test]
+    fn forced_upload_requires_the_previewed_revision() {
+        let (url, stored) = crate::cloud::tests::server();
+        let mut local = vault(&url, &["local"]);
+        let mut peer = vault(&url, &["peer"]);
+        for _ in 0..2 {
+            let ticket = checked_preview(&local).unwrap().1.unwrap();
+            upload(&mut peer).unwrap();
+            let after = stored.lock().unwrap().clone();
+            assert!(upload_checked(&mut local, ticket).unwrap_err().contains(cloud::REVISION_CHANGED));
+            assert_eq!(*stored.lock().unwrap(), after);
+        }
+    }
+
+    #[test]
+    fn changed_download_revision_leaves_vault_and_backups_untouched() {
+        let (url, _) = crate::cloud::tests::server();
+        let mut local = vault(&url, &["local"]);
+        let mut peer = vault(&url, &["peer"]);
+        let dir = tempfile::tempdir().unwrap();
+        let backups = test_backups(dir.path());
+        upload(&mut peer).unwrap();
+        let ticket = checked_preview(&local).unwrap().1.unwrap();
+        peer.hosts[0].label = "updated".into();
+        upload(&mut peer).unwrap();
+        let original = local.clone();
+        assert!(download_checked(&mut local, &backups, ticket).unwrap_err().contains(cloud::REVISION_CHANGED));
+        assert_eq!(local, original);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        download(&mut local, &backups).unwrap();
+        assert_eq!(labels(&local), ["updated"]);
     }
 
     #[test]

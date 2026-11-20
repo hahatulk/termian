@@ -19,6 +19,7 @@ pub mod known_hosts;
 pub mod launcher;
 pub mod listing;
 pub mod palette;
+pub(crate) mod ping;
 pub mod login_view;
 pub mod logs;
 pub mod sections;

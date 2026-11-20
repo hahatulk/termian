@@ -371,36 +371,28 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     name.into()
 }
 
-/// Windows lets a running EXE be renamed but not overwritten: write the new one
-/// beside it, move the running one to `.old`, then move the new one into place.
 pub fn replace_exe(exe: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::{fs, io};
     if bytes.len() < 1_000_000 || !bytes.starts_with(b"MZ") {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "update is not a Windows executable"));
     }
-    let (new, old) = (with_suffix(exe, ".new"), with_suffix(exe, ".old"));
-    fs::write(&new, bytes)?;
-    let _ = fs::remove_file(&old);
-    if let Err(error) = fs::rename(exe, &old) {
-        let _ = fs::remove_file(&new);
-        return Err(error);
-    }
+    let parent = exe.parent().ok_or_else(|| io::Error::other("executable has no parent directory"))?;
+    let stage = tempfile::Builder::new().prefix(".termian-update-").tempdir_in(parent)?;
+    let new = stage.path().join("new.exe");
+    let old = stage.path().join("previous.exe");
+    let mut file = fs::OpenOptions::new().create_new(true).write(true).open(&new)?;
+    std::io::Write::write_all(&mut file, bytes)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(exe, &old)?;
     if let Err(error) = fs::rename(&new, exe) {
-        let _ = fs::rename(&old, exe);
+        if let Err(rollback) = fs::rename(&old, exe) {
+            let _ = stage.keep();
+            return Err(io::Error::other(format!("{error}; restore {}: {rollback}", old.display())));
+        }
         return Err(error);
     }
     Ok(())
-}
-
-/// The previous EXE stays locked while it runs; remove it on a later start.
-pub fn remove_replaced_exe() {
-    if cfg!(windows) {
-        if let Ok(exe) = std::env::current_exe() {
-            for suffix in [".old", ".new"] {
-                let _ = std::fs::remove_file(with_suffix(&exe, suffix));
-            }
-        }
-    }
 }
 
 /// Start the installed version: the bundle through LaunchServices, the EXE directly.
@@ -542,9 +534,12 @@ mod tests {
         assert!(!with_suffix(&exe, ".new").exists());
         let mut next = b"MZ".to_vec();
         next.resize(1_000_001, 0);
+        std::fs::write(with_suffix(&exe, ".old"), b"user backup").unwrap();
+        std::fs::write(with_suffix(&exe, ".new"), b"user file").unwrap();
         replace_exe(&exe, &next).unwrap();
         assert_eq!(std::fs::read(&exe).unwrap(), next);
-        assert_eq!(std::fs::read(with_suffix(&exe, ".old")).unwrap(), b"old");
+        assert_eq!(std::fs::read(with_suffix(&exe, ".old")).unwrap(), b"user backup");
+        assert_eq!(std::fs::read(with_suffix(&exe, ".new")).unwrap(), b"user file");
     }
 
     #[test]
