@@ -1,0 +1,23 @@
+name: Test cloud sync server
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'cloud-sync-server/**'
+      - '.github/workflows/cloud-server.yml'
+  pull_request:
+    paths:
+      - 'cloud-sync-server/**'
+      - '.github/workflows/cloud-server.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
