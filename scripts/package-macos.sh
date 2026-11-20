@@ -4,7 +4,8 @@ set -euo pipefail
 binary="${1:?Provide the path to the Cargo binary}"
 dist="${2:?Provide an output directory}"
 version="${3:?Provide a release version}"
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]
+bundle_version="${version%%-*}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 mkdir -p "$dist"
 dist="$(cd "$dist" && pwd)"
@@ -15,8 +16,8 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 install -m 755 "$binary" "$app/Contents/MacOS/termian"
 cp "$root/assets/app/icon.icns" "$app/Contents/Resources/"
 cp "$root/assets/app/Info.plist" "$app/Contents/Info.plist"
-plutil -insert CFBundleShortVersionString -string "$version" "$app/Contents/Info.plist"
-plutil -insert CFBundleVersion -string "$version" "$app/Contents/Info.plist"
+plutil -insert CFBundleShortVersionString -string "$bundle_version" "$app/Contents/Info.plist"
+plutil -insert CFBundleVersion -string "$bundle_version" "$app/Contents/Info.plist"
 plutil -insert LSMinimumSystemVersion -string "${MACOSX_DEPLOYMENT_TARGET:-11.0}" "$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist"
 

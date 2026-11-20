@@ -16,7 +16,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Optional stable SemVer override"
+        description: "Optional version: X.Y.Z or X.Y.Z-beta.N"
         required: false
         type: string
 
@@ -33,6 +33,7 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
       sha: ${{ steps.release.outputs.sha }}
       changelog: ${{ steps.release.outputs.changelog }}
     steps:
@@ -176,6 +177,7 @@ jobs:
           name: Termian ${{ needs.prepare.outputs.version }}
           body: ${{ needs.prepare.outputs.changelog }}
           generate_release_notes: true
-          prerelease: true
+          prerelease: ${{ needs.prepare.outputs.prerelease }}
+          make_latest: ${{ needs.prepare.outputs.prerelease == 'false' }}
           fail_on_unmatched_files: true
           files: release-assets/*

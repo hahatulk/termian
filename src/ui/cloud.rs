@@ -256,7 +256,8 @@ fn configured(vault: &Vault) -> bool {
 /// on it; then the old merge base stays and the next sync carries both the
 /// edit and what came from the cloud.
 fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
-    let edited = Vault { history: Vec::new(), ..live.clone() } != Vault { history: Vec::new(), ..started.clone() };
+    let edited = Vault { history: Vec::new(), update_channel: started.update_channel, ..live.clone() }
+        != Vault { history: Vec::new(), ..started.clone() };
     if edited || !live.history.iter().filter(|entry| entry.log.is_some())
         .eq(started.history.iter().filter(|entry| entry.log.is_some())) {
         return false;
@@ -272,6 +273,7 @@ fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
         synced.history.push(entry);
     }
     synced.history.sort_by_key(|entry| std::cmp::Reverse((entry.connected_at, entry.id)));
+    synced.update_channel = live.update_channel;
     *live = synced;
     true
 }

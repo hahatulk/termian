@@ -374,6 +374,8 @@ pub struct Vault {
     /// as legacy keeps log settings out of the snapshot.
     #[serde(default)]
     pub logs_disabled: bool,
+    #[serde(default)]
+    pub update_channel: crate::updater::Channel,
     /// Settings → Terminal; device-local like legacy, except the keepalive
     /// interval, which is in `foreign.settings`.
     #[serde(default)]

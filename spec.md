@@ -188,6 +188,7 @@ Termian содержит нативный SSH/SFTP-клиент на Rust и GPU
 ### 4.6. Автообновление
 
 - Релизные сборки используют `TERMIAN_RELEASE_VERSION` и `TERMIAN_UPDATE_REPOSITORY`. Первая проверка через 20 секунд, последующие через 6 часов. `TERMIAN_DISABLE_UPDATES=1` отключает проверки.
+- В Settings → Version на macOS и Windows выбирается канал "Latest" (по умолчанию, стабильный выпуск GitHub) или "Pre-release" (предварительные выпуски GitHub с суффиксом SemVer). Канал хранится на устройстве. Во время проверки, загрузки и до перезапуска после установки канал не меняется. Клиент принимает только версию новее текущей и проверяет совпадение версии манифеста с тегом выпуска.
 - Клиент принимает пакет, подписанный прежним ключом minisign. Публичный ключ находится в `assets/app/update-public-key`. Подписанный комментарий `version:` должен совпадать с версией из `latest.json`, а `file:` должен содержать имя пакета автообновления для текущей платформы. Предел загрузки пакета: 256 МиБ.
 - Windows заменяет бинарник на месте, macOS заменяет `.app`. Новая версия запускается после перезапуска. Клиент не закрывает активные SSH-сессии при загрузке пакета.
 
@@ -257,7 +258,7 @@ cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 
 [GitHub Actions](.github/workflows/release.yml) тестирует и собирает клиент через Cargo на Windows x64 и macOS Apple Silicon. macOS использует `MACOSX_DEPLOYMENT_TARGET=11.0`, Xcode Swift, `codesign` и `hdiutil`. Windows использует компилятор MSVC и NSIS для упаковки. Клиент и workflow не требуют Node.js или WebView. `.github/workflows/cloud-server.yml` отдельно запускает серверные тесты при изменениях в `cloud-sync-server/`.
 
-Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg` и `termian-<version>-mac-arm64.app.tar.gz`. Версия берётся из стабильных тегов `vX.Y.Z` или из параметра ручного запуска. Для публикации нужны пакеты обеих платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`.
+Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg` и `termian-<version>-mac-arm64.app.tar.gz`. Автоматический выпуск использует стабильные теги `vX.Y.Z`. Ручной параметр `version` принимает предварительную версию, например `1.2.3-beta.1`. Такой выпуск помечается в GitHub как pre-release. Стабильный выпуск помечается как latest. Для публикации нужны пакеты обеих платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`.
 
 - `TERMIAN_SIGNING_PRIVATE_KEY` содержит прежний ключ minisign в Base64, `TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD` содержит его пароль. Workflow также принимает прежние имена `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Публичный ключ меняется только при ротации.
 - Без Apple Developer ID `.app` подписывается ad-hoc. Для подписи и нотариализации нужны `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` и `APPLE_TEAM_ID`.

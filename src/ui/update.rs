@@ -4,13 +4,14 @@
 //! sessions are never cut off by an update.
 
 use gpui::{div, prelude::*, px, rgb, Context, Div, FontWeight, Stateful};
-use termian_native::updater::{self, State, Status};
+use termian_native::updater::{self, Channel, State, Status};
 
 use crate::Shell;
 
 #[derive(Default)]
 pub struct UpdateState {
     pub status: Status,
+    pub(super) channel_error: Option<String>,
     /// «Позже»: hidden until the next launch.
     dismissed: bool,
     checking: bool,
@@ -18,6 +19,26 @@ pub struct UpdateState {
 }
 
 impl Shell {
+    pub(super) fn set_update_channel(&mut self, channel: Channel, cx: &mut Context<Self>) {
+        if self.update.checking || self.update.status.state == State::Installed || self.vault.update_channel == channel {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.vault.update_channel, channel);
+        match self.store.save(&self.vault) {
+            Ok(()) => {
+                self.update.channel_error = None;
+                if self.update.status.state != State::Disabled {
+                    self.update.status = Status::default();
+                }
+            }
+            Err(error) => {
+                self.vault.update_channel = previous;
+                self.update.channel_error = Some(format!("Не удалось сохранить канал обновлений: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
     /// First check after 20 s, then every 6 hours, until an update is installed.
     pub fn start_updates(&mut self, cx: &mut Context<Self>) {
         updater::remove_replaced_exe();
@@ -46,11 +67,12 @@ impl Shell {
         if self.update.checking || matches!(self.update.status.state, State::Installed | State::Disabled) {
             return;
         }
+        let channel = self.vault.update_channel;
         self.update.checking = true;
         self.update.status.set(State::Checking, None, None);
         cx.notify();
         cx.spawn(async move |this, cx| {
-            let found = cx.background_spawn(async move { updater::check(&updater::current_version()) }).await;
+            let found = cx.background_spawn(async move { updater::check(&updater::current_version(), channel) }).await;
             let package = match found {
                 Ok(Some(package)) => package,
                 done => {

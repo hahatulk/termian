@@ -8,10 +8,10 @@ use std::{
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
-fn stable(text: &str) -> Result<Version> {
+fn release_version(text: &str) -> Result<Version> {
     let version = Version::parse(text.strip_prefix('v').unwrap_or(text))?;
-    if !version.pre.is_empty() || !version.build.is_empty() {
-        return Err("expected a stable version X.Y.Z".into());
+    if !version.build.is_empty() {
+        return Err("release versions cannot contain build metadata".into());
     }
     Ok(version)
 }
@@ -27,7 +27,7 @@ fn git(args: &[&str]) -> Result<String> {
 fn tagged(text: &str) -> BTreeSet<Version> {
     text.lines()
         .filter(|tag| tag.starts_with('v'))
-        .filter_map(|tag| stable(tag).ok())
+        .filter_map(|tag| release_version(tag).ok())
         .collect()
 }
 
@@ -36,10 +36,16 @@ fn choose(
     at_head: &BTreeSet<Version>,
     requested: &str,
 ) -> Result<Version> {
-    let highest = tags.last();
+    let highest_stable = tags.iter().rev().find(|version| version.pre.is_empty());
     if !requested.is_empty() {
-        let version = stable(requested)?;
-        if highest.is_some_and(|top| &version < top || (&version == top && !at_head.contains(top)))
+        let version = release_version(requested)?;
+        let highest = if version.pre.is_empty() {
+            highest_stable
+        } else {
+            tags.last()
+        };
+        if highest.is_some_and(|top| &version < top)
+            || (tags.contains(&version) && !at_head.contains(&version))
         {
             return Err(format!(
                 "v{version} is older than the latest tag or belongs to another commit"
@@ -48,10 +54,10 @@ fn choose(
         }
         return Ok(version);
     }
-    if let Some(version) = at_head.last().filter(|version| Some(*version) == highest) {
+    if let Some(version) = highest_stable.filter(|version| at_head.contains(*version)) {
         return Ok(version.clone());
     }
-    match highest {
+    match highest_stable {
         None => Ok(Version::new(1, 0, 0)),
         Some(version) => Ok(Version::new(
             version.major,
@@ -73,18 +79,23 @@ fn prepare() -> Result<()> {
         &env::var("REQUESTED_VERSION").unwrap_or_default(),
     )?;
     let sha = git(&["rev-parse", "HEAD"])?;
-    let previous = tags.range(..version.clone()).rev().find(|tag| {
-        Command::new("git")
-            .args(["merge-base", "--is-ancestor", &format!("v{tag}"), "HEAD"])
-            .output()
-            .is_ok_and(|out| out.status.success())
-    });
+    let previous = tags
+        .range(..version.clone())
+        .rev()
+        .filter(|tag| !version.pre.is_empty() || tag.pre.is_empty())
+        .find(|tag| {
+            Command::new("git")
+                .args(["merge-base", "--is-ancestor", &format!("v{tag}"), "HEAD"])
+                .output()
+                .is_ok_and(|out| out.status.success())
+        });
     let range = previous.map_or("HEAD".to_owned(), |tag| format!("v{tag}..HEAD"));
     let log = git(&["log", "--format=- `%h` %s", &range, "--"])?;
     let mut output = fs::OpenOptions::new()
         .append(true)
         .open(env::var_os("GITHUB_OUTPUT").ok_or("missing GITHUB_OUTPUT")?)?;
-    writeln!(output, "version={version}\ntag=v{version}\nsha={sha}\nchangelog<<TERM_{sha}\n## Termian {version}\n\n{log}\nTERM_{sha}")?;
+    let prerelease = !version.pre.is_empty();
+    writeln!(output, "version={version}\ntag=v{version}\nsha={sha}\nprerelease={prerelease}\nchangelog<<TERM_{sha}\n## Termian {version}\n\n{log}\nTERM_{sha}")?;
     Ok(())
 }
 
@@ -188,7 +199,7 @@ fn sign_assets(
 }
 
 fn publish(dir: &Path) -> Result<()> {
-    let version = stable(&env::var("TERMIAN_RELEASE_VERSION")?)?;
+    let version = release_version(&env::var("TERMIAN_RELEASE_VERSION")?)?;
     let repository = env::var("GITHUB_REPOSITORY")?;
     if !repository.split_once('/').is_some_and(|(owner, repo)| {
         [owner, repo].iter().all(|part| {
@@ -238,7 +249,7 @@ mod tests {
     #[test]
     fn signed_packages_use_the_client_format() {
         let dir = tempfile::tempdir().unwrap();
-        let version = Version::new(1, 2, 3);
+        let version = Version::parse("1.2.3-beta.1").unwrap();
         let files = packages(&version);
         let pair = minisign::KeyPair::generate_unencrypted_keypair().unwrap();
         let public = minisign_verify::PublicKey::from_base64(&pair.pk.to_base64()).unwrap();
@@ -269,7 +280,7 @@ mod tests {
                 minisign_verify::Signature::decode(std::str::from_utf8(&decoded).unwrap()).unwrap();
             assert_eq!(
                 signature.trusted_comment().split('\t').last(),
-                Some("version:1.2.3")
+                Some("version:1.2.3-beta.1")
             );
             public.verify(package_bytes, &signature, true).unwrap();
         }
@@ -279,6 +290,13 @@ mod tests {
     fn release_version_respects_existing_tags() {
         let tags = tagged("nightly\nv1.0.9\nv1.0.12\nv2.0.0-rc.1\n");
         let untagged = BTreeSet::new();
+        assert!(choose(&tags, &untagged, "2.0.0-rc.1").is_err());
+        assert!(choose(&tags, &untagged, "2.0.0-beta.9").is_err());
+        assert!(choose(&tags, &untagged, "2.0.0+build.1").is_err());
+        assert_eq!(
+            choose(&tags, &untagged, "2.0.0-rc.2").unwrap(),
+            Version::parse("2.0.0-rc.2").unwrap()
+        );
         assert_eq!(
             choose(&tags, &untagged, "").unwrap(),
             Version::new(1, 0, 13)

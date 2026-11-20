@@ -1,7 +1,7 @@
 //! Automatic updates from GitHub Releases. Packages in `latest.json` carry
 //! a minisign signature bound to the version in the signed comment.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     io::Read,
     path::{Path, PathBuf},
@@ -19,6 +19,14 @@ pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 const PROGRESS_STEP: u64 = 256 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Channel {
+    #[default]
+    Latest,
+    PreRelease,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum State {
@@ -72,7 +80,7 @@ impl Status {
             },
             State::Installed => format!("{version} загружена и будет установлена при перезапуске. Открытые SSH-сессии при перезапуске закроются."),
             State::Error => format!("Не удалось проверить или загрузить обновление.{checked}"),
-            State::Idle if self.checked_at.is_some() => format!("Установлена последняя версия.{checked}"),
+            State::Idle if self.checked_at.is_some() => format!("В выбранном канале нет более новой версии.{checked}"),
             State::Idle => "Обновления проверяются автоматически через 20 секунд после запуска и затем каждые 6 часов.".into(),
         }
     }
@@ -99,6 +107,8 @@ pub struct Release {
     #[serde(default)]
     draft: bool,
     #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
     assets: Vec<Asset>,
 }
 
@@ -108,21 +118,20 @@ struct Asset {
     browser_download_url: String,
 }
 
-/// The manifest of the highest stable version above `current`, if any.
-/// Releases are published as prereleases, which `/releases/latest` skips.
-pub fn newest_manifest(releases: Vec<Release>, current: &semver::Version) -> Option<url::Url> {
+fn newest_manifest(releases: Vec<Release>, current: &semver::Version, channel: Channel) -> Option<(semver::Version, url::Url)> {
+    let prerelease = channel == Channel::PreRelease;
     releases
         .into_iter()
-        .filter(|release| !release.draft)
+        .filter(|release| !release.draft && release.prerelease == prerelease)
         .filter_map(|release| {
             let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
             let asset = release.assets.into_iter().find(|asset| asset.name == MANIFEST_ASSET)?;
             let url = url::Url::parse(&asset.browser_download_url).ok()?;
-            (version.pre.is_empty() && &version > current && url.scheme() == "https" && url.host_str() == Some("github.com"))
+            (version.pre.is_empty() != prerelease && version.build.is_empty() && &version > current
+                && url.scheme() == "https" && url.host_str() == Some("github.com"))
                 .then_some((version, url))
         })
         .max_by(|a, b| a.0.cmp(&b.0))
-        .map(|(_, url)| url)
 }
 
 #[derive(Deserialize)]
@@ -207,27 +216,51 @@ pub fn verify(bytes: &[u8], signature: &str, version: &str, expected_file: &str)
     }
 }
 
-fn get(url: &str) -> Result<ureq::Response, String> {
+fn get(url: &str) -> Result<ureq::Response, ureq::Error> {
     ureq::get(url)
         .timeout(REQUEST_TIMEOUT)
         .set("accept", "application/vnd.github+json")
         .set("user-agent", "termian-updater")
         .call()
-        .map_err(|error| error.to_string())
 }
 
-/// The newest package for this build above `current`, if any.
-pub fn check(current: &semver::Version) -> Result<Option<Package>, String> {
+fn release_json<T: serde::de::DeserializeOwned>(response: ureq::Response) -> Result<T, String> {
+    let body = response.into_string().map_err(|error| format!("GitHub releases: {error}"))?;
+    serde_json::from_str(&body).map_err(|error| format!("GitHub releases: {error}"))
+}
+
+pub fn check(current: &semver::Version, channel: Channel) -> Result<Option<Package>, String> {
     let Some(target) = target() else { return Err("Автоматические обновления не поддерживаются на этой платформе".into()) };
-    let body = get(&format!("https://api.github.com/repos/{REPOSITORY}/releases?per_page=30"))
-        .and_then(|response| response.into_string().map_err(|error| error.to_string()))
-        .map_err(|error| format!("GitHub releases: {error}"))?;
-    let releases: Vec<Release> = serde_json::from_str(&body).map_err(|error| format!("GitHub releases: {error}"))?;
-    let Some(manifest) = newest_manifest(releases, current) else { return Ok(None) };
-    let manifest = get(manifest.as_str())
-        .and_then(|response| response.into_string().map_err(|error| error.to_string()))
-        .map_err(|error| format!("latest.json: {error}"))?;
-    select_package(&manifest, target, current)
+    let base = format!("https://api.github.com/repos/{REPOSITORY}/releases");
+    let mut releases = Vec::new();
+    match channel {
+        Channel::Latest => match get(&format!("{base}/latest")) {
+            Ok(response) => releases.push(release_json(response)?),
+            Err(ureq::Error::Status(404, _)) => return Ok(None),
+            Err(error) => return Err(format!("GitHub releases: {error}")),
+        },
+        Channel::PreRelease => {
+            for page in 1..=5 {
+                let response = get(&format!("{base}?per_page=100&page={page}"))
+                    .map_err(|error| format!("GitHub releases: {error}"))?;
+                let has_next = response.header("Link").is_some_and(|links| links.contains("rel=\"next\""));
+                releases.extend(release_json::<Vec<Release>>(response)?);
+                if !has_next {
+                    break;
+                }
+            }
+        }
+    }
+    let Some((version, manifest)) = newest_manifest(releases, current, channel) else { return Ok(None) };
+    let manifest = get(manifest.as_str()).map_err(|error| format!("latest.json: {error}"))?
+        .into_string().map_err(|error| format!("latest.json: {error}"))?;
+    package_for_release(&manifest, target, current, &version).map(Some)
+}
+
+fn package_for_release(manifest: &str, target: &str, current: &semver::Version, version: &semver::Version) -> Result<Package, String> {
+    select_package(manifest, target, current)?
+        .filter(|package| package.version == version.to_string())
+        .ok_or_else(|| format!("latest.json: версия пакета не совпадает с тегом v{version}"))
 }
 
 /// Download and verify `package`; `progress(downloaded, total)` runs every 256 KB.
@@ -403,10 +436,11 @@ mod tests {
         assert!(verify(data, KEY_CHECK_SIGNATURE, "1.0.0", "other.exe").is_err());
     }
 
-    fn release(tag: &str, draft: bool, manifest: Option<&str>) -> Release {
+    fn release(tag: &str, prerelease: bool, draft: bool, manifest: Option<&str>) -> Release {
         Release {
             tag_name: tag.into(),
             draft,
+            prerelease,
             assets: manifest
                 .map(|url| vec![Asset { name: MANIFEST_ASSET.into(), browser_download_url: url.into() }])
                 .unwrap_or_default(),
@@ -414,22 +448,32 @@ mod tests {
     }
 
     #[test]
-    fn newest_signed_release_above_current_is_chosen() {
+    fn updates_stay_in_the_selected_channel() {
         let current = semver::Version::new(1, 2, 0);
-        let url = |tag: &str| format!("https://github.com/hahatulk/termius/releases/download/{tag}/latest.json");
-        let releases = vec![
-            release("v1.1.0", false, Some(&url("v1.1.0"))),
-            release("v1.4.0", true, Some(&url("v1.4.0"))),
-            release("v1.3.0", false, Some(&url("v1.3.0"))),
-            release("v1.3.5", false, None),
-            release("v2.0.0-beta.1", false, Some(&url("v2.0.0-beta.1"))),
-            release("v1.3.1", false, Some("https://example.com/latest.json")),
-            release("nightly", false, Some(&url("nightly"))),
+        let url = |tag: &str| format!("https://github.com/o/r/releases/download/{tag}/latest.json");
+        let releases = || vec![
+            release("v1.1.0", false, false, Some(&url("v1.1.0"))),
+            release("v1.4.0", false, true, Some(&url("v1.4.0"))),
+            release("v1.3.0", false, false, Some(&url("v1.3.0"))),
+            release("v1.3.5", false, false, None),
+            release("v1.8.0", true, false, Some(&url("v1.8.0"))),
+            release("v2.0.0-beta.2", true, false, Some(&url("v2.0.0-beta.2"))),
+            release("v2.0.0-beta.10", true, false, Some(&url("v2.0.0-beta.10"))),
+            release("v3.0.0-beta.1", true, true, Some(&url("v3.0.0-beta.1"))),
+            release("v4.0.0-beta.1", false, false, Some(&url("v4.0.0-beta.1"))),
+            release("v1.3.1", false, false, Some("https://example.com/latest.json")),
+            release("nightly", true, false, Some(&url("nightly"))),
         ];
-        assert_eq!(newest_manifest(releases, &current).unwrap().as_str(), url("v1.3.0"));
-        assert!(newest_manifest(vec![release("v1.2.0", false, Some(&url("v1.2.0")))], &current).is_none());
-        let body = r#"[{"tag_name":"v1.3.0","draft":false,"prerelease":true,"assets":[{"name":"latest.json","browser_download_url":"https://github.com/o/r/releases/download/v1.3.0/latest.json","size":1}]}]"#;
-        assert!(newest_manifest(serde_json::from_str(body).unwrap(), &current).is_some(), "GitHub API shape");
+        let find = |channel, installed: &semver::Version| {
+            newest_manifest(releases(), installed, channel).map(|(version, _)| version.to_string())
+        };
+        assert_eq!(find(Channel::Latest, &current).as_deref(), Some("1.3.0"));
+        assert_eq!(find(Channel::PreRelease, &current).as_deref(), Some("2.0.0-beta.10"));
+        let beta = semver::Version::parse("2.0.0-beta.10").unwrap();
+        assert_eq!(find(Channel::Latest, &beta), None);
+        assert_eq!(find(Channel::PreRelease, &beta), None);
+        let body = r#"{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[{"name":"latest.json","browser_download_url":"https://github.com/o/r/releases/download/v2.0.0/latest.json"}]}"#;
+        assert!(newest_manifest(vec![serde_json::from_str(body).unwrap()], &beta, Channel::Latest).is_some());
     }
 
     #[test]
@@ -441,6 +485,10 @@ mod tests {
         let current = semver::Version::new(1, 2, 0);
         let mac = select_package(manifest, "darwin-aarch64", &current).unwrap().unwrap();
         assert_eq!((mac.version.as_str(), mac.signature.as_str()), ("1.3.0", "c2ln"));
+        let beta = semver::Version::parse("1.3.0-beta.1").unwrap();
+        assert!(package_for_release(manifest, "darwin-aarch64", &current, &beta).is_err());
+        let beta_manifest = manifest.replace("1.3.0", "1.3.0-beta.1");
+        assert_eq!(package_for_release(&beta_manifest, "darwin-aarch64", &current, &beta).unwrap().version, beta.to_string());
         assert!(mac.url.as_str().ends_with("mac-arm64.app.tar.gz"));
         let windows = select_package(manifest, "windows-x86_64", &current).unwrap().unwrap();
         assert!(windows.url.as_str().ends_with("win-x64.exe"), "portable, not the installer");
@@ -509,7 +557,7 @@ mod tests {
         status.total = None;
         assert_eq!(status.text(time), "Загрузка Termian 1.3.0: 3.0 МБ");
         status = Status { state: State::Idle, checked_at: Some(1), ..Status::default() };
-        assert_eq!(status.text(time), "Установлена последняя версия. Проверено: 13.11.2026, 10:00.");
+        assert_eq!(status.text(time), "В выбранном канале нет более новой версии. Проверено: 13.11.2026, 10:00.");
         status.state = State::Installed;
         assert!(status.text(time).starts_with("Новая версия загружена"));
         assert!(Status { state: State::Disabled, ..Status::default() }.text(time).contains("TERMIAN_DISABLE_UPDATES"));
@@ -536,7 +584,7 @@ mod live {
     #[test]
     #[ignore = "network: GitHub releases"]
     fn published_package_verifies_with_the_release_key() {
-        let package = super::check(&semver::Version::new(0, 0, 1)).unwrap().expect("a published release with latest.json");
+        let package = super::check(&semver::Version::new(0, 0, 1), super::Channel::Latest).unwrap().expect("a published release with latest.json");
         let bytes = super::download(&package, |_, _| {}).unwrap();
         eprintln!("verified {} ({} bytes) from {}", package.version, bytes.len(), package.url);
         assert!(super::verify(&bytes[1..], &package.signature, &package.version, &package.expected_file).is_err());
