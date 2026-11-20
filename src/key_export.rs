@@ -104,11 +104,17 @@ async fn run(target: SshTarget, script: String, answers: UnboundedReceiver<Answe
     prompter.lock().await.event(LoginEvent::Stage(Stage::Ready));
     let mut channel = handle.channel_open_session().await.map_err(|e| e.to_string())?;
     channel.exec(true, script).await.map_err(|e| e.to_string())?;
+    const MAX_OUTPUT: usize = 16 * 1024;
     let mut output = Vec::new();
+    let mut truncated = false;
     let mut status = None;
     while let Some(message) = channel.wait().await {
         match message {
-            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => output.extend_from_slice(&data),
+            ChannelMsg::Data { data } | ChannelMsg::ExtendedData { data, .. } => {
+                let keep = data.len().min(MAX_OUTPUT - output.len());
+                output.extend_from_slice(&data[..keep]);
+                truncated |= keep < data.len();
+            }
             ChannelMsg::ExitStatus { exit_status } => status = Some(exit_status),
             ChannelMsg::Close => break,
             _ => {}
@@ -117,7 +123,10 @@ async fn run(target: SshTarget, script: String, answers: UnboundedReceiver<Answe
     match status {
         Some(0) => Ok(()),
         status => {
-            let output = String::from_utf8_lossy(&output).trim().to_owned();
+            let mut output = String::from_utf8_lossy(&output).trim().to_owned();
+            if truncated {
+                output.push_str("\n[Output truncated]");
+            }
             Err(if output.is_empty() { format!("The export script failed (exit status {}).", status.map_or("unknown".into(), |s| s.to_string())) } else { output })
         }
     }

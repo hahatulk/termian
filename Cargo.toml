@@ -21,6 +21,7 @@ serde_json = "1.0.154"
 serde = { version = "1", features = ["derive"] }
 getrandom = "0.2"
 scrypt = { version = "0.11", default-features = false }
+subtle = "2"
 aes-gcm = "0.10"
 ureq = "2"
 url = "2"
@@ -30,7 +31,7 @@ zeroize = "1"
 tempfile = "3.27.0"
 alacritty_terminal = "0.26.0"
 portable-pty = "0.9"
-russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
+russh = { version = "0.65.2", default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "sync", "macros", "time", "io-util", "fs"] }
 dirs = "7.0.0"
 futures = "0.3.34"
@@ -43,6 +44,8 @@ semver = "1"
 flate2 = "1"
 tar = "0.4"
 regex = "1"
+hmac = "0.13"
+sha1 = "0.11"
 rand10 = { package = "rand", version = "0.10" }
 
 [dev-dependencies]
@@ -55,6 +58,9 @@ raw-window-handle = "0.6.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell", "Win32_System_Registry", "Win32_UI_WindowsAndMessaging"] }
 
 
 # scrypt (cloud snapshots) is unbearably slow unoptimised; tests and dev builds use it.

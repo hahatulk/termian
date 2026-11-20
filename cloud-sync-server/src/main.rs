@@ -46,6 +46,8 @@ struct AppState {
     limiter: AuthLimiter,
     /// Wrong encryption passwords entered in the local web panel.
     panel_limiter: AuthLimiter,
+    panel_tokens: AuthLimiter,
+    panel_decrypt: Arc<tokio::sync::Semaphore>,
     started: Instant,
     /// Last successful snapshot download by a client (since start).
     last_download: Mutex<Option<SystemTime>>,
@@ -58,7 +60,9 @@ impl AppState {
             cfg,
             write_lock: Mutex::new(()),
             limiter,
+            panel_tokens: AuthLimiter::new(panel_limiter.free_failures, panel_limiter.base_lockout, false),
             panel_limiter,
+            panel_decrypt: Arc::new(tokio::sync::Semaphore::new(1)),
             started: Instant::now(),
             last_download: Mutex::new(None),
         }
@@ -202,7 +206,7 @@ async fn main() {
         let panel_app = panel::make_panel(state.clone());
         let panel_listener = tokio::net::TcpListener::bind(&panel_addr).await.expect("bind panel");
         tokio::spawn(async move {
-            axum::serve(panel_listener, panel_app).await.expect("panel server");
+            axum::serve(panel_listener, panel_app.into_make_service_with_connect_info::<SocketAddr>()).await.expect("panel server");
         });
     }
     let retention = state.clone();
@@ -446,7 +450,8 @@ fn store_snapshot(
         .map_err(|_| io::Error::other("write lock poisoned"))?;
     let cfg = active_config(&state.cfg)?;
     let old = current(&cfg)?;
-    if (create_only && old.is_some()) || !if_match_satisfied(condition, old.as_deref()) {
+    if (storage_generation(state, &cfg) != INITIAL_GENERATION && !create_only && condition.is_none_or(|tag| tag == "*"))
+        || (create_only && old.is_some()) || !if_match_satisfied(condition, old.as_deref()) {
         return Err(StoreError::Precondition);
     }
     if let Some(previous) = old.as_deref() {
@@ -696,6 +701,12 @@ mod tests {
             .unwrap()
     }
 
+    fn panel_export(host: &str, passphrase: &str) -> axum::http::Request<Body> {
+        let mut request = panel_request("/api/export", host, passphrase);
+        request.headers_mut().insert(TOKEN_HEADER, TOKEN.parse().unwrap());
+        request
+    }
+
     async fn json_body(response: Response) -> serde_json::Value {
         serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
     }
@@ -728,7 +739,9 @@ mod tests {
         assert_eq!(hosts["count"], 2);
         assert_eq!(body["snapshot"]["settingsCount"], 1);
 
-        let response = panel.clone().oneshot(panel_request("/api/export", "localhost:8081", "correct horse battery")).await.unwrap();
+        let response = panel.clone().oneshot(panel_request("/api/export", host, "correct horse battery")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = panel.clone().oneshot(panel_export("localhost:8081", "correct horse battery")).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert!(response.headers()[header::CONTENT_DISPOSITION].to_str().unwrap().contains("attachment"));
         assert_eq!(json_body(response).await, snapshot);
@@ -743,7 +756,7 @@ mod tests {
             request = request.header("x-termian-token", token);
         }
         request.body(Body::from(serde_json::json!({
-            "passphrase": old, "new_passphrase": "new test password",
+            "passphrase": old, "new_passphrase": "7",
             "revision": revision, "confirmed": true,
         }).to_string())).unwrap()
     }
@@ -789,7 +802,7 @@ mod tests {
         let log_path = logs_dir(&active).join("test.log");
         let stored = fs::read(&log_path).unwrap();
         assert_eq!(fs::metadata(&log_path).unwrap().modified().unwrap(), modified);
-        assert_eq!(panel::open_envelope(&stored, "new test password").unwrap(), log);
+        assert_eq!(panel::open_envelope(&stored, "7").unwrap(), log);
         assert!(panel::open_envelope(&stored, "").is_err());
 
         let sync = make_app(restarted.clone());
@@ -807,7 +820,12 @@ mod tests {
         log.headers_mut().insert(LOG_GENERATION_HEADER, generation);
         assert_eq!(sync.clone().oneshot(log).await.unwrap().status(), StatusCode::OK);
         let bytes = downloaded.into_body().collect().await.unwrap().to_bytes();
-        assert_eq!(panel::open_envelope(&bytes, "new test password").unwrap(), snapshot);
+        assert_eq!(panel::open_envelope(&bytes, "7").unwrap(), snapshot);
+        let unconditional = request("PUT", Body::from(original.clone()));
+        assert_eq!(sync.clone().oneshot(unconditional).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+        let mut wildcard = request("PUT", Body::from(original.clone()));
+        wildcard.headers_mut().insert(header::IF_MATCH, "*".parse().unwrap());
+        assert_eq!(sync.clone().oneshot(wildcard).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
         let mut stale_upload = request("PUT", Body::from(original));
         stale_upload.headers_mut().insert(header::IF_MATCH, etag(&revision).parse().unwrap());
         assert_eq!(sync.oneshot(stale_upload).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
@@ -831,10 +849,45 @@ mod tests {
             let panel = panel::make_panel(shared);
             let response = panel.clone().oneshot(panel_request("/api/unlock", host, passphrase)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "passphrase length: {}", passphrase.len());
-            let response = panel.oneshot(panel_request("/api/export", host, passphrase)).await.unwrap();
+            let response = panel.clone().oneshot(panel_request("/api/export", host, passphrase)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let response = panel.oneshot(panel_export(host, passphrase)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(json_body(response).await, snapshot);
         }
+    }
+
+    #[tokio::test]
+    async fn panel_limits_token_failures_across_export_and_rotation() {
+        let dir = TempDir::new().unwrap();
+        let shared = state(dir.path(), 1024 * 1024);
+        let panel = panel::make_panel(shared.clone());
+        let host = "localhost";
+        for _ in 0..shared.panel_tokens.free_failures {
+            let mut request = panel_export(host, "");
+            request.headers_mut().insert(TOKEN_HEADER, "incorrect".parse().unwrap());
+            assert_eq!(panel.clone().oneshot(request).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        }
+        let blocked = panel.clone().oneshot(panel_request("/api/export", host, "")).await.unwrap();
+        assert_eq!(blocked.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(blocked.headers().contains_key(header::RETRY_AFTER));
+        assert_eq!(panel.clone().oneshot(panel_export(host, "")).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+        let rotation = rotation_request("revision", "", Some(TOKEN));
+        assert_eq!(panel.oneshot(rotation).await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn panel_defers_decryption_when_the_slot_is_occupied() {
+        let dir = TempDir::new().unwrap();
+        let shared = state(dir.path(), 1024 * 1024);
+        let panel = panel::make_panel(shared.clone());
+        let slot = shared.panel_decrypt.clone().try_acquire_owned().unwrap();
+        let response = panel.clone().oneshot(panel_request("/api/unlock", "localhost", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers()[header::RETRY_AFTER], "1");
+        drop(slot);
+        let response = panel.oneshot(panel_request("/api/unlock", "localhost", "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
@@ -845,10 +898,10 @@ mod tests {
         make_app(shared.clone()).oneshot(request("PUT", Body::from(seal(&snapshot, "correct horse battery")))).await.unwrap();
         let panel = panel::make_panel(shared);
         for passphrase in ["", "wrong", "wrong"] {
-            let response = panel.clone().oneshot(panel_request("/api/export", "127.0.0.1:8081", passphrase)).await.unwrap();
+            let response = panel.clone().oneshot(panel_export("127.0.0.1:8081", passphrase)).await.unwrap();
             assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         }
-        let response = panel.clone().oneshot(panel_request("/api/export", "127.0.0.1:8081", "wrong")).await.unwrap();
+        let response = panel.clone().oneshot(panel_export("127.0.0.1:8081", "wrong")).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         let response = panel.clone().oneshot(panel_request("/api/unlock", "127.0.0.1:8081", "correct horse battery")).await.unwrap();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS, "lockout applies to the right password too");

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use gpui::{
-    div, prelude::*, px, rgb, rgba, size, App, Bounds, Context, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, PathPromptOptions, SharedString, Stateful, Subscription,
+    anchored, div, prelude::*, px, rgb, rgba, size, svg, App, Bounds, Context, Corner, Div, Entity, FocusHandle, FontWeight, KeyDownEvent, MouseButton, PathPromptOptions, Pixels, Point, SharedString, Stateful, Subscription,
     TitlebarOptions, Window, WindowBounds, WindowHandle, WindowOptions,
 };
 use termian_native::self_cloud::{self, Status};
@@ -128,6 +128,9 @@ impl Shell {
         // once this update of the shell is over.
         cx.spawn(async move |this, cx| {
             let opened = cx.update(|cx| {
+                if shell.read(cx).privacy_locked() {
+                    return Ok(None);
+                }
                 let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
                 let options = WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -157,16 +160,16 @@ impl Shell {
                             _observe: observe,
                         }
                     })
-                })
+                }).map(Some)
             });
             let _ = this.update(cx, |shell, cx| match opened {
-                Ok(Ok(handle)) => {
+                Ok(Ok(Some(handle))) => {
                     shell.settings_window = Some(handle);
                     // A fresh status, as the legacy window asks for one when it opens.
                     shell.check_cloud(false, cx);
                 }
                 Ok(Err(error)) => shell.vault_error = Some(format!("Could not open Settings: {error}")),
-                Err(_) => {}
+                Ok(Ok(None)) | Err(_) => {}
             });
         })
         .detach();
@@ -183,13 +186,7 @@ impl Shell {
     }
 }
 
-/// The application menu (legacy `buildMacApplicationMenu`) and its keys.
-pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
-    use gpui::{Menu, MenuItem};
-    // Keys come from Settings → Shortcuts (`shortcut_actions::bind`); on
-    // Windows the scheme's Ctrl+1 / Ctrl+2 reach Vaults and SFTP, as in legacy.
-    // Menu actions arrive while the focused window is being updated, so the
-    // main window is reached once that dispatch is over.
+pub fn install_actions(main: WindowHandle<Shell>, cx: &mut App) {
     cx.on_action(move |_: &OpenSettings, cx| {
         cx.defer(move |cx| {
             let _ = main.update(cx, |shell, _, cx| shell.open_settings(None, cx));
@@ -215,13 +212,90 @@ pub fn install_menus(main: WindowHandle<Shell>, cx: &mut App) {
         });
     });
     cx.on_action(|_: &Quit, cx| cx.quit());
-    let mut items = vec![MenuItem::action("Vaults", OpenVaults), MenuItem::action("SFTP", OpenSftp), MenuItem::action("Settings…", OpenSettings)];
-    // The protected folders are a macOS matter, as in legacy.
-    if cfg!(target_os = "macos") {
-        items.push(MenuItem::action("Доступ к файлам…", OpenFileAccess));
+}
+
+pub struct AppMenu {
+    at: Point<Pixels>,
+    opener: Option<FocusHandle>,
+}
+
+impl Shell {
+    pub fn render_app_menu_button(&self, cx: &mut Context<Self>) -> Div {
+        let anchor = std::rc::Rc::new(std::cell::Cell::new(None));
+        let click_anchor = anchor.clone();
+        div()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(bounds) = children.first() {
+                    anchor.set(Some(Point { x: bounds.right(), y: bounds.bottom() + px(4.) }));
+                }
+            })
+            .child(
+                div().id("app-menu-button").size(px(30.)).flex_none().flex().items_center()
+                    .justify_center().rounded_md().icon_feedback()
+                    .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Application menu".into())).into())
+                    .child(svg().path(super::assets::icon("dots")).w(px(16.)).h(px(4.)).text_color(rgb(theme::TEXT)))
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        if let Some(at) = click_anchor.get() {
+                            shell.app_menu = Some(AppMenu { at, opener: window.focused(cx) });
+                            window.focus(&shell.app_menu_focus);
+                            cx.notify();
+                        }
+                    })),
+            )
     }
-    items.extend([MenuItem::separator(), MenuItem::action("Quit termian", Quit)]);
-    cx.set_menus(vec![Menu { name: "termian".into(), items }]);
+
+    fn close_app_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(menu) = self.app_menu.take() {
+            window.focus(menu.opener.as_ref().unwrap_or(&self.root_focus));
+            cx.notify();
+        }
+    }
+
+    pub fn render_app_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
+        let at = self.app_menu.as_ref()?.at;
+        let mut items: Vec<(&str, Box<dyn gpui::Action>)> = vec![
+            ("Settings…", Box::new(OpenSettings)),
+            ("Vaults", Box::new(OpenVaults)),
+            ("SFTP", Box::new(OpenSftp)),
+        ];
+        if cfg!(target_os = "macos") {
+            items.push(("Доступ к файлам…", Box::new(OpenFileAccess)));
+        }
+        items.push(("Quit Termian", Box::new(Quit)));
+        let panel = super::host_editor::menu_panel("app-menu")
+            .tab_group()
+            .track_focus(&self.app_menu_focus)
+            .on_key_down(cx.listener(|shell, event: &KeyDownEvent, window, cx| {
+                let scope = Some(&shell.app_menu_focus);
+                if super::keyboard::tab(event, window, cx, scope) || event.keystroke.modifiers.modified() {
+                    return;
+                }
+                match event.keystroke.key.as_str() {
+                    "escape" => {
+                        shell.close_app_menu(window, cx);
+                        cx.stop_propagation();
+                    }
+                    "down" => super::keyboard::step(window, cx, scope, false),
+                    "up" => super::keyboard::step(window, cx, scope, true),
+                    _ => {}
+                }
+            }))
+            .children(items.into_iter().enumerate().map(|(i, (label, action))| {
+                super::host_editor::menu_row(format!("app-menu-{i}"), label, false, false)
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        shell.close_app_menu(window, cx);
+                        window.dispatch_action(action.boxed_clone(), cx);
+                    }))
+            }));
+        Some(
+            div().id("app-menu-dismiss").absolute().inset_0().occlude()
+                .on_mouse_down(MouseButton::Left, cx.listener(|shell, _, window, cx| shell.close_app_menu(window, cx)))
+                .on_mouse_down(MouseButton::Right, cx.listener(|shell, _, window, cx| shell.close_app_menu(window, cx)))
+                .child(anchored().position(at).anchor(Corner::TopRight).snap_to_window()
+                    .child(super::motion::popover(panel, "app-menu-enter")))
+                .into_any_element(),
+        )
+    }
 }
 
 impl Shell {

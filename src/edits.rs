@@ -192,6 +192,7 @@ fn extension(file_name: &str) -> String {
 }
 
 /// Opens a file in its default app, or in `app` when given.
+#[cfg(not(windows))]
 pub fn open_path(path: &Path, app: Option<&Path>) -> Result<(), String> {
     let mut command = open_command(path, app);
     command.spawn().map(|_| ()).map_err(|e| format!("{}: {e}", path.display()))
@@ -207,20 +208,30 @@ fn open_command(path: &Path, app: Option<&Path>) -> std::process::Command {
     command
 }
 
-#[cfg(target_os = "windows")]
-fn open_command(path: &Path, app: Option<&Path>) -> std::process::Command {
-    match app {
-        Some(app) => {
-            let mut command = std::process::Command::new(app);
-            command.arg(path);
-            command
-        }
-        None => {
-            let mut command = std::process::Command::new("cmd");
-            command.args(["/C", "start", ""]).arg(path);
-            command
-        }
+#[cfg(windows)]
+pub fn open_path(path: &Path, app: Option<&Path>) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC};
+    if let Some(app) = app {
+        return std::process::Command::new(app).arg(path).spawn().map(|_| ()).map_err(|e| format!("{}: {e}", path.display()));
     }
+    let mut filename: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if filename.contains(&0) {
+        return Err("Invalid file name".into());
+    }
+    filename.push(0);
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_FLAG_NO_UI | SEE_MASK_NOASYNC,
+        lpVerb: windows_sys::core::w!("open"),
+        lpFile: filename.as_ptr(),
+        nShow: windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        ..Default::default()
+    };
+    if unsafe { ShellExecuteExW(&mut info) } == 0 {
+        return Err(format!("{}: {}", path.display(), std::io::Error::last_os_error()));
+    }
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

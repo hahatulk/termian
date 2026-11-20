@@ -3,7 +3,8 @@
 //! settled first ([`Resolver`]), then each item is copied as one transfer
 //! that reports [`Progress`] and waits for a [`Control`] when a file fails.
 
-use std::io::SeekFrom;
+use std::io::{self, SeekFrom};
+use std::path::{Component, Path};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,14 +40,20 @@ pub struct Item {
     pub is_dir: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Destination {
+    Create,
+    Merge,
+    Replace,
+}
+
 /// One item to copy once clashes are settled.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Planned {
     pub item: Item,
     /// Name in the destination folder.
     pub target: String,
-    /// Replace the whole target after copying.
-    pub replace: bool,
+    pub destination: Destination,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -102,7 +109,7 @@ impl Resolver {
                 };
                 self.plan(item, conflict);
             } else {
-                self.planned.push(Planned { target: item.name.clone(), item, replace: false });
+                self.planned.push(Planned { target: item.name.clone(), item, destination: Destination::Create });
             }
             self.next += 1;
         }
@@ -123,8 +130,8 @@ impl Resolver {
     fn plan(&mut self, item: Item, conflict: Conflict) {
         match conflict {
             Conflict::Skip => {}
-            Conflict::Replace => self.planned.push(Planned { target: item.name.clone(), item, replace: true }),
-            Conflict::Merge => self.planned.push(Planned { target: item.name.clone(), item, replace: false }),
+            Conflict::Replace => self.planned.push(Planned { target: item.name.clone(), item, destination: Destination::Replace }),
+            Conflict::Merge => self.planned.push(Planned { target: item.name.clone(), item, destination: Destination::Merge }),
             Conflict::Duplicate => {
                 let target = self.free_name(&item.name);
                 let lower = target.to_lowercase();
@@ -134,7 +141,7 @@ impl Resolver {
                     self.clashes.push(lower);
                     self.remaining += 1;
                 }
-                self.planned.push(Planned { item, target, replace: false });
+                self.planned.push(Planned { item, target, destination: Destination::Create });
             }
         }
     }
@@ -483,7 +490,7 @@ async fn scan(fs: &Fs, target: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part
             if !target.valid_name(&entry.name) {
                 return Err(at(&dir, "invalid destination file name"));
             }
-            if entry.is_dir && entry.is_link {
+            if entry.is_link && (entry.is_dir || matches!(fs, Fs::Local)) {
                 continue;
             }
             let child = if relative.is_empty() { entry.name.clone() } else { join(&relative, &entry.name) };
@@ -496,14 +503,112 @@ async fn scan(fs: &Fs, target: &Fs, root: &str, is_dir: bool) -> Result<Vec<Part
     Ok(parts)
 }
 
+struct LocalSource {
+    base: std::path::PathBuf,
+    #[cfg(unix)]
+    dir: std::fs::File,
+    #[cfg(windows)]
+    canonical: std::path::PathBuf,
+}
+
+impl LocalSource {
+    fn new(base: &Path) -> io::Result<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        Ok(Self {
+            base: base.into(),
+            #[cfg(unix)]
+            dir: std::fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY).open(base)?,
+            #[cfg(windows)]
+            canonical: base.canonicalize()?,
+        })
+    }
+
+    fn open(&self, path: &Path) -> io::Result<std::fs::File> {
+        let invalid = || io::Error::new(io::ErrorKind::InvalidInput, "source is not a regular file inside the selected directory");
+        let relative = path.strip_prefix(&self.base).map_err(|_| invalid())?;
+        if relative.as_os_str().is_empty() || relative.components().any(|p| !matches!(p, Component::Normal(_))) {
+            return Err(invalid());
+        }
+
+        #[cfg(unix)]
+        let file = {
+            use std::ffi::CString;
+            use std::os::fd::{AsRawFd, FromRawFd};
+            use std::os::unix::ffi::OsStrExt;
+            let mut dir = self.dir.try_clone()?;
+            let mut parts = relative.iter().peekable();
+            loop {
+                let part = parts.next().ok_or_else(invalid)?;
+                let name = CString::new(part.as_bytes()).map_err(|_| invalid())?;
+                let leaf = parts.peek().is_none();
+                let flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK
+                    | if leaf { 0 } else { libc::O_DIRECTORY };
+                let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
+                if fd < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let opened = unsafe { std::fs::File::from_raw_fd(fd) };
+                if leaf {
+                    break opened;
+                }
+                dir = opened;
+            }
+        };
+
+        #[cfg(windows)]
+        let file = {
+            use std::ffi::OsString;
+            use std::os::windows::{ffi::OsStringExt, fs::OpenOptionsExt, io::AsRawHandle};
+            use windows_sys::Win32::Storage::FileSystem::{GetFinalPathNameByHandleW, FILE_FLAG_OPEN_REPARSE_POINT};
+            let mut expected = self.canonical.clone();
+            for part in relative {
+                expected.push(part);
+                if is_reparse_point(&std::fs::symlink_metadata(&expected)?) {
+                    return Err(invalid());
+                }
+            }
+            let file = std::fs::OpenOptions::new().read(true).custom_flags(FILE_FLAG_OPEN_REPARSE_POINT).open(&expected)?;
+            let handle = file.as_raw_handle();
+            let count = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
+            if count == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut buf = vec![0u16; count as usize];
+            let written = unsafe { GetFinalPathNameByHandleW(handle, buf.as_mut_ptr(), count, 0) };
+            if written == 0 || written >= count {
+                return Err(invalid());
+            }
+            if expected != Path::new(&OsString::from_wide(&buf[..written as usize]))
+                || is_reparse_point(&file.metadata()?)
+            {
+                return Err(invalid());
+            }
+            file
+        };
+
+        if !file.metadata()?.is_file() {
+            return Err(invalid());
+        }
+        Ok(file)
+    }
+}
+
+async fn open_source(source: &Fs, local: Option<&LocalSource>, path: &str) -> Result<Reader, String> {
+    if let Some(local) = local {
+        let file = local.open(Path::new(path)).map_err(|e| at(path, e))?;
+        Ok(Box::new(tokio::fs::File::from_std(file)))
+    } else {
+        source.open(path).await
+    }
+}
+
 /// Do not append to a partial that no longer matches the source.
-async fn resume_offset(source: &Fs, target: &Fs, from: &str, to: &str, expected: u64) -> Result<u64, String> {
-    let source_size = source.size(from).await?.0;
+async fn resume_offset(original: &mut Reader, source_size: u64, target: &Fs, from: &str, to: &str, expected: u64) -> Result<u64, String> {
     let offset = target.size(to).await?.0;
     if source_size != expected || offset > source_size {
         return Err(format!("{to}: source or partial file size changed"));
     }
-    let mut original = source.open(from).await?;
     let mut partial = target.open(to).await?;
     let mut left = offset;
     let mut a = vec![0; CHUNK];
@@ -531,6 +636,7 @@ const CHUNK: usize = 256 * 1024;
 
 struct Run<'a, E: Fn(TransferEvent)> {
     source: &'a Fs,
+    local: Option<LocalSource>,
     target: &'a Fs,
     controls: &'a mut UnboundedReceiver<Control>,
     emit: &'a E,
@@ -554,10 +660,11 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
     }
 
     async fn copy_file(&mut self, from: &str, to: &str, size: u64, mode: Option<u32>, started: &mut bool) -> Result<(), Stop> {
+        let mut reader = open_source(self.source, self.local.as_ref(), from).await.map_err(Stop::Error)?;
         let offset = if *started {
-            resume_offset(self.source, self.target, from, to, size).await.map_err(Stop::Error)?
+            let source_size = self.source.size(from).await.map_err(Stop::Error)?.0;
+            resume_offset(&mut reader, source_size, self.target, from, to, size).await.map_err(Stop::Error)?
         } else { 0 };
-        let mut reader = self.source.open(from).await.map_err(Stop::Error)?;
         reader.seek(SeekFrom::Start(offset)).await.map_err(|e| Stop::Error(at(from, e)))?;
         let mut writer = if *started {
             self.target.open_write(to).await.map_err(Stop::Error)?
@@ -579,6 +686,9 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
                 if read == 0 {
                     break;
                 }
+                if read as u64 > size.saturating_sub(copied) {
+                    return Err(Stop::Error(at(from, "source exceeds the declared file size")));
+                }
                 writer.write_all(&buffer[..read]).await.map_err(|e| Stop::Error(format!("{to}: {e}")))?;
                 copied += read as u64;
                 self.progress.bytes_done += read as u64;
@@ -596,7 +706,7 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
         }
         result?;
         if let Some(mode) = mode {
-            self.target.set_mode(to, mode).await;
+            self.target.set_mode(to, mode & 0o777).await;
         }
         Ok(())
     }
@@ -608,16 +718,54 @@ impl<E: Fn(TransferEvent)> Run<'_, E> {
     }
 }
 
-async fn publish(target: &Fs, from: &str, to: &str, backup: &str, replace: bool) -> Result<(), String> {
-    let Some(is_dir) = target.kind(to).await? else {
-        return target.rename(from, to).await;
-    };
-    if !replace {
-        return Err(at(to, "destination appeared during the transfer"));
+fn move_new(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        use std::{ffi::CString, os::unix::ffi::OsStrExt};
+        let from = CString::new(from.as_os_str().as_bytes())?;
+        let to = CString::new(to.as_os_str().as_bytes())?;
+        #[cfg(target_os = "macos")]
+        let result = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        #[cfg(target_os = "linux")]
+        let result = unsafe { libc::renameat2(libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) };
+        if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
-    target.rename(to, backup).await?;
-    if let Err(error) = target.rename(from, to).await {
-        if let Err(rollback) = target.rename(backup, to).await {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+        let wide = |path: &Path| -> io::Result<Vec<u16>> {
+            let mut value: Vec<_> = path.as_os_str().encode_wide().collect();
+            if value.contains(&0) { return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid path")); }
+            value.push(0);
+            Ok(value)
+        };
+        let (from, to) = (wide(from)?, wide(to)?);
+        if unsafe { MoveFileExW(from.as_ptr(), to.as_ptr(), 0) } != 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    { Err(io::Error::new(io::ErrorKind::Unsupported, "exclusive rename unavailable")) }
+}
+
+async fn publish_new(target: &Fs, from: &str, to: &str) -> Result<(), String> {
+    match target {
+        Fs::Local => move_new(Path::new(from), Path::new(to)).map_err(|e| at(to, e)),
+        Fs::Remote(_) => {
+            if target.kind(to).await?.is_some() {
+                return Err(at(to, "destination appeared during the transfer"));
+            }
+            target.rename(from, to).await
+        }
+    }
+}
+
+async fn publish_replace(target: &Fs, from: &str, to: &str, backup: &str) -> Result<(), String> {
+    let Some(is_dir) = target.kind(to).await? else {
+        return publish_new(target, from, to).await;
+    };
+    publish_new(target, to, backup).await?;
+    if let Err(error) = publish_new(target, from, to).await {
+        if let Err(rollback) = publish_new(target, backup, to).await {
             return Err(format!("{error}; previous destination is at {backup}: {rollback}"));
         }
         return Err(error);
@@ -625,10 +773,15 @@ async fn publish(target: &Fs, from: &str, to: &str, backup: &str, replace: bool)
     target.remove(backup, is_dir).await.map_err(|e| format!("Copied to {to}, but could not remove the backup at {backup}: {e}"))
 }
 
-async fn commit(target: &Fs, stage: &str, from: &str, to: &str, parts: &[Part], replace: bool) -> Result<(), String> {
+async fn commit(target: &Fs, stage: &str, from: &str, to: &str, parts: &[Part], destination: Destination) -> Result<(), String> {
     let backup = join(stage, "previous");
-    if replace || !parts[0].is_dir || target.kind(to).await? != Some(true) {
-        return publish(target, from, to, &backup, replace).await;
+    match destination {
+        Destination::Create => return publish_new(target, from, to).await,
+        Destination::Replace => return publish_replace(target, from, to, &backup).await,
+        Destination::Merge if !parts[0].is_dir || target.kind(to).await? != Some(true) => {
+            return Err(at(to, "cannot merge without a destination directory"));
+        }
+        Destination::Merge => {}
     }
     for part in &parts[1..] {
         let dst = join(to, &part.relative);
@@ -638,13 +791,13 @@ async fn commit(target: &Fs, stage: &str, from: &str, to: &str, parts: &[Part], 
             if target.kind(&dst).await? == Some(true) {
                 return Err(at(&dst, "cannot replace a directory with a file during merge"));
             }
-            publish(target, &join(from, &part.relative), &dst, &backup, true).await?;
+            publish_replace(target, &join(from, &part.relative), &dst, &backup).await?;
         }
     }
     Ok(())
 }
 
-async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, from: &str, to: &str, parts: &[Part], replace: bool) -> TransferEvent {
+async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, from: &str, to: &str, parts: &[Part], destination: Destination) -> TransferEvent {
     let staged = join(stage, "item");
     for part in parts {
         if run.cancelled() {
@@ -674,7 +827,7 @@ async fn copy_parts<E: Fn(TransferEvent)>(run: &mut Run<'_, E>, stage: &str, fro
     if run.cancelled() {
         return TransferEvent::Cancelled;
     }
-    match commit(run.target, stage, &staged, to, parts, replace).await {
+    match commit(run.target, stage, &staged, to, parts, destination).await {
         Ok(()) => TransferEvent::Finished,
         Err(error) => TransferEvent::CommitFailed { error },
     }
@@ -687,7 +840,14 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
     let from_root = join(&job.source_dir, &job.planned.item.name);
     let to_root = join(&job.destination_dir, &job.planned.target);
     let now = Instant::now();
-    let mut run = Run { source: &source, target: &target, controls: &mut controls, emit: &emit, progress: Progress::default(), started: now, reported: now };
+    let local = match source {
+        Fs::Local => match LocalSource::new(Path::new(&job.source_dir)) {
+            Ok(local) => Some(local),
+            Err(error) => return emit(TransferEvent::CommitFailed { error: at(&job.source_dir, error) }),
+        },
+        Fs::Remote(_) => None,
+    };
+    let mut run = Run { source: &source, local, target: &target, controls: &mut controls, emit: &emit, progress: Progress::default(), started: now, reported: now };
 
     let parts = loop {
         match scan(&source, &target, &from_root, job.planned.item.is_dir).await {
@@ -709,7 +869,7 @@ pub(crate) async fn transfer(source: Fs, target: Fs, job: Job, mut controls: Unb
         Ok(path) => path,
         Err(error) => return emit(TransferEvent::CommitFailed { error }),
     };
-    let end = copy_parts(&mut run, &stage, &from_root, &to_root, &parts, job.planned.replace).await;
+    let end = copy_parts(&mut run, &stage, &from_root, &to_root, &parts, job.planned.destination).await;
     if matches!(target.kind(&join(&stage, "previous")).await, Ok(None)) {
         let _ = target.remove(&stage, true).await;
     }
@@ -721,6 +881,38 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn create_preserves_a_destination_created_while_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        let from = stage.join("item");
+        let to = dir.path().join("destination");
+        for is_dir in [false, true] {
+            std::fs::create_dir_all(&stage).unwrap();
+            if is_dir {
+                std::fs::create_dir(&from).unwrap();
+                std::fs::create_dir(&to).unwrap();
+                std::fs::write(from.join("child"), "new").unwrap();
+                std::fs::write(to.join("child"), "original").unwrap();
+            } else {
+                std::fs::write(&from, "new").unwrap();
+                std::fs::write(&to, "original").unwrap();
+            }
+            let parts = scan(&Fs::Local, &Fs::Local, from.to_str().unwrap(), is_dir).await.unwrap();
+            let publish = |policy| commit(&Fs::Local, stage.to_str().unwrap(), from.to_str().unwrap(), to.to_str().unwrap(), &parts, policy);
+            assert!(publish(Destination::Create).await.is_err());
+            if is_dir {
+                assert_eq!(std::fs::read(to.join("child")).unwrap(), b"original");
+                publish(Destination::Merge).await.unwrap();
+                assert_eq!(std::fs::read(to.join("child")).unwrap(), b"new");
+            } else {
+                assert_eq!(std::fs::read(&to).unwrap(), b"original");
+                std::fs::remove_file(&to).unwrap();
+                std::fs::remove_file(&from).unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn cancelled_replacement_keeps_existing_destination() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
@@ -730,7 +922,7 @@ mod tests {
             direction: Direction::Download,
             source_dir: source.path().to_str().unwrap().into(),
             destination_dir: target.path().to_str().unwrap().into(),
-            planned: Planned { item: Item { name: "config".into(), is_dir: false }, target: "config".into(), replace: true },
+            planned: Planned { item: Item { name: "config".into(), is_dir: false }, target: "config".into(), destination: Destination::Replace },
         };
         let (control, controls) = futures::channel::mpsc::unbounded();
         let last = std::cell::RefCell::new(None);
@@ -745,6 +937,11 @@ mod tests {
         assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 1);
     }
 
+    async fn local_resume(source: &str, target: &str) -> Result<u64, String> {
+        let mut original = Fs::Local.open(source).await?;
+        resume_offset(&mut original, Fs::Local.size(source).await?.0, &Fs::Local, source, target, 8).await
+    }
+
     #[tokio::test]
     async fn resume_validates_partial_contents_and_size() {
         let dir = tempfile::tempdir().unwrap();
@@ -753,14 +950,14 @@ mod tests {
         tokio::fs::write(&source, b"abcdefgh").await.unwrap();
         tokio::fs::write(&target, b"abcd").await.unwrap();
         let (source, target) = (source.to_str().unwrap(), target.to_str().unwrap());
-        assert_eq!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.unwrap(), 4);
+        assert_eq!(local_resume(source, target).await.unwrap(), 4);
         tokio::fs::write(target, b"abXd").await.unwrap();
-        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+        assert!(local_resume(source, target).await.is_err());
         tokio::fs::write(target, b"abcdefghi").await.unwrap();
-        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+        assert!(local_resume(source, target).await.is_err());
         tokio::fs::write(source, b"changed").await.unwrap();
         tokio::fs::write(target, b"ch").await.unwrap();
-        assert!(resume_offset(&Fs::Local, &Fs::Local, source, target, 8).await.is_err());
+        assert!(local_resume(source, target).await.is_err());
     }
 
     #[tokio::test]
@@ -774,7 +971,7 @@ mod tests {
         let (control, mut controls) = futures::channel::mpsc::unbounded();
         control.unbounded_send(Control::Cancel).unwrap();
         let now = Instant::now();
-        let mut run = Run { source: &Fs::Local, target: &Fs::Local, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
+        let mut run = Run { source: &Fs::Local, local: Some(LocalSource::new(dir.path()).unwrap()), target: &Fs::Local, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
         let mut started = false;
         assert!(matches!(run.copy_file(source, target, 8, None, &mut started).await, Err(Stop::Cancelled)));
         assert!(started);
@@ -786,6 +983,16 @@ mod tests {
         assert!(run.copy_file(source, target, 8, None, &mut started).await.is_ok());
         assert_eq!(tokio::fs::read(target).await.unwrap(), b"abcdefgh");
         assert_eq!(run.progress.bytes_done, 8);
+        let mut started = false;
+        assert!(matches!(run.copy_file(source, target, 4, None, &mut started).await, Err(Stop::Error(_))));
+        assert!(tokio::fs::metadata(target).await.unwrap().len() <= 4);
+
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("linked-source");
+            std::os::unix::fs::symlink(source, &link).unwrap();
+            assert!(run.local.as_ref().unwrap().open(&link).is_err());
+        }
     }
 
     #[tokio::test]
@@ -820,7 +1027,7 @@ mod tests {
             } else {
                 (&remote, &local_fs, remote_path, local_path.to_str().unwrap())
             };
-            let mut run = Run { source, target, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
+            let mut run = Run { source, local: None, target, controls: &mut controls, emit: &|_| {}, progress: Progress::default(), started: now, reported: now };
             let mut started = true;
             assert!(run.copy_file(from, to, 8, None, &mut started).await.is_ok());
             assert_eq!(tokio::fs::read(partial_path).await.unwrap(), b"abcdefgh");
@@ -833,9 +1040,9 @@ mod tests {
         names.iter().map(|(name, is_dir)| Item { name: (*name).into(), is_dir: *is_dir }).collect()
     }
 
-    fn targets(step: Step) -> Vec<(String, bool)> {
+    fn targets(step: Step) -> Vec<(String, Destination)> {
         match step {
-            Step::Done(planned) => planned.into_iter().map(|p| (p.target, p.replace)).collect(),
+            Step::Done(planned) => planned.into_iter().map(|p| (p.target, p.destination)).collect(),
             Step::Ask(question) => panic!("unexpected question about {}", question.name),
         }
     }
@@ -843,7 +1050,7 @@ mod tests {
     #[test]
     fn items_without_clashes_are_planned_as_is() {
         let mut resolver = Resolver::new(items(&[("a.txt", false), ("docs", true)]), &["b.txt".into()]);
-        assert_eq!(targets(resolver.step()), [("a.txt".into(), false), ("docs".into(), false)]);
+        assert_eq!(targets(resolver.step()), [("a.txt".into(), Destination::Create), ("docs".into(), Destination::Create)]);
     }
 
     #[test]
@@ -853,7 +1060,7 @@ mod tests {
         resolver.answer(Conflict::Replace, false);
         assert_eq!(resolver.step(), Step::Ask(ConflictQuestion { name: "docs".into(), is_dir: true, single: true }));
         resolver.answer(Conflict::Skip, false);
-        assert_eq!(targets(resolver.step()), [("Notes.txt".into(), true), ("new".into(), false)]);
+        assert_eq!(targets(resolver.step()), [("Notes.txt".into(), Destination::Replace), ("new".into(), Destination::Create)]);
     }
 
     #[test]
@@ -861,7 +1068,7 @@ mod tests {
         let mut resolver = Resolver::new(items(&[("a", false), ("b", false)]), &["a".into(), "b".into()]);
         assert!(matches!(resolver.step(), Step::Ask(_)));
         resolver.answer(Conflict::Replace, true);
-        assert_eq!(targets(resolver.step()), [("a".into(), true), ("b".into(), true)]);
+        assert_eq!(targets(resolver.step()), [("a".into(), Destination::Replace), ("b".into(), Destination::Replace)]);
     }
 
     #[test]
@@ -872,7 +1079,7 @@ mod tests {
         );
         resolver.step();
         resolver.answer(Conflict::Duplicate, true);
-        assert_eq!(targets(resolver.step()), [("Copy of Copy of notes.txt".into(), false), (".Copy of bashrc".into(), false)]);
+        assert_eq!(targets(resolver.step()), [("Copy of Copy of notes.txt".into(), Destination::Create), (".Copy of bashrc".into(), Destination::Create)]);
     }
 
     #[test]
@@ -882,7 +1089,7 @@ mod tests {
         resolver.answer(Conflict::Duplicate, false);
         assert_eq!(resolver.step(), Step::Ask(ConflictQuestion { name: "Copy of a".into(), is_dir: false, single: true }));
         resolver.answer(Conflict::Duplicate, false);
-        assert_eq!(targets(resolver.step()), [("Copy of a".into(), false), ("Copy of Copy of a".into(), false)]);
+        assert_eq!(targets(resolver.step()), [("Copy of a".into(), Destination::Create), ("Copy of Copy of a".into(), Destination::Create)]);
     }
 
     #[test]

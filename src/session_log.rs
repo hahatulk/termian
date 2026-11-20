@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 use crypto_secretbox::{aead::Aead, KeyInit, Nonce, XSalsa20Poly1305};
 
 pub const MAGIC: &[u8] = b"TMNLOG1\n";
+const V2_MAGIC: &[u8] = b"TMNLOG2\n";
 const NONCE: usize = 24;
 const FLUSH_BYTES: usize = 64 * 1024;
 const FLUSH_EVERY: Duration = Duration::from_secs(1);
@@ -19,6 +20,7 @@ pub const RETENTION: Duration = Duration::from_secs(60 * 24 * 60 * 60);
 
 pub const MISSING_LOG: &str = "Файл лога сессии не найден: он удалён (хранится 60 дней) или не был записан.";
 pub const UNREADABLE_LOG: &str = "Не удалось расшифровать лог сессии";
+pub const INCOMPLETE_LOG: &str = "Запись лога не завершена или файл повреждён. Показана доступная часть.";
 
 /// `<data>/termian-native/session-logs-v2`.
 pub fn default_dir() -> PathBuf {
@@ -44,9 +46,39 @@ pub fn new_key() -> [u8; 32] {
     key
 }
 
-pub fn encode_record(chunk: &[u8], key: &[u8; 32]) -> Vec<u8> {
+const CHAIN_MARKER: &[u8; 8] = b"TMN3OPEN";
+const LOG_PREFIX: &str = "v3-";
+
+pub fn new_name() -> String {
+    format!("{LOG_PREFIX}{}", uuid::Uuid::new_v4())
+}
+
+fn requires_chain(name: &str) -> bool {
+    name.strip_suffix(".log").unwrap_or(name).strip_prefix(LOG_PREFIX)
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
+fn transcript() -> sha2::Sha256 {
+    use sha2::Digest;
+    sha2::Sha256::new_with_prefix(b"Termian session log transcript v3\0")
+}
+
+fn final_nonce(hash: sha2::Sha256) -> [u8; NONCE] {
+    use sha2::Digest;
+    hash.finalize()[..NONCE].try_into().expect("24 digest bytes")
+}
+
+fn random_nonce() -> [u8; NONCE] {
     let mut nonce = [0u8; NONCE];
     getrandom::getrandom(&mut nonce).expect("system random source");
+    nonce
+}
+
+pub fn encode_record(chunk: &[u8], key: &[u8; 32]) -> Vec<u8> {
+    seal_record(chunk, key, random_nonce())
+}
+
+fn seal_record(chunk: &[u8], key: &[u8; 32], nonce: [u8; NONCE]) -> Vec<u8> {
     let sealed = XSalsa20Poly1305::new(key.into()).encrypt(Nonce::from_slice(&nonce), chunk).expect("secretbox never fails to seal");
     let length = (NONCE + sealed.len()) as u32;
     [&length.to_be_bytes()[..], &nonce, &sealed].concat()
@@ -54,24 +86,55 @@ pub fn encode_record(chunk: &[u8], key: &[u8; 32]) -> Vec<u8> {
 
 /// The terminal output in a log, and an error if part of it could not be decrypted.
 pub fn decode(bytes: &[u8], key: &[u8; 32]) -> (Vec<u8>, Option<&'static str>) {
+    decode_log(bytes, key, false)
+}
+
+fn decode_log(bytes: &[u8], key: &[u8; 32], require_chain: bool) -> (Vec<u8>, Option<&'static str>) {
+    use sha2::Digest;
+    let first_nonce = MAGIC.len() + 4;
+    let chained = bytes.starts_with(MAGIC)
+        && bytes.get(MAGIC.len()..first_nonce) == Some(&((NONCE + 16) as u32).to_be_bytes())
+        && bytes.get(first_nonce..first_nonce + CHAIN_MARKER.len()) == Some(CHAIN_MARKER);
+    if require_chain && !chained {
+        return (Vec::new(), Some(INCOMPLETE_LOG));
+    }
     let cipher = XSalsa20Poly1305::new(key.into());
     let mut out = Vec::new();
-    let mut offset = 0;
+    if bytes.is_empty() {
+        return (out, Some(INCOMPLETE_LOG));
+    }
+    let mut framed = bytes.starts_with(V2_MAGIC);
+    let mut offset = if framed { V2_MAGIC.len() } else { 0 };
     while offset < bytes.len() {
-        if bytes[offset..].starts_with(MAGIC) {
+        let rest = &bytes[offset..];
+        if !framed && rest.starts_with(MAGIC) {
             offset += MAGIC.len();
             continue;
         }
-        let Some(head) = bytes.get(offset..offset + 4) else { break };
+        let Some(head) = rest.get(..4) else { return (out, Some(INCOMPLETE_LOG)) };
         let length = u32::from_be_bytes(head.try_into().expect("four bytes")) as usize;
-        let Some(record) = bytes.get(offset + 4..offset + 4 + length).filter(|_| length > NONCE) else { break };
+        let Some(record) = rest[4..].get(..length).filter(|_| length >= NONCE + 16) else {
+            return (out, Some(INCOMPLETE_LOG));
+        };
+        let first_v1_record = !framed && offset == MAGIC.len() && bytes.starts_with(MAGIC);
+        offset += 4 + length;
         match cipher.decrypt(Nonce::from_slice(&record[..NONCE]), &record[NONCE..]) {
+            Ok(plain) if first_v1_record && plain.is_empty() => framed = true,
+            Ok(plain) if framed && plain.is_empty() => {
+                if chained {
+                    let mut hash = transcript();
+                    hash.update(&bytes[..offset - 4 - length]);
+                    if record[..NONCE] != final_nonce(hash) {
+                        return (Vec::new(), Some(UNREADABLE_LOG));
+                    }
+                }
+                return (out, (offset != bytes.len()).then_some(INCOMPLETE_LOG));
+            }
             Ok(plain) => out.extend(plain),
             Err(_) => return (out, Some(UNREADABLE_LOG)),
         }
-        offset += 4 + length;
     }
-    (out, None)
+    (out, framed.then_some(INCOMPLETE_LOG))
 }
 
 /// Reads and decrypts a log; a missing file gives the legacy "not found" text.
@@ -80,7 +143,7 @@ pub fn read(dir: &Path, name: &str, key: &[u8; 32]) -> Result<(Vec<u8>, Option<&
         return Err(MISSING_LOG.into());
     }
     match std::fs::read(dir.join(file_name(name))) {
-        Ok(bytes) => Ok(decode(&bytes, key)),
+        Ok(bytes) => Ok(decode_log(&bytes, key, requires_chain(name))),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(MISSING_LOG.into()),
         Err(error) => Err(error.to_string()),
     }
@@ -170,31 +233,42 @@ impl SessionLog {
             return Err("invalid session log name".into());
         }
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(dir.join(format!("{name}.log"))).map_err(|e| e.to_string())?;
-        file.write_all(MAGIC).map_err(|e| e.to_string())?;
+        let mut file = std::fs::OpenOptions::new().create_new(true).write(true).open(dir.join(format!("{name}.log"))).map_err(|e| e.to_string())?;
+        use sha2::Digest;
+        let mut start_nonce = random_nonce();
+        start_nonce[..CHAIN_MARKER.len()].copy_from_slice(CHAIN_MARKER);
+        let header = [MAGIC, &seal_record(&[], &key, start_nonce)].concat();
+        let mut hash = transcript();
+        hash.update(&header);
+        file.write_all(&header).map_err(|e| e.to_string())?;
         let (sender, receiver) = channel::<Message>();
         std::thread::spawn(move || {
-            let mut pending = Vec::new();
-            let mut flush = |pending: &mut Vec<u8>| {
-                if !pending.is_empty() {
-                    let _ = file.write_all(&encode_record(pending, &key));
-                    pending.clear();
+            let write_log = || -> std::io::Result<()> {
+                let mut pending = Vec::new();
+                loop {
+                    let (flush, finished) = match receiver.recv_timeout(FLUSH_EVERY) {
+                        Ok(Message::Data(data)) => {
+                            pending.extend(data);
+                            (false, false)
+                        }
+                        Err(RecvTimeoutError::Timeout) => (true, false),
+                        Ok(Message::Finish) | Err(RecvTimeoutError::Disconnected) => (true, true),
+                    };
+                    if !pending.is_empty() && (flush || pending.len() >= FLUSH_BYTES) {
+                        let frame = encode_record(&pending, &key);
+                        file.write_all(&frame)?;
+                        hash.update(&frame);
+                        pending.clear();
+                    }
+                    if finished {
+                        file.write_all(&seal_record(&[], &key, final_nonce(hash)))?;
+                        file.sync_data()?;
+                        return Ok(());
+                    }
                 }
             };
-            loop {
-                match receiver.recv_timeout(FLUSH_EVERY) {
-                    Ok(Message::Data(data)) => {
-                        pending.extend(data);
-                        if pending.len() >= FLUSH_BYTES {
-                            flush(&mut pending);
-                        }
-                    }
-                    Err(RecvTimeoutError::Timeout) => flush(&mut pending),
-                    Ok(Message::Finish) | Err(RecvTimeoutError::Disconnected) => {
-                        flush(&mut pending);
-                        return;
-                    }
-                }
+            if let Err(error) = write_log() {
+                eprintln!("[Termian] Session log recording stopped: {error}");
             }
         });
         Ok(Self { sender })
@@ -313,7 +387,7 @@ mod tests {
         log.append(b"world\r\n");
         drop(log);
         let path = dir.path().join("conn-1.log");
-        let bytes = wait_for(&path, |b| b.len() > MAGIC.len());
+        let bytes = wait_for(&path, |b| decode(b, &key) == (b"hello world\r\n".to_vec(), None));
         assert!(bytes.starts_with(MAGIC));
         assert!(!bytes.windows(5).any(|w| w == b"hello"), "output is encrypted");
         assert_eq!(read(dir.path(), "conn-1", &key).unwrap(), (b"hello world\r\n".to_vec(), None));
@@ -325,9 +399,50 @@ mod tests {
         let key = new_key();
         let log = SessionLog::start(dir.path(), "idle", key).unwrap();
         log.append(b"prompt$ ");
-        let bytes = wait_for(&dir.path().join("idle.log"), |b| b.len() > MAGIC.len());
-        assert_eq!(decode(&bytes, &key).0, b"prompt$ ");
+        let bytes = wait_for(&dir.path().join("idle.log"), |b| decode(b, &key).0 == b"prompt$ ");
+        assert_eq!(decode(&bytes, &key), (b"prompt$ ".to_vec(), Some(INCOMPLETE_LOG)));
         drop(log);
+    }
+
+    #[test]
+    fn closed_log_checks_the_whole_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = new_key();
+        let name = new_name();
+        let log = SessionLog::start(dir.path(), &name, key).unwrap();
+        let output = vec![b'x'; FLUSH_BYTES];
+        log.append(&output);
+        log.append(b"end");
+        drop(log);
+        let path = dir.path().join(file_name(&name));
+        let bytes = wait_for(&path, |bytes| bytes.len() > FLUSH_BYTES && decode_log(bytes, &key, true).1.is_none());
+        let open_end = MAGIC.len() + 4 + NONCE + 16;
+        let first_end = open_end + 4 + NONCE + 16 + FLUSH_BYTES;
+        let closing = bytes.len() - 4 - NONCE - 16;
+        let (a, b) = (&bytes[open_end..first_end], &bytes[first_end..closing]);
+        for middle in [b.to_vec(), [b, a].concat(), [a, a, b].concat()] {
+            std::fs::write(&path, [&bytes[..open_end], &middle, &bytes[closing..]].concat()).unwrap();
+            assert_eq!(read(dir.path(), &name, &key).unwrap().1, Some(UNREADABLE_LOG));
+        }
+        std::fs::write(&path, [MAGIC, a].concat()).unwrap();
+        assert_eq!(read(dir.path(), &name, &key).unwrap().1, Some(INCOMPLETE_LOG));
+    }
+
+    #[test]
+    fn empty_file_and_interrupted_recordings_report_incomplete() {
+        let key = new_key();
+        let marker = encode_record(&[], &key);
+        assert_eq!(decode(&[], &key), (Vec::new(), Some(INCOMPLETE_LOG)));
+        assert_eq!(decode(MAGIC, &key), (Vec::new(), None));
+        for header in [[MAGIC, &marker].concat(), V2_MAGIC.to_vec()] {
+            assert_eq!(decode(&header, &key), (Vec::new(), Some(INCOMPLETE_LOG)));
+            let finished = [header.as_slice(), &encode_record(&[], &key)].concat();
+            assert_eq!(decode(&finished, &key), (Vec::new(), None));
+            let body = [header.as_slice(), &encode_record(b"recorded", &key)].concat();
+            assert_eq!(decode(&body, &key), (b"recorded".to_vec(), Some(INCOMPLETE_LOG)));
+            let finished = [body.as_slice(), &encode_record(&[], &key)].concat();
+            assert_eq!(decode(&finished, &key), (b"recorded".to_vec(), None));
+        }
     }
 
     #[test]
@@ -336,7 +451,7 @@ mod tests {
         let mut bytes = [MAGIC, &encode_record(b"one", &key), MAGIC, &encode_record(b"two", &key)].concat();
         assert_eq!(decode(&bytes, &key), (b"onetwo".to_vec(), None), "a second header after reopening is skipped");
         bytes.extend(&encode_record(b"torn", &key)[..10]);
-        assert_eq!(decode(&bytes, &key), (b"onetwo".to_vec(), None), "a torn last record is ignored");
+        assert_eq!(decode(&bytes, &key), (b"onetwo".to_vec(), Some(INCOMPLETE_LOG)), "a torn last record is reported");
         assert_eq!(decode(&bytes, &[1u8; 32]).1, Some(UNREADABLE_LOG));
     }
 

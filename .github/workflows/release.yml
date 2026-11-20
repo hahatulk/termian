@@ -5,11 +5,13 @@ on:
     branches: [main, master]
     paths-ignore:
       - 'cloud-sync-server/**'
+      - '.github/workflows/cloud-server.yml'
       - '**.md'
   pull_request:
     branches: [main, master]
     paths-ignore:
       - 'cloud-sync-server/**'
+      - '.github/workflows/cloud-server.yml'
       - '**.md'
   workflow_dispatch:
     inputs:

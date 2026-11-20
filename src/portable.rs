@@ -484,7 +484,7 @@ pub struct VaultDevice<'a> {
     pub vault: &'a mut Vault,
     pub now: String,
     /// Takes the encrypted backup before an import replaces the data.
-    pub backup: Box<dyn FnMut(&Value) -> Result<(), String> + 'a>,
+    pub backup: Box<dyn FnMut(&Vault) -> Result<(), String> + 'a>,
 }
 
 impl Device for VaultDevice<'_> {
@@ -496,8 +496,8 @@ impl Device for VaultDevice<'_> {
         import(self.vault, snapshot, ids)
     }
 
-    fn backup(&mut self, snapshot: &Value) -> Result<(), String> {
-        (self.backup)(snapshot)
+    fn backup(&mut self, _: &Value) -> Result<(), String> {
+        (self.backup)(self.vault)
     }
 }
 

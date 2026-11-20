@@ -38,6 +38,54 @@ pub struct Store {
     _lock: Option<std::fs::File>,
 }
 
+pub struct CloudBackups {
+    dir: PathBuf,
+    cipher: XSalsa20Poly1305,
+    header: Vec<u8>,
+}
+
+fn seal(cipher: &XSalsa20Poly1305, plain: &[u8]) -> Result<([u8; NONCE], Vec<u8>), String> {
+    let mut nonce = [0u8; NONCE];
+    getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
+    let sealed = cipher.encrypt(Nonce::from_slice(&nonce), plain).map_err(|_| "encryption failed")?;
+    Ok((nonce, sealed))
+}
+
+impl CloudBackups {
+    pub fn save(&self, vault: &Vault) -> Result<(), String> {
+        let plain = Zeroizing::new(serde_json::to_vec(vault).map_err(|e| e.to_string())?);
+        let (nonce, sealed) = seal(&self.cipher, &plain)?;
+        let dir = self.dir.join("device");
+        let io_error = |e: std::io::Error| format!("{}: {e}", dir.display());
+        std::fs::create_dir_all(&dir).map_err(io_error)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(&dir).map_err(io_error)?;
+        temporary.write_all(&self.header)
+            .and_then(|_| temporary.write_all(&nonce))
+            .and_then(|_| temporary.write_all(&sealed))
+            .and_then(|_| temporary.as_file().sync_all())
+            .map_err(io_error)?;
+        let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%9fZ");
+        let name = format!("{stamp}-{}.bin", uuid::Uuid::new_v4());
+        temporary.persist_noclobber(dir.join(name)).map_err(|e| io_error(e.error))?;
+        #[cfg(unix)]
+        for folder in [&dir, &self.dir, self.dir.parent().ok_or("backup path has no parent")?] {
+            std::fs::File::open(folder).and_then(|f| f.sync_all()).map_err(io_error)?;
+        }
+
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut files: Vec<_> = entries.flatten().filter(|entry| {
+                entry.file_type().is_ok_and(|t| t.is_file())
+                    && entry.path().extension().is_some_and(|e| e == "bin")
+            }).map(|entry| entry.path()).collect();
+            files.sort_unstable();
+            for old in files.into_iter().rev().skip(10) {
+                let _ = std::fs::remove_file(old);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Store {
     pub fn new(path: PathBuf, key: [u8; 32]) -> Self {
         Self::with_header(path, &Zeroizing::new(key), MAGIC.to_vec())
@@ -174,6 +222,14 @@ impl Store {
         &self.path
     }
 
+    pub fn cloud_backups(&self) -> CloudBackups {
+        CloudBackups {
+            dir: self.path.with_file_name("self-cloud-backups"),
+            cipher: self.cipher.clone(),
+            header: self.header.clone(),
+        }
+    }
+
     fn decrypt(&self, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>, String> {
         let sealed = bytes
             .strip_prefix(self.header.as_slice())
@@ -204,12 +260,7 @@ impl Store {
 
     fn save_inner(&self, vault: &Vault, verify: bool) -> Result<(), String> {
         let plain = Zeroizing::new(serde_json::to_vec(vault).map_err(|e| e.to_string())?);
-        let mut nonce = [0u8; NONCE];
-        getrandom::getrandom(&mut nonce).map_err(|e| e.to_string())?;
-        let sealed = self
-            .cipher
-            .encrypt(Nonce::from_slice(&nonce), plain.as_slice())
-            .map_err(|_| "encryption failed")?;
+        let (nonce, sealed) = seal(&self.cipher, &plain)?;
         let dir = self.path.parent().ok_or("vault path has no folder")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let mut temporary = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
@@ -380,7 +431,7 @@ mod tests {
     #[test]
     fn migration_preserves_secrets_and_merge_state_after_relaunch() {
         let dir = tempfile::tempdir().unwrap();
-        let backups = dir.path().join("backups");
+        let backups = store(dir.path()).cloud_backups();
         let (url, server) = crate::cloud::tests::server();
         let mut remote = Vault {
             cloud: Some(crate::cloud::tests::config(&url)),

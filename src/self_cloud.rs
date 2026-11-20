@@ -3,9 +3,9 @@
 //! local data after an encrypted backup). Conflicts are reported, never
 //! resolved without the user's choice.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use serde_json::Value;
+use crate::store::CloudBackups;
 
 use crate::cloud::{self, Condition};
 use crate::portable::{self, VaultDevice};
@@ -16,7 +16,6 @@ use crate::vault::Vault;
 pub const SECRETS_MISSING: &str =
     "Не все пароли и ключи из профиля старого клиента удалось прочитать. Сначала нажмите «Получить», чтобы взять данные из облака.";
 pub const NOT_CONFIGURED: &str = "Сначала настройте своё облако";
-const BACKUPS_KEPT: usize = 10;
 
 /// What the sync dialog shows before anything is changed, as the legacy check.
 #[derive(Clone, Debug, PartialEq)]
@@ -342,25 +341,6 @@ fn now() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
-/// `<data>/termian-native/self-cloud-backups`.
-pub fn default_backup_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(std::env::temp_dir).join("termian-native").join("self-cloud-backups")
-}
-
-/// Encrypted copy of the local data before an import, keeping the last ten.
-fn backup(dir: &Path, snapshot: &Value, passphrase: &str) -> Result<(), String> {
-    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
-    std::fs::write(dir.join(format!("{stamp}.json")), cloud::seal(snapshot, passphrase)?).map_err(|e| e.to_string())?;
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir).map_err(|e| e.to_string())?.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "json")).collect();
-    files.sort();
-    files.reverse();
-    for old in files.into_iter().skip(BACKUPS_KEPT) {
-        let _ = std::fs::remove_file(old);
-    }
-    Ok(())
-}
-
 fn configured(vault: &Vault) -> Result<(cloud::CloudConfig, cloud::Cloud), String> {
     let config = vault.cloud.clone().ok_or(NOT_CONFIGURED)?;
     let client = config.validate()?;
@@ -388,7 +368,7 @@ pub fn prepare_logs(vault: &mut Vault, logs_dir: &Path, active: &std::collection
 }
 
 /// Sync: merge, retrying twice when another device uploaded meanwhile.
-pub fn sync(vault: &mut Vault, backups: &Path) -> Result<String, String> {
+pub fn sync(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
@@ -397,9 +377,8 @@ pub fn sync(vault: &mut Vault, backups: &Path) -> Result<String, String> {
     let mut attempt = 0;
     loop {
         let saved = vault.sync_state.clone();
-        let passphrase = config.passphrase.clone();
         let result = {
-            let mut device = VaultDevice { vault: &mut *vault, now: now(), backup: Box::new(move |s| backup(backups, s, &passphrase)) };
+            let mut device = VaultDevice { vault: &mut *vault, now: now(), backup: Box::new(|vault| backups.save(vault)) };
             sync::sync_once(saved, &server, &mut device, &client, &now())
         };
         match result {
@@ -433,17 +412,23 @@ pub fn upload(vault: &mut Vault) -> Result<String, String> {
     let mut ids = vault.sync_state.as_ref().filter(|s| s.server == sync::server_key(&config.url)).map(|s| s.ids.clone()).unwrap_or_default();
     let exported = sync::validate_snapshot(&portable::export(vault, &now()))?;
     let snapshot = sync::validate_snapshot(&sync::to_sync_form(&exported, &mut ids))?;
-    client.upload(&snapshot, Condition::Any).map_err(|e| config.redact(&e))?;
+    let (remote, can_create) = client.fetch_for_sync().map_err(|e| config.redact(&e))?;
+    let condition = match remote {
+        Some(remote) => Condition::Revision(remote.revision.ok_or("Сервер не вернул ревизию снимка. Запись отменена.")?),
+        None if can_create => Condition::Create,
+        None => return Err("Сервер не подтвердил безопасное создание снимка.".into()),
+    };
+    client.upload(&snapshot, condition).map_err(|e| config.redact(&e))?;
     vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&snapshot)), remote: sync::digests_of(Some(&snapshot)), ids });
     Ok("Данные загружены".into())
 }
 
 /// «Получить»: the local data is replaced with the cloud snapshot, after a backup.
-pub fn download(vault: &mut Vault, backups: &Path) -> Result<String, String> {
+pub fn download(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     let remote = client.fetch().map_err(|e| config.redact(&e))?.ok_or("В облаке ещё нет данных")?;
     let snapshot = sync::validate_snapshot(&remote.snapshot)?;
-    backup(backups, &portable::export(vault, &now()), &config.passphrase)?;
+    backups.save(vault)?;
     let server = sync::server_key(&config.url);
     let mut matched = vault.sync_state.as_ref().filter(|state| state.server == server)
         .map(|state| state.ids.clone()).unwrap_or_default();
@@ -519,6 +504,10 @@ mod tests {
     use super::*;
     use crate::vault::Host;
 
+    fn test_backups(dir: &Path) -> CloudBackups {
+        crate::store::Store::new(dir.join("vault.bin"), [3; 32]).cloud_backups()
+    }
+
     fn host(id: u64, label: &str) -> Host {
         Host { id, label: label.into(), address: format!("{label}.lan"), os: None, group: None, username: None, tags: vec![], port: None, password: None, key: None, identity: None, settings: Default::default() }
     }
@@ -554,10 +543,11 @@ mod tests {
         next.validate().unwrap().upload(&remote.snapshot, Condition::Revision(remote.revision.unwrap())).unwrap();
         let rotated = stored.lock().unwrap().clone();
         assert!(verify_cloud_password(&next).is_ok());
+        assert!(upload(&mut local).is_err());
         assert_eq!(*stored.lock().unwrap(), rotated);
         local.cloud = Some(next);
         let backups = tempfile::tempdir().unwrap();
-        assert_eq!(sync(&mut local, backups.path()).unwrap(), "Данные уже синхронизированы");
+        assert_eq!(sync(&mut local, &test_backups(backups.path())).unwrap(), "Данные уже синхронизированы");
     }
 
     #[test]
@@ -565,12 +555,12 @@ mod tests {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &["db"]));
-        assert_eq!(sync(&mut a, backups.path()).unwrap(), "Синхронизировано: отправлено изменений: 2");
-        assert!(sync(&mut b, backups.path()).unwrap().contains("получено изменений: 2"));
+        assert_eq!(sync(&mut a, &test_backups(backups.path())).unwrap(), "Синхронизировано: отправлено изменений: 2");
+        assert!(sync(&mut b, &test_backups(backups.path())).unwrap().contains("получено изменений: 2"));
         assert_eq!(labels(&b), ["db", "web"]);
-        assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), 1, "a backup before the import");
-        sync(&mut a, backups.path()).unwrap();
-        assert_eq!(sync(&mut a, backups.path()).unwrap(), "Данные уже синхронизированы");
+        assert_eq!(std::fs::read_dir(backups.path().join("self-cloud-backups/device")).unwrap().count(), 1, "a backup before the import");
+        sync(&mut a, &test_backups(backups.path())).unwrap();
+        assert_eq!(sync(&mut a, &test_backups(backups.path())).unwrap(), "Данные уже синхронизированы");
     }
 
     #[test]
@@ -578,15 +568,15 @@ mod tests {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &[]));
-        sync(&mut a, backups.path()).unwrap();
-        sync(&mut b, backups.path()).unwrap();
+        sync(&mut a, &test_backups(backups.path())).unwrap();
+        sync(&mut b, &test_backups(backups.path())).unwrap();
         a.hosts[0].address = "a.lan".into();
         b.hosts[0].address = "b.lan".into();
-        sync(&mut a, backups.path()).unwrap();
+        sync(&mut a, &test_backups(backups.path())).unwrap();
         let Preview::Conflicts(conflicts) = preview(&b).unwrap() else { panic!("expected a conflict") };
         assert_eq!(conflicts[0].label, "web");
         assert_eq!(b.hosts[0].address, "b.lan");
-        assert!(sync(&mut b, backups.path()).unwrap().contains("разрешено конфликтов: 1"));
+        assert!(sync(&mut b, &test_backups(backups.path())).unwrap().contains("разрешено конфликтов: 1"));
         assert_eq!(b.hosts[0].address, "a.lan");
     }
 
@@ -598,14 +588,14 @@ mod tests {
         full.hosts[0].password = Some("secret".into());
         upload(&mut full).unwrap();
         let mut legacy = Vault { secrets_missing: true, ..vault(&url, &["web"]) };
-        assert_eq!(sync(&mut legacy, backups.path()).unwrap_err(), SECRETS_MISSING);
+        assert_eq!(sync(&mut legacy, &test_backups(backups.path())).unwrap_err(), SECRETS_MISSING);
         assert_eq!(upload(&mut legacy).unwrap_err(), SECRETS_MISSING);
         let before = stored.lock().unwrap().clone();
-        download(&mut legacy, backups.path()).unwrap();
+        download(&mut legacy, &test_backups(backups.path())).unwrap();
         assert_eq!(stored.lock().unwrap().clone(), before, "the cloud is untouched");
         assert_eq!(legacy.hosts[0].password.as_deref(), Some("secret"));
         assert!(!legacy.secrets_missing);
-        assert!(sync(&mut legacy, backups.path()).is_ok(), "sync is allowed after a download");
+        assert!(sync(&mut legacy, &test_backups(backups.path())).is_ok(), "sync is allowed after a download");
     }
 
     #[test]
@@ -615,8 +605,8 @@ mod tests {
         assert_eq!(preview(&Vault::default()).unwrap(), Preview::Unconfigured);
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &[]));
         assert_eq!(preview(&a).unwrap(), Preview::Empty);
-        sync(&mut a, backups.path()).unwrap();
-        sync(&mut b, backups.path()).unwrap();
+        sync(&mut a, &test_backups(backups.path())).unwrap();
+        sync(&mut b, &test_backups(backups.path())).unwrap();
         assert_eq!(preview(&a).unwrap(), Preview::Synced);
         a.hosts[0].label = "web-1".into();
         let before = stored.lock().unwrap().clone();
@@ -625,7 +615,7 @@ mod tests {
         assert_eq!(changes[0].text(), "Хост «web-1»: изменено");
         assert!(changes.iter().all(|c| c.upload));
         assert_eq!(Preview::Changes(changes).headline(), "Есть новые локальные изменения → требуется отправка в облако");
-        sync(&mut a, backups.path()).unwrap();
+        sync(&mut a, &test_backups(backups.path())).unwrap();
         let Preview::Changes(incoming) = preview(&b).unwrap() else { panic!("expected changes") };
         assert!(incoming.iter().all(|c| !c.upload));
         b.hosts[0].label = "web-b".into();
@@ -702,15 +692,29 @@ mod tests {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let mut a = vault(&url, &["web"]);
-        assert!(matches!(download(&mut a, backups.path()), Err(e) if e == "В облаке ещё нет данных"));
+        a.cloud.as_mut().unwrap().passphrase.clear();
+        let store = crate::store::Store::new(backups.path().join("vault.bin"), [3; 32]);
+        let copies = store.cloud_backups();
+        let legacy = backups.path().join("self-cloud-backups/old.json");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"older backup").unwrap();
+        assert!(matches!(download(&mut a, &copies), Err(e) if e == "В облаке ещё нет данных"));
         upload(&mut a).unwrap();
         let mut b = vault(&url, &["other"]);
+        b.cloud.as_mut().unwrap().passphrase.clear();
+        let original = b.clone();
+        download(&mut b, &copies).unwrap();
+        let dir = backups.path().join("self-cloud-backups/device");
+        let saved = std::fs::read_dir(&dir).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(crate::store::Store::new(saved.clone(), [3; 32]).load().unwrap(), Some(original));
+        assert!(crate::store::Store::new(saved, [4; 32]).load().is_err());
         for _ in 0..12 {
-            download(&mut b, backups.path()).unwrap();
+            download(&mut b, &copies).unwrap();
         }
         assert_eq!(labels(&b), ["web"]);
-        assert_eq!(std::fs::read_dir(backups.path()).unwrap().count(), BACKUPS_KEPT);
-        assert_eq!(sync(&mut Vault::default(), backups.path()).unwrap_err(), NOT_CONFIGURED);
+        assert_eq!(std::fs::read_dir(backups.path().join("self-cloud-backups/device")).unwrap().count(), 10);
+        assert_eq!(std::fs::read(legacy).unwrap(), b"older backup");
+        assert_eq!(sync(&mut Vault::default(), &copies).unwrap_err(), NOT_CONFIGURED);
     }
 
     #[test]

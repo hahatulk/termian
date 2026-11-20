@@ -62,7 +62,7 @@ pub fn remove(path: &Path, entries: &[Entry]) -> std::io::Result<()> {
 /// Adds the host key lines of `from` that `to` does not have yet; returns how many.
 pub fn import(from: &Path, to: &Path) -> std::io::Result<usize> {
     let incoming = parse(&fs::read_to_string(from)?);
-    let mut text = fs::read_to_string(to).unwrap_or_default();
+    let mut text = read_for_trust(to)?.unwrap_or_default();
     let existing = parse(&text);
     let mut added = 0;
     for entry in incoming {
@@ -83,6 +83,107 @@ pub fn import(from: &Path, to: &Path) -> std::io::Result<usize> {
     Ok(added)
 }
 
+pub(crate) enum Trust {
+    Unknown,
+    Match,
+    Changed(usize),
+}
+
+fn read_for_trust(path: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(Some(text)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => match fs::symlink_metadata(path) {
+            Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            _ => Err(error),
+        },
+        Err(error) => Err(error),
+    }
+}
+
+fn host_glob(pattern: &[u8], host: &[u8]) -> bool {
+    let (mut p, mut h) = (0, 0);
+    let mut star = None;
+    while h < host.len() {
+        match pattern.get(p) {
+            Some(b'*') => {
+                p += 1;
+                star = Some((p, h));
+            }
+            Some(c) if *c == b'?' || c.eq_ignore_ascii_case(&host[h]) => {
+                p += 1;
+                h += 1;
+            }
+            _ => match star {
+                Some((next, matched)) => {
+                    h = matched + 1;
+                    p = next;
+                    star = Some((next, h));
+                }
+                None => return false,
+            },
+        }
+    }
+    pattern[p..].iter().all(|c| *c == b'*')
+}
+
+fn host_list_matches(names: &str, host: &str) -> bool {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use hmac::{Hmac, KeyInit, Mac};
+    use sha1::Sha1;
+
+    let mut positive = false;
+    for entry in names.split(',') {
+        let negative = entry.starts_with('!');
+        let name = entry.strip_prefix('!').unwrap_or(entry);
+        let matches = if let Some((salt, hash)) = name.strip_prefix("|1|").and_then(|value| value.split_once('|')) {
+            let (Ok(salt), Ok(hash)) = (STANDARD.decode(salt), STANDARD.decode(hash)) else { continue };
+            Hmac::<Sha1>::new_from_slice(&salt).is_ok_and(|mac| mac.chain_update(host).verify_slice(&hash).is_ok())
+        } else {
+            host_glob(name.as_bytes(), host.as_bytes())
+        };
+        if matches {
+            if negative {
+                return false;
+            }
+            positive = true;
+        }
+    }
+    positive
+}
+
+pub(crate) fn check(host: &str, port: u16, key: &russh::keys::PublicKey, path: &Path) -> std::io::Result<Trust> {
+    let Some(text) = read_for_trust(path)? else { return Ok(Trust::Unknown) };
+    let host = if port == 22 { host.to_owned() } else { format!("[{host}]:{port}") };
+    let mut changed = None;
+    let mut matched = false;
+    for (index, line) in text.lines().enumerate() {
+        let mut fields = line.split_whitespace();
+        let Some(mut names) = fields.next().filter(|field| !field.starts_with('#')) else { continue };
+        let marker = if names.starts_with('@') {
+            let marker = names;
+            names = fields.next().unwrap_or_default();
+            Some(marker)
+        } else {
+            None
+        };
+        if !host_list_matches(names, &host) || marker == Some("@cert-authority") {
+            continue;
+        }
+        let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid known_hosts entry on line {}", index + 1));
+        let (kind, data) = (fields.next().ok_or_else(invalid)?, fields.next().ok_or_else(invalid)?);
+        let recorded = russh::keys::PublicKey::from_openssh(&format!("{kind} {data}")).map_err(|_| invalid())?;
+        let same = recorded.key_data() == key.key_data();
+        match marker {
+            Some("@revoked") if same => return Ok(Trust::Changed(index + 1)),
+            Some("@revoked") => {}
+            Some(_) => return Err(invalid()),
+            None if same => matched = true,
+            None => { changed.get_or_insert(index + 1); }
+        }
+    }
+    Ok(if matched { Trust::Match } else { changed.map_or(Trust::Unknown, Trust::Changed) })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,6 +198,25 @@ mod tests {
     }
 
     #[test]
+    fn hostname_patterns_respect_exclusions_ports_and_revocation() {
+        assert!(host_list_matches("[*.example]:2222", "[NODE.example]:2222"));
+        assert!(!host_list_matches("[*.example]:2222", "[node.example]:22"));
+        assert!(!host_list_matches("!node.example", "other.example"));
+        assert!(!host_list_matches("*.example,!node.example", "NODE.example"));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let key = crate::session::tests::server::host_key();
+        let public = key.public_key().to_openssh().unwrap();
+        let pinned = format!("node1.example {public}");
+        let revoked = format!("@revoked !node2.example,NODE?.example {public}");
+        for text in [format!("{pinned}\n{revoked}"), format!("{revoked}\n{pinned}")] {
+            fs::write(&path, text).unwrap();
+            assert!(matches!(check("node1.example", 22, key.public_key(), &path).unwrap(), Trust::Changed(_)));
+            assert!(matches!(check("node2.example", 22, key.public_key(), &path).unwrap(), Trust::Unknown));
+        }
+    }
+
+    #[test]
     fn imports_new_lines_once_and_removes_them() {
         let dir = tempfile::tempdir().unwrap();
         let (from, to) = (dir.path().join("ssh_known_hosts"), dir.path().join("native/known_hosts"));
@@ -106,5 +226,11 @@ mod tests {
         let entries = read(&to);
         remove(&to, &entries[..1]).unwrap();
         assert_eq!(read(&to).iter().map(|e| e.hostnames.as_str()).collect::<Vec<_>>(), ["[10.0.0.1]:2222,alias", "bad.host"]);
+        let key = crate::session::tests::server::host_key();
+        assert!(matches!(check("host", 22, key.public_key(), &dir.path().join("missing")).unwrap(), Trust::Unknown));
+        fs::write(&to, [0xff]).unwrap();
+        assert_eq!(check("host", 22, key.public_key(), &to).err().unwrap().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(import(&from, &to).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(fs::read(&to).unwrap(), [0xff]);
     }
 }

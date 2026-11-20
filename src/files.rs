@@ -335,6 +335,11 @@ pub fn list_local(path: &str) -> Result<Vec<Entry>, String> {
         .flatten()
         .filter_map(|item| {
             let link = item.file_type().ok()?.is_symlink();
+            #[cfg(windows)]
+            let link = {
+                use std::os::windows::fs::MetadataExt;
+                link || item.metadata().ok()?.file_attributes() & 0x400 != 0
+            };
             let meta = std::fs::metadata(item.path()).or_else(|_| item.metadata()).ok()?;
             #[cfg(unix)]
             let mode = Some(std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o7777);

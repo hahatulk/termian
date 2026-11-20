@@ -667,9 +667,31 @@ pub fn sync_once(saved: Option<State>, server_id: &str, device: &mut dyn Device,
     })
 }
 
+fn snapshot_weight(value: &Value) -> usize {
+    match value {
+        Value::String(value) => 32usize.saturating_add(value.len()),
+        Value::Array(values) => values.iter().fold(32usize, |sum, value| sum.saturating_add(snapshot_weight(value))),
+        Value::Object(values) => values.iter().fold(64usize, |sum, (key, value)| {
+            sum.saturating_add(64).saturating_add(key.len()).saturating_add(snapshot_weight(value))
+        }),
+        _ => 32,
+    }
+}
+
 /// The importer's checks: format, unique ids, references that resolve, no
 /// group cycles; embedded copies are replaced with the canonical records.
 pub fn validate_snapshot(snapshot: &Value) -> Result<Value, String> {
+    validate_with_budget(snapshot, 128 * 1024 * 1024)
+}
+
+fn validate_with_budget(snapshot: &Value, limit: usize) -> Result<Value, String> {
+    let budget = std::cell::Cell::new(limit);
+    let charge = |weight| {
+        let remaining = budget.get().checked_sub(weight)
+            .ok_or("Self-cloud snapshot: normalized data exceeds the memory budget")?;
+        budget.set(remaining);
+        Ok::<_, String>(())
+    };
     let fail = |message: String| Err(format!("Self-cloud snapshot: {message}"));
     let Some(object) = snapshot.as_object() else { return fail("snapshot must be an object".into()) };
     if object.get("format").and_then(Value::as_str) != Some(FORMAT) || object.get("version").and_then(Value::as_u64) != Some(VERSION) {
@@ -678,7 +700,8 @@ pub fn validate_snapshot(snapshot: &Value) -> Result<Value, String> {
     if !object.get("settings").is_some_and(Value::is_object) {
         return fail("snapshot.settings must be an object".into());
     }
-    let mut indexes: HashMap<&str, HashMap<String, Value>> = HashMap::new();
+    charge(snapshot_weight(snapshot))?;
+    let mut indexes: HashMap<&str, HashMap<String, &Value>> = HashMap::new();
     for name in COLLECTIONS {
         let Some(list) = object.get(name).and_then(Value::as_array) else { return fail(format!("snapshot.{name} must be an array")) };
         let list: &[Value] = if name == "knownHosts" { &[] } else { list };
@@ -699,7 +722,7 @@ pub fn validate_snapshot(snapshot: &Value) -> Result<Value, String> {
                 return fail(format!("{name}[{index}] contains official-sync field {field}"));
             }
             let t = token(ref_id(value).expect("checked"));
-            if ids.insert(t, value.clone()).is_some() {
+            if ids.insert(t, value).is_some() {
                 return fail(format!("{name} contains duplicate id {}", ref_id(value).expect("checked")));
             }
         }
@@ -732,7 +755,7 @@ pub fn validate_snapshot(snapshot: &Value) -> Result<Value, String> {
         }
         Ok(())
     };
-    let list = |name: &str| object.get(name).and_then(Value::as_array).cloned().unwrap_or_default();
+    let list = |name: &str| object.get(name).and_then(Value::as_array).map_or(&[][..], Vec::as_slice);
     for (i, x) in list("identities").iter().enumerate() {
         has("sshKeys", x.get("ssh_key"), &format!("identities[{i}].ssh_key"), true)?;
     }
@@ -774,87 +797,100 @@ pub fn validate_snapshot(snapshot: &Value) -> Result<Value, String> {
         }
     }
     // Parent cycles would make import ordering unsafe.
+    let mut checked = HashSet::new();
     for group in list("groups") {
         let mut seen = HashSet::new();
         let mut current = Some(group);
         while let Some(g) = current {
-            let id = token(ref_id(&g).expect("checked"));
-            if !seen.insert(id.clone()) {
-                return fail(format!("group parent cycle at id {}", ref_id(&g).expect("checked")));
+            let id = token(ref_id(g).expect("checked"));
+            if checked.contains(&id) { break; }
+            if !seen.insert(id) {
+                return fail(format!("group parent cycle at id {}", ref_id(g).expect("checked")));
             }
-            current = g.get("parent_group").and_then(ref_id).and_then(|p| indexes["groups"].get(&token(p)).cloned());
+            current = g.get("parent_group").and_then(ref_id).and_then(|p| indexes["groups"].get(&token(p)).copied());
         }
+        checked.extend(seen);
     }
 
     // One canonical representation per relationship.
-    let canonical_of = |kind: &str, value: &Value, minimal: bool| -> Value {
-        let Some(id) = ref_id(value) else { return Value::Null };
-        let found = indexes[kind].get(&token(id)).cloned().unwrap_or(Value::Null);
-        if minimal { json!({"local_id": found.get("local_id").cloned().unwrap_or(Value::Null)}) } else { found }
+    let weights = std::cell::RefCell::new(HashMap::new());
+    let canonical_of = |kind: &str, value: &Value, minimal: bool| -> Result<Value, String> {
+        let Some(found) = ref_id(value).and_then(|id| indexes[kind].get(&token(id)).copied()) else {
+            return Ok(Value::Null);
+        };
+        if minimal {
+            charge(128usize.saturating_add(snapshot_weight(&found["local_id"])))?;
+            Ok(json!({"local_id": found["local_id"]}))
+        } else {
+            charge(*weights.borrow_mut().entry(std::ptr::from_ref(found)).or_insert_with(|| snapshot_weight(found)))?;
+            Ok(found.clone())
+        }
     };
-    let normalize_config = |config: &mut Value| {
+    let normalize_config = |config: &mut Value| -> Result<(), String> {
         for (field, kind, minimal) in [("identity", "identities", false), ("proxy", "proxies", false), ("startup_snippet", "snippets", true)] {
-            if let Some(value) = config.get(field).filter(|v| !v.is_null()).cloned() {
-                config[field] = canonical_of(kind, &value, minimal);
+            if let Some(value) = config.get(field).filter(|v| !v.is_null()) {
+                config[field] = canonical_of(kind, value, minimal)?;
             }
         }
-        if let Some(Value::Array(chain)) = config.get("host_chain").and_then(|c| c.get("hosts_chain")).cloned() {
-            config["host_chain"]["hosts_chain"] = Value::Array(chain.iter().map(|h| canonical_of("hosts", h, true)).collect());
+        if let Some(Value::Array(chain)) = config.get("host_chain").and_then(|c| c.get("hosts_chain")) {
+            config["host_chain"]["hosts_chain"] = Value::Array(chain.iter().map(|h| canonical_of("hosts", h, true)).collect::<Result<_, _>>()?);
         }
+        Ok(())
     };
     let mut out = snapshot.clone();
     out["knownHosts"] = json!([]);
     for x in out["identities"].as_array_mut().into_iter().flatten() {
-        if let Some(key) = x.get("ssh_key").filter(|v| !v.is_null()).cloned() {
-            x["ssh_key"] = canonical_of("sshKeys", &key, true);
+        if let Some(key) = x.get("ssh_key").filter(|v| !v.is_null()) {
+            x["ssh_key"] = canonical_of("sshKeys", key, true)?;
         }
     }
     for x in out["proxies"].as_array_mut().into_iter().flatten() {
-        if let Some(identity) = x.get("identity").filter(|v| !v.is_null()).cloned() {
-            x["identity"] = canonical_of("identities", &identity, false);
+        if let Some(identity) = x.get("identity").filter(|v| !v.is_null()) {
+            x["identity"] = canonical_of("identities", identity, false)?;
         }
     }
     for name in ["sshConfigs", "telnetConfigs"] {
         for x in out[name].as_array_mut().into_iter().flatten() {
-            normalize_config(x);
+            normalize_config(x)?;
         }
     }
-    let linked = |kind: &str, config: &Value| -> Value {
-        let mut result = canonical_of(kind, config, false);
+    let linked = |kind: &str, config: &Value| -> Result<Value, String> {
+        let mut result = canonical_of(kind, config, false)?;
         // A config's own protocol status is semantic and is kept.
         if let (Some(status), true) = (config.get("status"), result.is_object()) {
+            charge(snapshot_weight(status))?;
             result["status"] = status.clone();
         }
-        result
+        Ok(result)
     };
     for (name, parent) in [("groups", "parent_group"), ("hosts", "group")] {
         for x in out[name].as_array_mut().into_iter().flatten() {
-            if let Some(p) = x.get(parent).filter(|v| !v.is_null()).cloned() {
-                x[parent] = canonical_of("groups", &p, true);
+            if let Some(p) = x.get(parent).filter(|v| !v.is_null()) {
+                x[parent] = canonical_of("groups", p, true)?;
             }
             for (field, kind) in [("ssh_config", "sshConfigs"), ("telnet_config", "telnetConfigs")] {
-                if let Some(config) = x.get(field).filter(|v| !v.is_null()).cloned() {
-                    x[field] = linked(kind, &config);
+                if let Some(config) = x.get(field).filter(|v| !v.is_null()) {
+                    x[field] = linked(kind, config)?;
                 }
             }
         }
     }
     for x in out["snippets"].as_array_mut().into_iter().flatten() {
-        if let Some(package) = x.get("package").filter(|v| !v.is_null()).cloned() {
-            x["package"] = canonical_of("snippetPackages", &package, true);
+        if let Some(package) = x.get("package").filter(|v| !v.is_null()) {
+            x["package"] = canonical_of("snippetPackages", package, true)?;
         }
-        if let Some(Value::Array(targets)) = x.get("targetHosts").cloned() {
-            x["targetHosts"] = Value::Array(targets.iter().map(|h| canonical_of("hosts", h, true)).collect());
+        if let Some(Value::Array(targets)) = x.get("targetHosts") {
+            x["targetHosts"] = Value::Array(targets.iter().map(|h| canonical_of("hosts", h, true)).collect::<Result<_, _>>()?);
         }
     }
     for x in out["portForwardingRules"].as_array_mut().into_iter().flatten() {
         let host = x.get("host").cloned().unwrap_or(Value::Null);
-        x["host"] = canonical_of("hosts", &host, true);
+        x["host"] = canonical_of("hosts", &host, true)?;
     }
     for x in out["workspaceTemplates"].as_array_mut().into_iter().flatten() {
         for terminal in x["workspaceTerminals"].as_array_mut().into_iter().flatten() {
             let host = terminal.get("host").cloned().unwrap_or(Value::Null);
-            terminal["host"] = canonical_of("hosts", &host, true);
+            terminal["host"] = canonical_of("hosts", &host, true)?;
         }
     }
     Ok(out)
@@ -1198,5 +1234,8 @@ mod tests {
         snapshot["hosts"] = json!([{"local_id": "h", "label": "web", "ssh_config": {"local_id": "c", "port": 1}}]);
         let normalized = validate_snapshot(&snapshot).unwrap();
         assert_eq!(normalized["hosts"][0]["ssh_config"]["port"], 2222);
+        let weight = snapshot_weight(&snapshot);
+        assert!(validate_with_budget(&snapshot, weight).unwrap_err().contains("memory budget"));
+        assert_eq!(validate_with_budget(&snapshot, weight + snapshot_weight(&snapshot["sshConfigs"][0])).unwrap(), normalized);
     }
 }

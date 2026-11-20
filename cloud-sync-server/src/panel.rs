@@ -160,27 +160,46 @@ enum Opened {
 
 /// Decrypt the stored snapshot with the limiter applied. The client's wrong
 /// passphrases consume the same kind of lockout as wrong bearer tokens.
-async fn open_with_limit(state: &Shared, passphrase: String) -> Result<Opened, Response> {
-    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+fn decrypt_slot(state: &Shared) -> Result<tokio::sync::OwnedSemaphorePermit, Response> {
+    state.panel_decrypt.clone().try_acquire_owned()
+        .map_err(|_| too_many_attempts(std::time::Duration::from_secs(1)))
+}
+
+type Peer = Option<axum::extract::ConnectInfo<std::net::SocketAddr>>;
+
+fn peer_ip(peer: Peer) -> std::net::IpAddr {
+    peer.map_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), |peer| peer.0.ip())
+}
+
+async fn open_with_limit(state: &Shared, ip: std::net::IpAddr, passphrase: String, export: bool) -> Result<(Opened, Option<Vec<u8>>, tokio::sync::OwnedSemaphorePermit), Response> {
+    let permit = decrypt_slot(state)?;
     if let Some(left) = state.panel_limiter.locked(ip) {
         return Err(too_many_attempts(left));
     }
     let storage = state.clone();
-    let result = tokio::task::spawn_blocking(move || -> Result<Opened, &'static str> {
-        let Some(data) = crate::with_storage(&storage, current).map_err(|_| "storage")? else {
-            return Ok(Opened::Missing);
-        };
-        let snapshot = open_envelope(&data, &passphrase)?;
-        Ok(Opened::Decrypted { snapshot, bytes: data.len(), revision: crate::digest(&data) })
+    let (result, permit) = tokio::task::spawn_blocking(move || {
+        let result = (|| -> Result<(Opened, Option<Vec<u8>>), &'static str> {
+            let Some(data) = crate::with_storage(&storage, current).map_err(|_| "storage")? else {
+                return Ok((Opened::Missing, None));
+            };
+            let snapshot = open_envelope(&data, &passphrase)?;
+            let body = if export {
+                Some(serde_json::to_vec(&snapshot).map_err(|_| "format")?)
+            } else {
+                None
+            };
+            Ok((Opened::Decrypted { snapshot, bytes: data.len(), revision: crate::digest(&data) }, body))
+        })();
+        (result, permit)
     })
     .await
     .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Внутренняя ошибка"))?;
     match result {
-        Ok(opened) => {
+        Ok((opened, body)) => {
             if matches!(opened, Opened::Decrypted { .. }) {
                 state.panel_limiter.succeed(ip);
             }
-            Ok(opened)
+            Ok((opened, body, permit))
         }
         Err("storage") => Err(error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось прочитать снимок")),
         Err("format") => Err(error(StatusCode::UNPROCESSABLE_ENTITY, "Снимок повреждён или имеет неизвестный формат")),
@@ -290,14 +309,14 @@ fn snapshot_summary(snapshot: &Value, bytes: usize) -> Value {
     })
 }
 
-async fn unlock(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+async fn unlock(State(state): State<Shared>, peer: Peer, headers: HeaderMap, body: Bytes) -> Response {
     let request: Unlock = match read_request(&headers, &body) {
         Ok(request) => request,
         Err(response) => return response,
     };
-    match open_with_limit(&state, request.passphrase).await {
-        Ok(Opened::Missing) => Json(json!({"server": server_info(&state).await, "snapshot": null})).into_response(),
-        Ok(Opened::Decrypted { snapshot, bytes, revision }) => {
+    match open_with_limit(&state, peer_ip(peer), request.passphrase, false).await {
+        Ok((Opened::Missing, _, _permit)) => Json(json!({"server": server_info(&state).await, "snapshot": null})).into_response(),
+        Ok((Opened::Decrypted { snapshot, bytes, revision }, _, _permit)) => {
             let mut server = server_info(&state).await;
             server["revision"] = revision.into();
             Json(json!({"server": server, "snapshot": snapshot_summary(&snapshot, bytes)})).into_response()
@@ -306,15 +325,31 @@ async fn unlock(State(state): State<Shared>, headers: HeaderMap, body: Bytes) ->
     }
 }
 
-async fn export(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+fn require_panel_token(state: &Shared, ip: std::net::IpAddr, headers: &HeaderMap) -> Result<(), Response> {
+    if let Some(left) = state.panel_tokens.locked(ip) {
+        return Err(too_many_attempts(left));
+    }
+    if !crate::authorized(headers, state) {
+        return Err(match state.panel_tokens.fail(ip) {
+            Some(left) => too_many_attempts(left),
+            None => error(StatusCode::UNAUTHORIZED, "Неверный токен доступа"),
+        });
+    }
+    state.panel_tokens.succeed(ip);
+    Ok(())
+}
+
+async fn export(State(state): State<Shared>, peer: Peer, headers: HeaderMap, body: Bytes) -> Response {
     let request: Unlock = match read_request(&headers, &body) {
         Ok(request) => request,
         Err(response) => return response,
     };
-    match open_with_limit(&state, request.passphrase).await {
-        Ok(Opened::Missing) => error(StatusCode::NOT_FOUND, "На сервере ещё нет снимка"),
-        Ok(Opened::Decrypted { snapshot, .. }) => {
-            let body = serde_json::to_vec_pretty(&snapshot).unwrap_or_default();
+    let ip = peer_ip(peer);
+    if let Err(response) = require_panel_token(&state, ip, &headers) {
+        return response;
+    }
+    match open_with_limit(&state, ip, request.passphrase, true).await {
+        Ok((_, Some(body), _permit)) => {
             (
                 [
                     (header::CONTENT_TYPE, "application/json; charset=utf-8"),
@@ -324,6 +359,7 @@ async fn export(State(state): State<Shared>, headers: HeaderMap, body: Bytes) ->
             )
                 .into_response()
         }
+        Ok(_) => error(StatusCode::NOT_FOUND, "На сервере ещё нет снимка"),
         Err(response) => response,
     }
 }
@@ -336,17 +372,24 @@ struct Rotation {
     confirmed: bool,
 }
 
-async fn rotate_password(State(state): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+async fn rotate_password(State(state): State<Shared>, peer: Peer, headers: HeaderMap, body: Bytes) -> Response {
     let request: Rotation = match read_request(&headers, &body) {
         Ok(request) => request,
         Err(response) => return response,
     };
-    if !request.confirmed || request.new_passphrase.chars().count() < 12
+    if !request.confirmed || request.new_passphrase.is_empty()
         || request.new_passphrase.len() > 4096 || request.new_passphrase == request.passphrase
     {
-        return error(StatusCode::BAD_REQUEST, "Подтвердите замену и введите новый пароль длиной от 12 символов (до 4096 байт).");
+        return error(StatusCode::BAD_REQUEST, "Подтвердите замену и введите новый пароль (до 4096 байт).");
     }
-    let ip = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+    let ip = peer_ip(peer);
+    if let Err(response) = require_panel_token(&state, ip, &headers) {
+        return response;
+    }
+    let permit = match decrypt_slot(&state) {
+        Ok(permit) => permit,
+        Err(response) => return response,
+    };
     if let Some(left) = state.panel_limiter.locked(ip) {
         return too_many_attempts(left);
     }
@@ -354,19 +397,16 @@ async fn rotate_password(State(state): State<Shared>, headers: HeaderMap, body: 
         Some(lockout) => too_many_attempts(lockout),
         None => error(StatusCode::UNAUTHORIZED, "Неверный токен или текущий пароль шифрования"),
     };
-    if !crate::authorized(&headers, &state) {
-        return wrong_credentials();
-    }
     let working = state.clone();
-    match tokio::task::spawn_blocking(move || rotate(&working, &request)).await {
-        Ok(Ok(revision)) => {
+    match tokio::task::spawn_blocking(move || (rotate(&working, &request), permit)).await {
+        Ok((Ok(revision), _permit)) => {
             state.panel_limiter.succeed(ip);
             Json(json!({"revision": revision})).into_response()
         }
-        Ok(Err("passphrase")) => wrong_credentials(),
-        Ok(Err("revision")) => error(StatusCode::CONFLICT, "Снимок изменился. Обновите панель и повторите."),
-        Ok(Err("missing")) => error(StatusCode::NOT_FOUND, "На сервере ещё нет снимка"),
-        Ok(Err("format" | "log")) => error(StatusCode::UNPROCESSABLE_ENTITY, "Снимок или журнал нельзя расшифровать текущим паролем. Данные не изменены."),
+        Ok((Err("passphrase"), _permit)) => wrong_credentials(),
+        Ok((Err("revision"), _permit)) => error(StatusCode::CONFLICT, "Снимок изменился. Обновите панель и повторите."),
+        Ok((Err("missing"), _permit)) => error(StatusCode::NOT_FOUND, "На сервере ещё нет снимка"),
+        Ok((Err("format" | "log"), _permit)) => error(StatusCode::UNPROCESSABLE_ENTITY, "Снимок или журнал нельзя расшифровать текущим паролем. Данные не изменены."),
         _ => error(StatusCode::INTERNAL_SERVER_ERROR, "Не удалось завершить смену пароля. Проверьте снимок перед повтором."),
     }
 }

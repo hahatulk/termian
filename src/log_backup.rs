@@ -300,7 +300,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = root.path().join("a/logs");
         let target = root.path().join("b/logs");
-        let backups = root.path().join("backups");
+        let backups = crate::store::Store::new(root.path().join("vault.bin"), [3; 32]).cloud_backups();
         fs::create_dir_all(&source).unwrap();
         let mut a = Vault { cloud: Some(cloud.clone()), ..Vault::default() };
         let mut b = a.clone();
@@ -362,7 +362,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let logs = dir.path().join("source");
         let received = dir.path().join("received");
-        let backups = dir.path().join("backups");
+        let backups = crate::store::Store::new(dir.path().join("vault.bin"), [3; 32]).cloud_backups();
         fs::create_dir_all(&logs).unwrap();
         let mut source = Vault { cloud: Some(config.clone()), ..Vault::default() };
         let mut target = source.clone();

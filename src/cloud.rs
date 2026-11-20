@@ -56,9 +56,6 @@ impl CloudConfig {
         if self.token.is_empty() || self.token.len() > MAX_SECRET_LENGTH || !self.token.bytes().all(|b| (0x21..=0x7e).contains(&b)) {
             return Err("Недопустимый токен".into());
         }
-        if self.passphrase.chars().count() < 12 || self.passphrase.len() > MAX_SECRET_LENGTH {
-            return Err("Пароль шифрования должен содержать не менее 12 символов".into());
-        }
         let basic = if self.basic_user.is_empty() {
             None
         } else {
@@ -76,6 +73,9 @@ impl CloudConfig {
 
     /// Removes the secrets from a message that may echo server text.
     pub fn redact(&self, message: &str) -> String {
+        if message == WRONG_PASSPHRASE {
+            return message.to_owned();
+        }
         let mut message = message.to_owned();
         for secret in [&self.token, &self.passphrase, &self.basic_password] {
             if !secret.is_empty() {
@@ -416,7 +416,13 @@ pub(crate) mod tests {
         assert!(config("http://nas.local:8080").validate().is_ok());
         assert_eq!(config("http://sync.example.com").validate().unwrap_err(), "Используйте HTTPS (HTTP разрешен только для локальной сети)");
         assert!(config("https://user:pw@sync.example.com").validate().is_err());
-        assert!(CloudConfig { passphrase: "short".into(), ..config("https://a.example") }.validate().is_err());
+        let long = "  密碼🔑!  ".repeat(1024);
+        for password in ["", "7", " !ф🔑 ", long.as_str()] {
+            let cloud = CloudConfig { passphrase: password.into(), ..config("https://a.example") }.validate().unwrap();
+            let value = serde_json::json!({"version": 1});
+            assert_eq!(open(&seal(&value, &cloud.passphrase).unwrap(), password).unwrap(), value);
+            assert_eq!(CloudConfig { passphrase: password.into(), ..CloudConfig::default() }.redact(WRONG_PASSPHRASE), WRONG_PASSPHRASE);
+        }
         assert!(CloudConfig { token: "has space".into(), ..config("https://a.example") }.validate().is_err());
         assert!(CloudConfig { basic_user: "u".into(), ..config("https://a.example") }.validate().is_err(), "Basic needs a password");
         let endpoint = |u: &str| snapshot_endpoint(&url::Url::parse(u).unwrap()).to_string();

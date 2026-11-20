@@ -92,6 +92,8 @@ pub struct Shell {
     sftp_dialog_focus: FocusHandle,
     cloud: ui::cloud::CloudState,
     privacy: ui::privacy::Privacy,
+    app_menu: Option<ui::settings::AppMenu>,
+    app_menu_focus: FocusHandle,
     update: ui::update::UpdateState,
     main_window: Option<gpui::WindowHandle<Shell>>,
     /// Bundled terminal fonts already given to the text system.
@@ -309,6 +311,8 @@ impl Shell {
             sftp_dialog_focus: cx.focus_handle(),
             cloud: Default::default(),
             privacy: Default::default(),
+            app_menu: None,
+            app_menu_focus: cx.focus_handle(),
             update: Default::default(),
             main_window: None,
             loaded_fonts: Default::default(),
@@ -445,7 +449,7 @@ impl Shell {
     /// Adds a history entry with a fresh encrypted session log (FR-L1, FR-L2).
     fn record_session(&mut self, host: Option<HostId>, label: &str, subtitle: String, log_os: Option<String>) -> (u64, Option<session_log::SessionLog>) {
         let key = session_log::new_key();
-        let name = uuid::Uuid::new_v4().to_string();
+        let name = session_log::new_name();
         let log = if self.vault.logs_disabled { None } else { session_log::SessionLog::start(&self.logs_dir, &name, key).ok() };
         let entry = HistoryEntry {
             host,
@@ -584,7 +588,7 @@ impl Shell {
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.privacy_locked() {
-            return self.render_privacy(cx);
+            return self.render_privacy(window, cx);
         }
         let chrome = self.chrome(cx);
         let tabs: Vec<_> = self.tabs.all().iter().map(|tab| self.render_tab(tab, chrome, cx)).collect();
@@ -637,7 +641,8 @@ impl Render for Shell {
                     .child(self.render_privacy_button(cx))
                     .child(self.render_cloud_button(cx))
                     .children(self.render_broadcast_button(cx))
-                    .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx))),
+                    .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx)))
+                    .child(self.render_app_menu_button(cx)),
             )
             .child(div().flex_1().min_h_0().child(content))
             .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))
@@ -655,6 +660,7 @@ impl Render for Shell {
             .children(self.render_palette(window, cx))
             .children(self.render_tab_menu(window, cx))
             .children(self.render_update_notice(cx))
+            .children(self.render_app_menu(cx))
             .children(self.render_cloud(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
             .map(|root| self.on_shortcut_actions(root, cx))
@@ -766,7 +772,7 @@ fn open_main_window(store: Store, vault: Vault, cx: &mut App) {
     )
     .expect("failed to open the main window");
     let _ = main.update(cx, |shell, _, _| shell.main_window = Some(main));
-    ui::settings::install_menus(main, cx);
+    ui::settings::install_actions(main, cx);
     if let Ok(settings) = main.read(cx).map(|shell| shell.vault.shortcuts.clone()) {
         ui::shortcut_actions::bind(&settings, cx);
     }

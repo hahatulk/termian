@@ -18,6 +18,7 @@ pub mod login;
 pub mod motion;
 pub mod palette;
 pub mod portable;
+pub mod privacy_password;
 pub mod remote_fs;
 pub mod session;
 pub mod serial;

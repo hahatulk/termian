@@ -149,7 +149,7 @@ impl Shell {
     }
 
     fn cycle_tab(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cloud_keyboard_scope().is_some() || self.palette.is_some() || self.list.menu.is_some() { return; }
+        if self.cloud_keyboard_scope().is_some() || self.palette.is_some() || self.list.menu.is_some() || self.app_menu.is_some() { return; }
         self.tabs.cycle(step);
         self.focus_active(window, cx);
     }
@@ -183,7 +183,7 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &NextTab, window, cx| shell.cycle_tab(1, window, cx)))
             .on_action(cx.listener(|shell, _: &PreviousTab, window, cx| shell.cycle_tab(-1, window, cx)))
             .on_action(cx.listener(|shell, _: &FocusWindowControls, window, _| {
-                if shell.cloud_keyboard_scope().is_none() && shell.palette.is_none() && shell.list.menu.is_none() {
+                if shell.cloud_keyboard_scope().is_none() && shell.palette.is_none() && shell.list.menu.is_none() && shell.app_menu.is_none() {
                     window.focus(&shell.root_focus);
                     window.focus_next();
                 }

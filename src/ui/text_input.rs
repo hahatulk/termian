@@ -3,8 +3,9 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 
 use gpui::{
-    App, ClipboardItem, Context, Div, EntityId, Global, Keystroke, Modifiers, MouseButton, Pixels,
-    Point, SharedString, Stateful, Window, anchored, deferred, div, prelude::*, px, rgb, rgba,
+    anchored, canvas, deferred, div, fill, point, prelude::*, px, rgb, rgba, size, App, Bounds,
+    ClipboardItem, ContentMask, Context, Div, EntityId, Global, Keystroke, Modifiers, MouseButton,
+    Pixels, Point, SharedString, Stateful, TextRun, Window,
 };
 use termian_native::theme;
 
@@ -355,6 +356,102 @@ pub fn edit<T: 'static>(
     if changed { Key::Edited } else { Key::Ignored }
 }
 
+fn line(
+    value: &str,
+    placeholder: &str,
+    focused: bool,
+    secret: bool,
+    selection: Range<usize>,
+    cursor: usize,
+) -> Div {
+    let placeholder_shown = value.is_empty();
+    let (text, selection, cursor) = if placeholder_shown {
+        (placeholder.to_owned(), 0..0, 0)
+    } else if secret {
+        let index = |offset| value[..offset].chars().count() * '•'.len_utf8();
+        (
+            "•".repeat(value.chars().count()),
+            index(selection.start)..index(selection.end),
+            index(cursor),
+        )
+    } else {
+        (value.replace(['\r', '\n'], " "), selection, cursor)
+    };
+    let text = SharedString::from(text);
+    let color = rgb(if placeholder_shown {
+        theme::TEXT_MUTED
+    } else {
+        theme::TEXT
+    })
+    .into();
+    let caret_width = px(1.5);
+    div().flex_1().min_w_0().h(px(20.)).child(
+        canvas(
+            move |_, window, _| {
+                let style = window.text_style();
+                let font_size = style.font_size.to_pixels(window.rem_size());
+                let run = TextRun {
+                    len: text.len(),
+                    font: style.font(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                window
+                    .text_system()
+                    .shape_line(text, font_size, &[run], None)
+            },
+            move |bounds, text, window, cx| {
+                let cursor_x = if placeholder_shown {
+                    px(0.)
+                } else {
+                    text.x_for_index(cursor)
+                };
+                let scroll = if focused {
+                    (cursor_x - (bounds.size.width - caret_width).max(px(0.))).max(px(0.))
+                } else {
+                    px(0.)
+                };
+                let origin = point(bounds.left() - scroll, bounds.top());
+                let text_origin = point(
+                    origin.x
+                        + if placeholder_shown && focused {
+                            px(3.)
+                        } else {
+                            px(0.)
+                        },
+                    origin.y,
+                );
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    if focused && !selection.is_empty() {
+                        let a = text.x_for_index(selection.start);
+                        let b = text.x_for_index(selection.end);
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(origin.x + a.min(b), origin.y),
+                                size((b - a).abs(), bounds.size.height),
+                            ),
+                            rgba(0x5372e866),
+                        ));
+                    }
+                    let _ = text.paint(text_origin, bounds.size.height, window, cx);
+                    if focused && selection.is_empty() {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(origin.x + cursor_x, origin.y + px(2.)),
+                                size(caret_width, px(16.)),
+                            ),
+                            rgb(theme::TEXT),
+                        ));
+                    }
+                });
+            },
+        )
+        .size_full(),
+    )
+}
+
 pub fn text<T: 'static>(
     key: impl Debug,
     value: &str,
@@ -374,13 +471,17 @@ pub fn text<T: 'static>(
         .map_or((value.len()..value.len(), value.len()), |state| {
             (state.editor.selection(), state.editor.cursor)
         });
-    let show = |s: &str| {
-        if matches!(mode, Mode::Secret) {
-            "•".repeat(s.chars().count())
-        } else {
-            s.to_owned()
-        }
-    };
+    if matches!(mode, Mode::Line | Mode::Secret) {
+        return line(
+            value,
+            placeholder,
+            focused,
+            matches!(mode, Mode::Secret),
+            range,
+            cursor,
+        );
+    }
+    let show = |s: &str| s.to_owned();
     let caret = || {
         div()
             .mx(px(1.))

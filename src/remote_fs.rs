@@ -378,7 +378,7 @@ mod tests {
             }
         }
     }
-    use crate::transfer::{Item, Planned};
+    use crate::transfer::{Destination, Item, Planned};
 
     /// Logs in to a fresh test server that serves `root`.
     fn connected(root: &std::path::Path, state: &std::path::Path) -> (RemoteFs, UnboundedReceiver<RemoteEvent>) {
@@ -408,7 +408,7 @@ mod tests {
 
     fn job(direction: Direction, source_dir: &str, destination_dir: &str, name: &str, is_dir: bool) -> Job {
         let item = Item { name: name.into(), is_dir };
-        Job { direction, source_dir: source_dir.into(), destination_dir: destination_dir.into(), planned: Planned { target: name.into(), item, replace: false } }
+        Job { direction, source_dir: source_dir.into(), destination_dir: destination_dir.into(), planned: Planned { target: name.into(), item, destination: Destination::Create } }
     }
 
     /// Transfer events until it ends; failures are answered with `on_failure`.
@@ -487,7 +487,7 @@ mod tests {
         let (mut remote, mut events) = connected(served.path(), state.path());
 
         let mut replacing = job(Direction::Upload, local.path().to_str().unwrap(), "/", "site", true);
-        replacing.planned.replace = true;
+        replacing.planned.destination = Destination::Replace;
         let id = remote.transfer(replacing);
         assert_eq!(finish(&mut remote, &mut events, id, Control::Cancel).last(), Some(&TransferEvent::Finished));
         assert!(!served.path().join("site/old").exists());

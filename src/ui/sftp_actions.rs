@@ -16,7 +16,7 @@ use termian_native::edits::{open_path, Associations, EditId, Edited, Edits};
 use termian_native::files::{delete_title, format_size, format_time, join, list_local, name_error, parent, Entry, PERMISSION_BITS};
 use termian_native::remote_fs::{self, Operation, TransferId};
 use termian_native::theme;
-use termian_native::transfer::{Conflict, ConflictQuestion, Control, Direction, Item, Job, Planned, Progress, Resolver, Step, TransferEvent};
+use termian_native::transfer::{Conflict, ConflictQuestion, Control, Destination, Direction, Item, Job, Planned, Progress, Resolver, Step, TransferEvent};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
@@ -444,7 +444,7 @@ impl Shell {
                 self.sftp.actions.edit_sides.insert(file.id, side);
                 let Some(remote) = self.sftp.remote_mut(side) else { return };
                 let item = Item { name: entry.name.clone(), is_dir: false };
-                let planned = Planned { target: entry.name.clone(), item, replace: false };
+                let planned = Planned { target: entry.name.clone(), item, destination: Destination::Create };
                 let job = Job { direction: Direction::Download, source_dir: dir, destination_dir: file.local_dir(), planned };
                 let id = remote.connection.transfer(job);
                 self.sftp.actions.transfers.push(TransferRow {
@@ -521,7 +521,7 @@ impl Shell {
             direction: Direction::Upload,
             source_dir: file.local_dir(),
             destination_dir,
-            planned: Planned { target: name.clone(), item, replace: true },
+            planned: Planned { target: name.clone(), item, destination: Destination::Replace },
         };
         let id = remote.connection.transfer(job);
         self.sftp.actions.transfers.push(TransferRow {
@@ -740,7 +740,7 @@ impl Shell {
                             None => (copy.destination_dir.clone(), After::Nothing),
                         };
                         // The temporary folder is empty: the first half never replaces anything.
-                        let planned = if copy.relay_to.is_some() { Planned { replace: false, ..planned } } else { planned };
+                        let planned = if copy.relay_to.is_some() { Planned { destination: Destination::Create, ..planned } } else { planned };
                         let job = Job { direction: copy.direction, source_dir: copy.source_dir.clone(), destination_dir, planned };
                         let Some(remote) = self.sftp.remote_mut(copy.conn) else { continue };
                         let id = remote.connection.transfer(job);

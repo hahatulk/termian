@@ -13,7 +13,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use russh::client::{self, Handle, KeyboardInteractiveAuthResponse};
 use russh::keys::{
-    check_known_hosts_path, known_hosts::learn_known_hosts_path, load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey,
+    known_hosts::learn_known_hosts_path, load_secret_key, HashAlg, PrivateKeyWithHashAlg, PublicKey,
     PublicKeyOrCertificate,
 };
 use russh::ChannelMsg;
@@ -591,17 +591,21 @@ impl client::Handler for Verifier {
         let mut io = self.io.lock().await;
         io.event(LoginEvent::Stage(Stage::Verifying));
         io.log(format!("Server host key: {} {fingerprint}", info.algorithm));
-        match check_known_hosts_path(&self.host, self.port, &key, &self.known_hosts) {
-            Ok(true) => {
+        match crate::known_hosts::check(&self.host, self.port, &key, &self.known_hosts) {
+            Ok(crate::known_hosts::Trust::Match) => {
                 io.log("Host key matches a known_hosts entry".into());
                 return Ok(true);
             }
-            Err(russh::keys::Error::KeyChanged { line }) => {
+            Ok(crate::known_hosts::Trust::Changed(line)) => {
                 io.log(format!("Host key differs from known_hosts line {line}"));
                 io.event(LoginEvent::HostKeyChanged(info));
                 return Ok(false);
             }
-            _ => {}
+            Ok(crate::known_hosts::Trust::Unknown) => {}
+            Err(error) => {
+                io.log(format!("Cannot read known_hosts: {error}"));
+                return Err(std::io::Error::new(error.kind(), format!("Cannot read known_hosts: {error}")).into());
+            }
         }
         match io.host_key(info).await {
             HostKeyDecision::Reject => Ok(false),
@@ -1171,6 +1175,7 @@ pub(crate) mod tests {
         /// when `root` is set, serves that directory over SFTP.
         #[derive(Default)]
         struct Echo {
+            rsa_user_key: Option<PublicKey>,
             root: Option<std::path::PathBuf>,
             channel: Option<Channel<Msg>>,
             sftp: std::collections::HashSet<ChannelId>,
@@ -1338,7 +1343,8 @@ pub(crate) mod tests {
             }
 
             async fn auth_publickey(&mut self, user: &str, key: server::VerifiedPublicKey<'_>) -> Result<Auth, Self::Error> {
-                let accepted = key.public_key.to_openssh().is_ok_and(|k| k.starts_with(crate::keys::tests::PLAIN_PUBLIC));
+                let accepted = self.rsa_user_key.as_ref().is_some_and(|k| k.key_data() == key.public_key.key_data())
+                    || key.public_key.to_openssh().is_ok_and(|k| k.starts_with(crate::keys::tests::PLAIN_PUBLIC));
                 Ok(if user == "root" && accepted { Auth::Accept } else { Auth::reject() })
             }
 
@@ -1474,14 +1480,14 @@ pub(crate) mod tests {
 
         /// Starts a one-connection server on a free port.
         pub fn start() -> u16 {
-            start_with(None)
+            start_with(None, None)
         }
 
         pub fn start_with_sftp(root: std::path::PathBuf) -> u16 {
-            start_with(Some(root))
+            start_with(Some(root), None)
         }
 
-        fn start_with(root: Option<std::path::PathBuf>) -> u16 {
+        pub(super) fn start_with(root: Option<std::path::PathBuf>, rsa_user_key: Option<PublicKey>) -> u16 {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             listener.set_nonblocking(true).unwrap();
@@ -1495,7 +1501,7 @@ pub(crate) mod tests {
                         ..Default::default()
                     });
                     let (socket, _) = listener.accept().await.unwrap();
-                    let running = server::run_stream(config, socket, Echo { root, channel: None, sftp: Default::default() }).await.unwrap();
+                    let running = server::run_stream(config, socket, Echo { root, rsa_user_key, channel: None, sftp: Default::default() }).await.unwrap();
                     let _ = running.await;
                 });
             });
@@ -1703,6 +1709,19 @@ pub(crate) mod tests {
         assert!(output.contains("<prompt Passphrase for the Keychain key"), "{output:?}");
         session.answer(Answer::Text(Some(crate::keys::tests::PASSPHRASE.into())));
         assert!(collect_until(&mut session, "echo=false>").contains("password"));
+    }
+
+    #[test]
+    fn rsa_key_authenticates_over_ssh() {
+        let dir = tempfile::tempdir().unwrap();
+        let pair = crate::keys::generate(crate::keys::KeyAlgorithm::Rsa(2048), "").unwrap();
+        let port = server::start_with(None, Some(PublicKey::from_openssh(&pair.public_key).unwrap()));
+        let mut target = target(port, dir.path().join("known_hosts"));
+        target.key = Some(LoginKey::new(pair.private_key, None));
+        let mut session = ssh(target, 80, 24);
+        collect_until(&mut session, "<hostkey");
+        session.answer(Answer::HostKey(HostKeyDecision::Once));
+        assert!(collect_until(&mut session, "welcome").contains("welcome"));
     }
 
     #[test]

@@ -139,10 +139,6 @@ impl ConfigForm {
             Some("Введите адрес сервера")
         } else if self.token.is_empty() && !self.has_token {
             Some("Введите токен доступа")
-        } else if self.passphrase.is_empty() && !self.has_passphrase {
-            Some("Введите пароль шифрования")
-        } else if !self.passphrase.is_empty() && self.passphrase.chars().count() < 12 {
-            Some("Пароль шифрования должен содержать не менее 12 символов")
         } else if self.basic && self.basic_user.trim().is_empty() {
             Some("Введите логин Basic auth")
         } else if self.basic && self.basic_password.is_empty() && !self.has_basic_password {
@@ -185,9 +181,9 @@ struct Run {
 
 impl Run {
     fn checked(&mut self, status: Status, at: i64) {
+        self.confirm = matches!(&status, Status::Checked(preview) if *preview != Preview::Unconfigured);
         self.panel = Some(status);
         self.checked_at = Some(at);
-        self.confirm = true;
     }
 
     /// Applies a finished operation; the status text is returned.
@@ -496,7 +492,7 @@ impl Shell {
         }
         let started = self.vault.clone();
         let mut vault = started.clone();
-        let backups = self_cloud::default_backup_dir();
+        let backups = self.store.cloud_backups();
         let logs_dir = self.logs_dir.clone();
         let active = self.workspaces.values().flat_map(|workspace| workspace.panes.values().filter_map(|pane| pane.history))
             .filter(|id| self.vault.history.iter().any(|entry| entry.id == *id && entry.disconnected_at.is_none())).collect();
@@ -582,7 +578,7 @@ impl Shell {
             }
         };
         let rotating = self.vault.cloud.as_ref().is_some_and(|saved| {
-            !saved.passphrase.is_empty() && saved.passphrase != candidate.passphrase
+            saved.passphrase != candidate.passphrase
                 && termian_native::sync::server_key(&saved.url) == termian_native::sync::server_key(&candidate.url)
         });
         if !rotating {
@@ -724,7 +720,7 @@ impl Shell {
         let mode = if secret { Mode::Secret } else { Mode::Line };
         let input = div()
             .id(SharedString::from(format!("cloud-field-{field:?}")))
-            .h(px(36.)).px(px(11.)).flex().items_center().rounded(px(6.)).border_1()
+            .w_full().min_w_0().h(px(36.)).px(px(11.)).flex_none().flex().items_center().rounded(px(6.)).border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { BORDER }))
             .bg(rgb(theme::SURFACE_ACTIVE)).text_size(px(13.)).font_weight(FontWeight::NORMAL)
             .when(!enabled || *busy, |d| d.opacity(0.5))
@@ -747,7 +743,7 @@ impl Shell {
     fn render_cloud_config(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(CloudDialog { body: Body::Config(form), busy, .. }) = &self.cloud.dialog else { return vec![] };
         let token_hint = if form.has_token { "Токен сохранён. Поле — только для замены." } else { "Токен ещё не сохранён." };
-        let passphrase_hint = if form.has_passphrase { SAVED_SECRET } else { "Пароль ещё не сохранён." };
+        let passphrase_hint = if form.has_passphrase { SAVED_SECRET } else { "Если снимок зашифрован пустым паролем, оставьте поле пустым." };
         let basic_hint = form.has_basic_password.then_some(SAVED_SECRET);
         // The legacy Settings window holds this switch; the native client has no Settings yet.
         let auto_sync = configured(&self.vault).then(|| self.vault.cloud.as_ref().is_some_and(|c| c.auto_sync));
@@ -756,7 +752,7 @@ impl Shell {
         vec![
             self.cloud_input(Field::Url, "Адрес сервера", &form.url, false, "https://cloud.example/v1/snapshot", None, true, cx).into_any_element(),
             self.cloud_input(Field::Token, "Токен доступа", &form.token, true, "Введите токен сервера", Some(token_hint), true, cx).into_any_element(),
-            self.cloud_input(Field::Passphrase, "Пароль шифрования", &form.passphrase, true, "Не менее 12 символов", Some(passphrase_hint), true, cx).into_any_element(),
+            self.cloud_input(Field::Passphrase, "Пароль шифрования", &form.passphrase, true, "Пароль снимка", Some(passphrase_hint), true, cx).into_any_element(),
             div()
                 .p(px(12.))
                 .flex()
@@ -954,12 +950,12 @@ impl Shell {
             };
             div().text_xs().text_color(rgb(tone)).child(text)
         });
-        let _ = window;
+        let card_height = (window.viewport_size().height - px(48.)).clamp(px(120.), px(760.));
         let card = div()
             .id("cloud-dialog")
             .w(px(520.))
             .max_w_full()
-            .max_h(px(760.))
+            .max_h(card_height)
             .overflow_y_scroll()
             .rounded(px(12.))
             .border_1()
@@ -1069,7 +1065,7 @@ mod tests {
         assert!(form.has_token && form.has_passphrase && form.has_basic_password && form.basic);
         assert_eq!(form.missing(), None, "saved secrets satisfy the required fields");
         form.passphrase = "short".into();
-        assert_eq!(form.missing(), Some("Пароль шифрования должен содержать не менее 12 символов"));
+        assert_eq!(form.missing(), None);
         form.passphrase.clear();
         form.basic = false;
         assert_eq!(form.changes().basic_user, "", "turning Basic auth off clears it");
@@ -1094,7 +1090,8 @@ mod tests {
         let mut run = run(Operation::Sync);
         run.checked(Status::Checked(Preview::Conflicts(vec![])), 0);
         assert!(run.confirm);
-        run.confirm = false;
+        run.checked(Status::Error { credentials: true, message: String::new() }, 1);
+        assert!(!run.confirm);
         assert_eq!(run.finished(&Ok("Готово".into())), Out::Success("Готово".into()));
         assert_eq!(run.panel, Some(Status::Checked(Preview::Synced)));
         assert_eq!(run.finished(&Err("сбой".into())), Out::Error("сбой".into()));

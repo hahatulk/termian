@@ -66,7 +66,7 @@ ul.help li{margin:4px 0}
     </section>
 
     <section class="card" id="snapshot-card">
-      <div class="row"><h2>Снимок</h2><button class="primary" type="button" id="export">Выгрузить данные (JSON)</button></div>
+      <div class="row"><h2>Снимок</h2><input id="export-token" type="password" placeholder="Токен доступа сервера" aria-label="Токен для экспорта" autocomplete="off"><button class="primary" type="button" id="export">Выгрузить данные (JSON)</button></div>
       <div class="grid" id="snapshot"></div>
       <table id="collections" aria-label="Содержимое снимка"></table>
       <p class="note warn">Выгруженный файл не зашифрован: в нём пароли, приватные ключи и адреса хостов. Храните его в защищённом месте и удалите после использования.</p>
@@ -76,8 +76,8 @@ ul.help li{margin:4px 0}
       <p class="note">Остановите синхронизацию и резервное копирование на клиентах. Снимок и журналы на сервере будут перешифрованы. Исторические копии останутся под старыми паролями.</p>
       <form id="rotate" autocomplete="off">
         <input id="rotation-token" type="password" placeholder="Токен доступа сервера" aria-label="Токен доступа сервера" required>
-        <input id="new-password" type="password" placeholder="Новый пароль, от 12 символов" aria-label="Новый пароль" autocomplete="new-password" minlength="12" required>
-        <input id="repeat-password" type="password" placeholder="Повторите новый пароль" aria-label="Повторите новый пароль" autocomplete="new-password" minlength="12" required>
+        <input id="new-password" type="password" placeholder="Новый пароль" aria-label="Новый пароль" autocomplete="new-password" required>
+        <input id="repeat-password" type="password" placeholder="Повторите новый пароль" aria-label="Повторите новый пароль" autocomplete="new-password" required>
         <button class="primary" type="submit">Перешифровать</button>
       </form>
       <div id="rotation-msg" class="msg" role="status"></div>
@@ -190,7 +190,11 @@ ul.help li{margin:4px 0}
   $('export').addEventListener('click', async () => {
     const button = $('export'); button.disabled = true;
     try {
-      const blob = await (await call('/api/export')).blob();
+      const token = $('export-token');
+      const value = token.value;
+      token.value = '';
+      if (!value) throw new Error('Введите токен доступа сервера.');
+      const blob = await (await call('/api/export', {}, {'X-Termian-Token': value})).blob();
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url; link.download = 'termian-snapshot-' + new Date().toISOString().slice(0, 10) + '.json';
@@ -228,6 +232,7 @@ ul.help li{margin:4px 0}
   });
   $('logout').addEventListener('click', () => {
     passphrase = null; revision = null;
+    $('export-token').value = '';
     $('rotate').reset(); $('rotation-msg').textContent = '';
     $('dashboard').hidden = true; $('logout').hidden = true; $('login').hidden = false;
     $('server').replaceChildren(); $('snapshot').replaceChildren(); $('collections').replaceChildren();
