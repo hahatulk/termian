@@ -4,7 +4,7 @@
 
 ## 1. Назначение
 
-Termian содержит нативный SSH/SFTP-клиент на Rust и GPUI. Данные хранятся локально и могут синхронизироваться через собственный сервер. Релизные цели: Windows x64 (`x86_64-pc-windows-msvc`) и macOS Apple Silicon (`aarch64-apple-darwin`, минимальная версия 11.0). Android собирается в отдельный APK для ARM64 и x86_64 (API 26–37). Android, Linux и macOS Intel не входят в workflow настольного релиза.
+Termian содержит нативный SSH/SFTP-клиент на Rust и GPUI. Данные хранятся локально и могут синхронизироваться через собственный сервер. Релизные цели: Windows x64 (`x86_64-pc-windows-msvc`) и macOS Apple Silicon (`aarch64-apple-darwin`, минимальная версия 11.0). В том же релизе публикуется Android APK для ARM64 и x86_64 (API 26–37). Linux и macOS Intel не входят в релиз.
 
 ## 2. Структура репозитория
 
@@ -277,15 +277,15 @@ cargo test --locked --manifest-path cloud-sync-server/Cargo.toml
 
 ### 9.2. Android
 
-[Workflow Android](.github/workflows/android.yml) запускается при изменениях клиента в PR и при push в `main` или `master`, а также вручную. Он запускает `scripts/build-android.sh` на Ubuntu 24.04 и загружает `termian-debug.apk` в артефакт `termian-android-debug` на 14 дней.
+[Workflow Release Termian](.github/workflows/release.yml) собирает Android на Ubuntu 24.04. В PR он собирает отладочный APK; при выпуске подписывает APK ключом из секретов Actions и передаёт его на публикацию. `versionName` совпадает с версией выпуска, `versionCode` равен номеру запуска workflow плюс один. GitHub Actions кэширует SDK Platform 37.0, Build Tools 37.0.0, NDK r28c и Cargo в `target/android/rust`. Хранилище ключей и подписанные APK в кэш не входят.
 
 `./scripts/build-android.sh` использует SDK 37.0 и NDK r28c для сборки JNI-библиотек ARM64 и x86_64 через корневой Cargo. Скрипт проверяет выравнивание сегментов ELF и несжатых библиотек в APK для устройств со страницами 16 КиБ. APK с отладочной подписью записывается в `dist/android/termian-debug.apk`, ключ отладочной подписи хранится в `target/android/`. `minSdkVersion` равен 26, `targetSdkVersion` равен 37. Перед обращением к локальной сети Android 17 запрашивает `ACCESS_LOCAL_NETWORK`.
 
 ### 9.4. Релиз
 
-[GitHub Actions](.github/workflows/release.yml) тестирует и собирает клиент через Cargo на Windows x64 и macOS Apple Silicon. macOS использует `MACOSX_DEPLOYMENT_TARGET=11.0`, Xcode Swift, `codesign` и `hdiutil`. Windows использует компилятор MSVC и NSIS для упаковки. Клиент и workflow не требуют Node.js или WebView. `.github/workflows/cloud-server.yml` отдельно запускает серверные тесты при изменениях в `cloud-sync-server/`.
+[GitHub Actions](.github/workflows/release.yml) тестирует и собирает клиент через Cargo на Windows x64 и macOS Apple Silicon и собирает Android APK. macOS использует `MACOSX_DEPLOYMENT_TARGET=11.0`, Xcode Swift, `codesign` и `hdiutil`. Windows использует компилятор MSVC и NSIS для упаковки. Клиент и workflow не требуют Node.js или WebView. `.github/workflows/cloud-server.yml` отдельно запускает серверные тесты при изменениях в `cloud-sync-server/`.
 
-Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg` и `termian-<version>-mac-arm64.app.tar.gz`. Автоматический выпуск использует стабильные теги `vX.Y.Z`. Ручной параметр `version` принимает предварительную версию, например `1.2.3-beta.1`. Такой выпуск помечается в GitHub как pre-release. Стабильный выпуск помечается как latest. Для публикации нужны пакеты обеих платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`.
+Создаются `termian-<version>-win-x64.exe`, `termian-<version>-win-x64-setup.exe`, `termian-<version>-mac-arm64.dmg`, `termian-<version>-mac-arm64.app.tar.gz` и `termian-<version>-android.apk`. Автоматический выпуск использует стабильные теги `vX.Y.Z`. Ручной параметр `version` принимает предварительную версию, например `1.2.3-beta.1`. Такой выпуск помечается в GitHub как pre-release. Стабильный выпуск помечается как latest. Для публикации нужны пакеты трёх платформ. Подписи `.sig` и `latest.json` с ключами `darwin-aarch64`, `windows-x86_64`, `windows-x86_64-nsis` создаёт Rust-инструмент `scripts/release/`. Android APK подписывает `apksigner`; APK не входит в `latest.json`.
 
 - `TERMIAN_SIGNING_PRIVATE_KEY` содержит прежний ключ minisign в Base64, `TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD` содержит его пароль. Workflow также принимает прежние имена `TAURI_SIGNING_PRIVATE_KEY` и `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. Публичный ключ меняется только при ротации.
 - Без Apple Developer ID `.app` подписывается ad-hoc. Для подписи и нотариализации нужны `APPLE_SIGNING_IDENTITY`, `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD` и `APPLE_TEAM_ID`.

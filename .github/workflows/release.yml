@@ -1,4 +1,4 @@
-name: Release Termian (Windows x64, macOS Apple Silicon)
+name: Release Termian
 
 on:
   push:
@@ -138,9 +138,73 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  build_android:
+    name: Android ARM64 and x86_64
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: ''
+      - uses: actions/cache@v4
+        id: android-sdk
+        with:
+          path: |
+            ${{ env.ANDROID_SDK_ROOT }}/platforms/android-37.0
+            ${{ env.ANDROID_SDK_ROOT }}/build-tools/37.0.0
+            ${{ env.ANDROID_SDK_ROOT }}/ndk/28.2.13676358
+          key: android-sdk-${{ runner.os }}-${{ runner.arch }}-platform37-build37-ndk28.2.13676358
+      - name: Install Android SDK packages
+        if: steps.android-sdk.outputs.cache-hit != 'true'
+        run: sdkmanager --install 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;28.2.13676358'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target/android/rust
+          cache-workspace-crates: true
+          key: android-ndk-28.2.13676358
+      - name: Build Android APK for pull request
+        if: github.event_name == 'pull_request'
+        run: env -u ANDROID_NDK_HOME ./scripts/build-android.sh
+      - name: Build signed Android release APK
+        if: github.event_name != 'pull_request'
+        env:
+          TERMIAN_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?Missing ANDROID_KEYSTORE_BASE64}"
+          umask 077
+          keystore=$(mktemp "$RUNNER_TEMP/termian-android.XXXXXXXX")
+          trap 'rm -f -- "$keystore"' EXIT
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$keystore"
+          unset ANDROID_KEYSTORE_BASE64
+          export ANDROID_KEYSTORE="$keystore"
+          export ANDROID_VERSION_CODE=$((GITHUB_RUN_NUMBER + 1))
+          env -u ANDROID_NDK_HOME ./scripts/build-android.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: termian-${{ needs.prepare.outputs.version }}-android
+          path: dist/android/*.apk
+          if-no-files-found: error
+          retention-days: 14
+
   publish:
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
-    needs: [prepare, build]
+    needs: [prepare, build, build_android]
     runs-on: ubuntu-latest
     permissions:
       contents: write

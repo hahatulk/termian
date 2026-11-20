@@ -35,7 +35,7 @@ cargo run --locked --bin termian-native
 
 В Android-версии нет USB Serial, фонового ежечасного слияния и автообновления. Произвольная раскладка настольного рабочего пространства открывается как вкладки и, если шаблон задан в режиме разделения, первые две доступные панели.
 
-В GitHub Actions откройте "Android", выберите запуск и скачайте `termian-android-debug` из Artifacts. Из него извлеките `termian-debug.apk`. Сборку можно запустить вручную через "Run workflow". Каждый запуск подписывает APK новым отладочным ключом, поэтому APK из разных запусков нельзя устанавливать поверх друг друга.
+Релизный `termian-<version>-android.apk` для ARM64 и x86_64 публикуется в GitHub Releases вместе с пакетами macOS и Windows. В PR общий workflow "Release Termian" собирает отладочный APK. Для релиза настройте секреты Actions `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD` и `ANDROID_KEY_ALIAS`. Укажите `ANDROID_KEY_PASSWORD`, если пароль ключа отличается от пароля хранилища. Используйте одно хранилище ключей для всех выпусков, чтобы Android принимал обновления поверх установленного релизного APK.
 
 Для сборки на macOS или x86_64 Linux нужны JDK 21, Python 3, Rust stable, Android SDK Platform 37.0, Build Tools 37.0.0 и NDK r28c (`28.2.13676358`). Задайте `ANDROID_SDK_ROOT` и выполните:
 
@@ -45,7 +45,7 @@ rustup target add aarch64-linux-android x86_64-linux-android
 adb install -r dist/android/termian-debug.apk
 ```
 
-APK имеет отладочную подпись, содержит библиотеки ARM64 и x86_64 и предназначен для Android 8.0–17 (API 26–37). Для сборки только под ARM64 запустите `./scripts/build-android.sh arm64-v8a`.
+Эта команда собирает APK с отладочной подписью для ARM64 и x86_64 и Android 8.0–17 (API 26–37). Для сборки только под ARM64 запустите `./scripts/build-android.sh arm64-v8a`.
 
 ## Сборка
 

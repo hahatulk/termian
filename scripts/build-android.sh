@@ -21,6 +21,36 @@ fi
 
 if [[ $# -eq 0 ]]; then set -- arm64-v8a x86_64; fi
 out="$PWD/target/android"
+version=${TERMIAN_RELEASE_VERSION:-}
+aapt_args=(--min-sdk-version 26 --target-sdk-version 37)
+if [[ -n "$version" ]]; then
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+        echo "Invalid Android release version." >&2
+        exit 1
+    fi
+    : "${ANDROID_VERSION_CODE:?Set ANDROID_VERSION_CODE for release APKs}"
+    if [[ ! "$ANDROID_VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]] || ((ANDROID_VERSION_CODE > 2100000000)); then
+        echo "ANDROID_VERSION_CODE must be between 1 and 2100000000." >&2
+        exit 1
+    fi
+    : "${ANDROID_KEYSTORE:?Set ANDROID_KEYSTORE to the release keystore path}"
+    : "${ANDROID_KEYSTORE_PASSWORD:?Set ANDROID_KEYSTORE_PASSWORD}"
+    : "${ANDROID_KEY_ALIAS:?Set ANDROID_KEY_ALIAS}"
+    if [[ ! -s "$ANDROID_KEYSTORE" ]]; then
+        echo "Android release keystore is missing or empty." >&2
+        exit 1
+    fi
+    export ANDROID_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+    apk="termian-$version-android.apk"
+    aapt_args+=(--replace-version --version-name "$version" --version-code "$ANDROID_VERSION_CODE")
+    sign_args=(--ks "$ANDROID_KEYSTORE" --ks-pass env:ANDROID_KEYSTORE_PASSWORD
+        --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD)
+else
+    apk=termian-debug.apk
+    key="$out/debug.keystore"
+    sign_args=(--ks "$key" --ks-pass pass:android --ks-key-alias androiddebugkey)
+fi
+
 mkdir -p "$out"
 build=$(mktemp -d "$out/apk.XXXXXXXX")
 trap 'rm -rf -- "$build"' EXIT
@@ -59,18 +89,16 @@ cp assets/fonts/CircularXX-*.ttf "$build/assets/fonts/"
 python3 scripts/android-icons.py "$build/res/drawable"
 "$tools/aapt2" compile --dir "$build/res" -o "$build/resources.zip"
 "$tools/aapt2" link -I "$jar_file" --manifest android/AndroidManifest.xml -A "$build/assets" \
-    --min-sdk-version 26 --target-sdk-version 37 -o "$build/raw.apk" "$build/resources.zip"
+    "${aapt_args[@]}" -o "$build/raw.apk" "$build/resources.zip"
 (cd "$build"; cp dex/classes.dex .; zip -q -0 raw.apk classes.dex; zip -q -0 -r raw.apk lib)
 "$tools/zipalign" -P 16 -f 4 "$build/raw.apk" "$build/aligned.apk"
 
-key="$out/debug.keystore"
-if [[ ! -f "$key" ]]; then
+if [[ -z "$version" && ! -f "$key" ]]; then
     keytool -genkeypair -keystore "$key" -storepass android -keypass android -alias androiddebugkey \
         -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000
 fi
-"$tools/apksigner" sign --ks "$key" --ks-pass pass:android --ks-key-alias androiddebugkey \
-    --out "$build/termian-debug.apk" "$build/aligned.apk"
-"$tools/apksigner" verify "$build/termian-debug.apk"
-"$tools/zipalign" -c -P 16 4 "$build/termian-debug.apk"
-mv "$build/termian-debug.apk" dist/android/termian-debug.apk
-echo "dist/android/termian-debug.apk"
+"$tools/apksigner" sign "${sign_args[@]}" --out "$build/$apk" "$build/aligned.apk"
+"$tools/apksigner" verify "$build/$apk"
+"$tools/zipalign" -c -P 16 4 "$build/$apk"
+mv "$build/$apk" "dist/android/$apk"
+echo "dist/android/$apk"

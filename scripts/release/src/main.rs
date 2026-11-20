@@ -116,6 +116,7 @@ fn packages(version: &Version) -> [(&'static str, String); 3] {
 fn exact_assets(dir: &Path, version: &Version, files: &[(&str, String); 3]) -> Result<()> {
     let mut expected: BTreeSet<String> = files.iter().map(|(_, name)| name.clone()).collect();
     expected.insert(format!("termian-{version}-mac-arm64.dmg"));
+    expected.insert(format!("termian-{version}-android.apk"));
     let mut actual = BTreeSet::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -263,6 +264,12 @@ mod tests {
         fs::write(
             dir.path().join(format!("termian-{version}-mac-arm64.dmg")),
             b"image",
+        )
+        .unwrap();
+        assert!(sign_assets(dir.path(), &version, "owner/repo", "", &pair.pk, &pair.sk).is_err());
+        fs::write(
+            dir.path().join(format!("termian-{version}-android.apk")),
+            b"apk fixture",
         )
         .unwrap();
 
