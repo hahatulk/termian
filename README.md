@@ -6,6 +6,8 @@ SSH/SFTP-клиент на Rust для macOS, Windows и Android. Подключ
 
 В [GitHub Releases](https://github.com/hahatulk/termian/releases/latest) скачайте `.dmg` для macOS Apple Silicon, `-setup.exe` для Windows x64 или `.apk` для Android 8+. На панели задач Windows окна Termian используют значок из EXE.
 
+Новые версии сначала публикуются как "Pre-release". В "Latest" они попадают после ручного перевода.
+
 ## Запуск из исходников
 
 Нужен Rust stable. На macOS установите Xcode Command Line Tools и задайте `export MACOSX_DEPLOYMENT_TARGET=11.0`. На Windows установите MSVC и Windows SDK.
