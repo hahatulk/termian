@@ -342,6 +342,7 @@ public final class MainActivity extends Activity {
         redrawHosts();
         redrawNavigation();
         arrange();
+        if (page.equals("terminal")) terminal.requestFocus();
     }
 
     private void redrawNavigation() {
@@ -711,15 +712,24 @@ public final class MainActivity extends Activity {
         }
     }
 
-    void typed(String value) {
-        if (locked || !ready || value.isEmpty()) return;
-        if (control && value.codePointCount(0, value.length()) == 1) key(value, value, false, false, false);
-        else call("text", "value", value);
+    private boolean terminalInput(String id) {
+        return !locked && drawer == null && page.equals("terminal") && !id.isEmpty()
+            && (id.equals(tabId) || id.equals(secondaryId));
+    }
+
+    void typed(String id, String value) {
+        if (!terminalInput(id) || value.isEmpty()) return;
+        if (control && value.codePointCount(0, value.length()) == 1) key(id, value, value, false, false, false);
+        else call("text", "id", id, "value", value);
     }
 
     void key(String key, String typed, boolean ctrl, boolean alt, boolean shift) {
-        if (locked || !ready) return;
-        call("key", "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
+        key(tabId, key, typed, ctrl, alt, shift);
+    }
+
+    void key(String id, String key, String typed, boolean ctrl, boolean alt, boolean shift) {
+        if (!terminalInput(id)) return;
+        call("key", "id", id, "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
         if(control) setControl(false);
     }
 
@@ -1150,8 +1160,10 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        View focus = getCurrentFocus();
+        if (page.equals("terminal") && focus instanceof TerminalView) return super.dispatchKeyEvent(event);
         if (opened && settings!=null && !locked && drawer==null && !page.equals("settings")
-            && !(getCurrentFocus() instanceof EditText) && event.getAction()==android.view.KeyEvent.ACTION_DOWN) {
+            && !(focus instanceof EditText) && event.getAction()==android.view.KeyEvent.ACTION_DOWN) {
             String action=settings.shortcut(event);
             if (!action.isEmpty() && runShortcut(action,event.getRepeatCount()==0)) return true;
         }

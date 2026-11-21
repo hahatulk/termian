@@ -767,13 +767,19 @@ impl App {
                 }
                 Ok(json!({}))
             }
+            "mouse" => {
+                let target = vault::optional_id(args, "id")?;
+                let handled = target.and_then(|id| self.sessions.get_mut(&id)).is_some_and(|c| c.mouse(args));
+                Ok(json!({"handled":handled}))
+            }
             "text" | "paste" | "key" | "trust" | "answer" | "scroll" => {
                 let target = vault::optional_id(args, "id")?.or(self.selected);
                 if let Some(c) = target.and_then(|id| self.sessions.get_mut(&id)) {
                     c.input(op, args);
                 }
                 if self.broadcast && matches!(op, "text" | "paste" | "key") {
-                    if let Some(c) = self.secondary.and_then(|id| self.sessions.get_mut(&id)) {
+                    let other = if target == self.secondary { self.selected } else { self.secondary };
+                    if let Some(c) = other.filter(|id| Some(*id) != target).and_then(|id| self.sessions.get_mut(&id)) {
                         c.input(op, args);
                     }
                 }
@@ -807,16 +813,55 @@ impl Connection {
                     alt: args["alt"] == true,
                     shift: args["shift"] == true,
                 };
-                if key == "backspace" && self.backspace {
-                    s.write(b"\x08");
-                } else if let Some(bytes) =
-                    terminal::key_bytes(key, args["typed"].as_str(), mods, self.screen.app_cursor())
-                {
-                    s.write(&bytes);
+                if let Some(bytes) = self.screen.key_input(key, args["typed"].as_str(), mods, self.backspace) {
+                    if bytes.is_ascii() {
+                        s.write_raw(bytes);
+                    } else {
+                        s.write(&bytes);
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    fn mouse(&mut self, args: &Value) -> bool {
+        use terminal::mouse::{Button, Event};
+
+        let Some(session) = self.session.as_ref().filter(|_| self.ready) else { return false };
+        let cell = |field: &str| args[field].as_u64().and_then(|n| usize::try_from(n).ok());
+        let (Some(row), Some(column)) = (cell("row"), cell("column")) else { return false };
+        let button = match args["button"].as_i64() {
+            Some(0) => Some(Button::Left),
+            Some(1) => Some(Button::Middle),
+            Some(2) => Some(Button::Right),
+            _ => None,
+        };
+        let kind = text(args, "kind");
+        let delta = |field: &str| args[field].as_i64().unwrap_or(0).clamp(-64, 64) as i32;
+        let event = match kind {
+            "press" | "tap" => button.map(Event::Press),
+            "release" => button.map(Event::Release),
+            "move" => Some(Event::Move(button)),
+            "scroll" => Some(Event::Scroll { columns: delta("dx"), rows: delta("dy") }),
+            _ => None,
+        };
+        let Some(event) = event else { return false };
+        let mods = Modifiers {
+            control: args["ctrl"] == true,
+            alt: args["alt"] == true,
+            shift: args["shift"] == true,
+        };
+        let Some(mut bytes) = self.screen.mouse_input(event, (row, column), mods) else { return false };
+        if kind == "tap" {
+            if let Event::Press(button) = event {
+                if let Some(release) = self.screen.mouse_input(Event::Release(button), (row, column), mods) {
+                    bytes.extend_from_slice(&release);
+                }
+            }
+        }
+        session.write_raw(bytes);
+        true
     }
 
     fn scroll(&mut self, args: &Value) {
@@ -895,7 +940,7 @@ impl Connection {
             .collect();
         Some(
             json!({"lines":lines, "cursor":frame.cursor, "bg":self.screen.look().background,
-            "cursorColor":self.screen.look().cursor, "bell":bell}),
+            "cursorColor":self.screen.look().cursor, "bell":bell, "mouseTracking":self.ready && self.screen.mouse_tracking()}),
         )
     }
 }

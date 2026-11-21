@@ -36,7 +36,7 @@ pub enum SessionEvent {
 }
 
 enum Input {
-    Data(Vec<u8>),
+    Data { bytes: Vec<u8>, raw: bool },
     Answer(Answer),
     Resize(u16, u16),
     Close,
@@ -50,7 +50,11 @@ pub struct Session {
 
 impl Session {
     pub fn write(&self, bytes: &[u8]) {
-        let _ = self.input.unbounded_send(Input::Data(bytes.to_vec()));
+        let _ = self.input.unbounded_send(Input::Data { bytes: bytes.to_vec(), raw: false });
+    }
+
+    pub fn write_raw(&self, bytes: Vec<u8>) {
+        let _ = self.input.unbounded_send(Input::Data { bytes, raw: true });
     }
 
     /// Answers the pending login question.
@@ -169,7 +173,7 @@ fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u1
     std::thread::spawn(move || {
         for input in futures::executor::block_on_stream(input_rx) {
             match input {
-                Input::Data(bytes) => {
+                Input::Data { bytes, .. } => {
                     if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
                         break;
                     }
@@ -276,8 +280,9 @@ pub fn serial(options: &crate::serial::SerialOptions) -> Result<Session, String>
         let charset = Charset::new(encoding);
         for input in futures::executor::block_on_stream(input_rx) {
             match input {
-                Input::Data(bytes) => {
-                    if port.write_all(&charset.encode(&bytes)).is_err() {
+                Input::Data { bytes, raw } => {
+                    let bytes = if raw { bytes } else { charset.encode(&bytes) };
+                    if port.write_all(&bytes).is_err() {
                         break;
                     }
                 }
@@ -1123,10 +1128,10 @@ async fn pump(
                 _ => {}
             },
             item = input.next() => match item {
-                Some(Input::Data(bytes)) => {
-                    let bytes = match charset.as_ref() {
-                        Some(charset) => charset.encode(&bytes).into(),
-                        None => bytes,
+                Some(Input::Data { bytes, raw }) => {
+                    let bytes = match (charset.as_ref(), raw) {
+                        (Some(charset), false) => charset.encode(&bytes).into(),
+                        _ => bytes,
                     };
                     writer.data_bytes(bytes).await.map_err(|e| format!("{CONNECTION_LOST}: {e}"))?
                 }

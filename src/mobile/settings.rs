@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(super) fn menus() -> Value {
-    let pc = shortcuts::pc_preset(false);
+    let pc = shortcuts::pc_preset();
     let keys = shortcuts::ACTIONS
         .iter()
         .filter_map(|&(id, title)| {
