@@ -1296,7 +1296,12 @@ pub(crate) mod tests {
         type Modes = Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u32>>>;
 
         #[derive(Clone, Copy, PartialEq, Eq)]
-        pub enum SftpFault { PublicDirectory, MissingAttributes, DenyMode }
+        pub enum SftpFault {
+            PublicDirectory,
+            MissingAttributes,
+            DenyMode,
+            ReadWindow { start: u64, end: u64 },
+        }
 
         struct Files {
             fault: Option<SftpFault>,
@@ -1397,6 +1402,11 @@ pub(crate) mod tests {
             }
 
             async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, StatusCode> {
+                if let Some(SftpFault::ReadWindow { start, end }) = self.fault {
+                    if offset < start || offset.saturating_add(u64::from(len)) > end {
+                        return Err(StatusCode::PermissionDenied);
+                    }
+                }
                 let mut data = vec![0; len as usize];
                 let file = self.file(&handle)?;
                 file.seek(SeekFrom::Start(offset)).map_err(failed)?;

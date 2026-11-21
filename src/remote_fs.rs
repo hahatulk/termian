@@ -3,6 +3,9 @@
 //! as `Login` events and are answered with [`RemoteFs::answer`]. Transfers
 //! and file operations run concurrently with listings.
 
+mod preview;
+pub use preview::TextPage;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -24,6 +27,7 @@ pub enum RemoteEvent {
     Connected { home: String },
     Listed { path: String, result: Result<Vec<Entry>, String> },
     Transfer { id: TransferId, event: TransferEvent },
+    Preview { request: u64, result: Result<TextPage, String> },
     /// A rename, delete or new folder finished.
     Changed(Result<(), String>),
     /// Fresh names in a folder, asked for with [`RemoteFs::names`].
@@ -46,6 +50,7 @@ enum Work {
     Names { request: u64, path: String },
     Transfer { id: TransferId, job: Job, controls: UnboundedReceiver<Control> },
     Operate(Vec<Operation>),
+    Preview { request: u64, path: String, offset: u64 },
 }
 
 enum Command {
@@ -95,6 +100,11 @@ impl RemoteFs {
     /// Reads the names in a folder again, e.g. right before a copy into it.
     pub fn names(&self, request: u64, path: &str) {
         let _ = self.commands.unbounded_send(Command::Work(Work::Names { request, path: path.to_owned() }));
+    }
+
+    pub fn preview(&self, request: u64, path: String, offset: u64) -> Result<(), String> {
+        self.commands.unbounded_send(Command::Work(Work::Preview { request, path, offset }))
+            .map_err(|_| "SFTP is not connected.".into())
     }
 
     /// Starts copying between the local disk and this host.
@@ -192,6 +202,16 @@ async fn run(
                 tokio::spawn(transfer::transfer(source, target, job, controls, move |event| {
                     let _ = events.unbounded_send(RemoteEvent::Transfer { id, event });
                 }));
+            }
+            Work::Preview { request, path, offset } => {
+                let (raw, events) = (raw.clone(), events.clone());
+                tokio::spawn(async move {
+                    let result = match raw {
+                        Some(raw) => preview::read(&raw, &path, offset).await,
+                        None => Err("File preview is unavailable on this SFTP connection.".into()),
+                    };
+                    let _ = events.unbounded_send(RemoteEvent::Preview { request, result });
+                });
             }
             Work::Operate(operations) => {
                 let (fs, events) = (Fs::Remote(sftp.clone(), raw.clone()), events.clone());
@@ -435,6 +455,33 @@ mod tests {
 
     fn last_progress(events: &[TransferEvent]) -> crate::transfer::Progress {
         events.iter().rev().find_map(|e| match e { TransferEvent::Progress(p) => Some(p.clone()), _ => None }).expect("no progress")
+    }
+
+    #[test]
+    fn file_preview_requests_only_the_selected_range() {
+        use std::fs;
+
+        let file = tempfile::tempdir().unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let mut data = vec![b'a'; 2 * 1024 * 1024];
+        let later = 64 * 1024;
+        let sample = b"page at offset\n";
+        data[later..later + sample.len()].copy_from_slice(sample);
+        fs::write(file.path().join("large.log"), &data).unwrap();
+
+        for offset in [0, later as u64] {
+            let (remote, mut events) = connected_with_fault(file.path(), state.path(), Some(
+                server::SftpFault::ReadWindow { start: offset, end: offset + 32769 },
+            ));
+            remote.preview(1, "/large.log".into(), offset).unwrap();
+            let RemoteEvent::Preview { request: 1, result } = next(&mut events) else {
+                panic!("expected a preview response");
+            };
+            let page = result.unwrap();
+            assert_eq!(page.text.as_bytes(), &data[offset as usize..offset as usize + 32768]);
+            assert_eq!(page.next, Some(offset + 32768));
+            assert_eq!(page.size, Some(data.len() as u64));
+        }
     }
 
     #[test]

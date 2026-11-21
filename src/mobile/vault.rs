@@ -489,28 +489,6 @@ impl App {
                 crate::workspace_template::save(&mut v, &workspace);
             }
             "deleteWorkspace" => crate::workspace_template::remove(&mut v, id()?),
-            "savePrivacy" => {
-                if let Some(current) = &v.privacy_password {
-                    if !current.verify(text(args, "current")) {
-                        return Err("Incorrect lock password.".into());
-                    }
-                }
-                v.privacy_password = Some(
-                    crate::privacy_password::PrivacyPassword::new(text(args, "password"))
-                        .ok_or("Enter a lock password.")?,
-                );
-            }
-            "unlock" => {
-                return if v
-                    .privacy_password
-                    .as_ref()
-                    .is_some_and(|p| p.verify(text(args, "password")))
-                {
-                    Ok(json!({}))
-                } else {
-                    Err("Incorrect lock password.".into())
-                }
-            }
             _ => return Err("Unknown operation.".into()),
         }
         self.save(v)?;

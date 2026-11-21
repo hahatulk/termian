@@ -135,7 +135,7 @@ final class MobileSettings {
         LinearLayout local = card(page, "Локальная учётная запись");
         description(local, "Локальный пользователь");
         local.addView(app.label(state.optString("vaultName"), 14, TermianStyle.TEXT));
-        action(local, "Privacy password", () -> app.privacyPassword(false));
+        action(local, "Lock Termian", app::lock);
 
         JSONObject config = app.call("cloud");
         LinearLayout cloud = card(page, "Своё облако");

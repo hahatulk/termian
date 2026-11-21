@@ -34,6 +34,7 @@ Allow installs from Termian in system settings, then return and tap Install.	Р�
 And these hosts:	И эти хосты:
 And this host:	И этот хост:
 Android could not open the package installer.	Android не смог открыть установщик.
+Android could not open the security settings.	Не удалось открыть настройки безопасности Android.
 Application menu	Меню приложения
 Apply	Применить
 Apply to All	Применить ко всем
@@ -110,6 +111,7 @@ Comment	Комментарий
 Configure self-hosted cloud	Настроить своё облако
 Confirm	Подтвердить
 Confirm disabling logs	Подтвердите отключение журналов
+Confirm with Android to continue.	Подтвердите доступ через Android.
 Conflict	Конфликт
 Connect	Подключиться
 Connect for sync	Синхронизация
@@ -419,6 +421,7 @@ Once	Один раз
 Open	Открыть
 Open Port Forwarding Wizard	Открыть мастер проброса портов
 Open With	Открыть с помощью
+Open Android security settings	Открыть настройки безопасности Android
 Open another terminal tab first.	Сначала откройте ещё одну вкладку терминала.
 Open log	Открыть журнал
 Open navigation menu	Открыть меню навигации
@@ -460,7 +463,6 @@ Pre-release	Предварительные
 Press keys…	Нажмите клавиши…
 Previews for testing.	Предварительные выпуски для тестирования.
 Privacy lock	Блокировка приложения
-Privacy password	Пароль блокировки
 Private key	Закрытый ключ
 Public key	Открытый ключ
 Quick Connect	Быстрое подключение
@@ -568,6 +570,7 @@ Set a label	Укажите название
 Set an environment variable for {host}	Задайте переменную окружения для {host}
 Set the local port and binding address:	Укажите локальный порт и адрес:
 Set the port and binding address:	Укажите порт и адрес:
+Set up a screen lock in Android to open Termian.	Настройте блокировку экрана в Android, чтобы открыть Termian.
 Settings	Настройки
 Settings changed during the operation. Check the changes and try again.	Конфигурация изменилась во время операции. Проверьте изменения и повторите.
 Settings saved	Настройки сохранены
@@ -676,6 +679,7 @@ Undo	Отменить
 Unknown certificate format	Неизвестный формат сертификата
 Unknown device	Неизвестное устройство
 Unlock	Разблокировать
+Unlock Termian	Разблокировать Termian
 Update channel	Канал обновлений
 Update channel changed. Check for updates.	Канал изменён. Проверьте обновления.
 Update failed.	Не удалось обновить приложение.
@@ -693,6 +697,7 @@ Use Option as Meta key	Использовать Option как Meta
 Use Touch ID or Mac password	Использовать Touch ID или пароль Mac
 Use an empty snapshot password	Использовать пустой пароль снимка
 Use bright colours for bold text	Яркие цвета для полужирного текста
+Use screen lock	Использовать блокировку экрана
 User	Пользователь
 Username	Имя пользователя
 Value	Значение
@@ -750,3 +755,17 @@ All Vaults use one server. An empty token or password field keeps the current va
 Data in the selected Vault will be replaced with the cloud snapshot. An encrypted backup is created before replacement.	Данные выбранного Vault будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия.
 Device and cloud changes are merged separately in each Vault. An encrypted backup is created before applying cloud changes.	Изменения устройства и облака объединяются отдельно в каждом Vault. Перед применением изменений из облака создаётся зашифрованная резервная копия.
 The selected Vault snapshot will be replaced with the current data. Changes from other devices in this Vault will be overwritten.	Снимок выбранного Vault будет заменён текущими данными. Изменения других устройств в этом Vault будут затёрты.
+File preview	Просмотр файла
+Previous page	Предыдущая страница
+Next page	Следующая страница
+Reading file…	Чтение файла…
+Page {number}	Страница {number}
+File is empty.	Файл пуст.
+Preview supports UTF-8 text files. Use Open with... for other files.	Просмотр доступен для текстовых файлов UTF-8. Для других файлов используйте «Открыть с помощью...».
+The file changed. Close the preview and open it again.	Файл изменился. Закройте просмотр и откройте файл снова.
+Select a regular file for preview.	Выберите обычный файл для просмотра.
+Reading the file preview timed out.	Истекло время ожидания данных для просмотра.
+The server sent more data than requested.	Сервер отправил больше данных, чем было запрошено.
+File preview is unavailable on this SFTP connection.	Просмотр недоступен для этого SFTP-соединения.
+Wait for the previous preview to finish.	Дождитесь завершения чтения предыдущей страницы.
+Invalid preview offset.	Некорректная позиция в файле.

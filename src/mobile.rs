@@ -579,7 +579,6 @@ impl App {
             "settingsState" => Ok(json!({
                 "vaultName":self.vaults.selected_name(),
                 "logsEnabled":!self.vault.logs_disabled,
-                "privacyConfigured":self.vault.privacy_password.is_some(),
             })),
             "terminalSettings" => Ok(self.terminal_settings()),
             "terminalThemes" => Ok(settings::themes()),

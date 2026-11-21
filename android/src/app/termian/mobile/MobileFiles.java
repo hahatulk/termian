@@ -34,7 +34,8 @@ final class MobileFiles {
     private View backFolder, forwardFolder;
     private String export, exportName;
     private boolean ready, documentBusy, showHidden;
-    private int openAfterSave;
+    private boolean chooseAppAfterSave;
+    private MobileFileReader reader;
     boolean polling;
 
     MobileFiles(MainActivity app) {
@@ -74,6 +75,11 @@ final class MobileFiles {
 
     void arrange(boolean wide) {
         view.removeAllViews();
+        if (reader != null) {
+            view.setOrientation(LinearLayout.VERTICAL);
+            view.addView(reader.view, new LinearLayout.LayoutParams(-1, -1));
+            return;
+        }
         view.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
         if(wide) {
             LinearLayout local=app.column();
@@ -131,9 +137,10 @@ final class MobileFiles {
         app.allowNetwork(() -> {
             JSONObject response=app.call("filesOpen","id",host.optString("id"),"showHidden",showHidden);
             if(error(response))return;
+            closePreview();
             polling=true;
             ready=false;
-            openAfterSave=0;
+            chooseAppAfterSave=false;
             remote.removeAllViews();
             LinearLayout header=new LinearLayout(app);
             header.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -182,6 +189,7 @@ final class MobileFiles {
 
     private void close() {
         if (documentBusy) {app.toast(text("Finish the file picker or save operation first."));return;}
+        closePreview();
         app.call("filesClose");
         polling=false;
         ready=false;
@@ -222,9 +230,24 @@ final class MobileFiles {
         button.setAlpha(enabled ? 1f : .5f);
     }
 
-    private void download(String name,int open) {
+    private void download(String name, boolean chooser) {
         if (!ready || documentBusy) { app.toast(text("Finish the current file operation first.")); return; }
-        if (!error(app.call("filesDownload","name",name))) openAfterSave=open;
+        if (!error(app.call("filesDownload", "name", name))) chooseAppAfterSave = chooser;
+    }
+
+    private void preview(String name) {
+        if (!ready || documentBusy || reader != null) return;
+        JSONObject response = app.call("filesPreview", "name", name, "offset", 0);
+        if (error(response)) return;
+        reader = new MobileFileReader(app, name, response.optString("request"), this::closePreview);
+        arrange(app.wide());
+    }
+
+    boolean closePreview() {
+        if (reader == null) return false;
+        reader = null;
+        arrange(app.wide());
+        return true;
     }
 
     private void fileMenu(JSONObject file) {
@@ -243,9 +266,9 @@ final class MobileFiles {
         String[] labels=options.stream().map(MainActivity::text).toArray(String[]::new);
         new AlertDialog.Builder(app).setTitle(name).setItems(labels,(d,w) -> {
             switch (options.get(w)) {
-                case "Open": if (folder) run("filesFolder","name",name); else download(name,1); break;
-                case "Open with...": download(name,2); break;
-                case "Copy to target directory": download(name,0); break;
+                case "Open": if (folder) run("filesFolder","name",name); else preview(name); break;
+                case "Open with...": download(name, true); break;
+                case "Copy to target directory": download(name, false); break;
                 case "Rename": folderDialog(file); break;
                 case "Edit Permissions":
                     LinearLayout form=app.column();
@@ -275,7 +298,11 @@ final class MobileFiles {
             boolean dir=f.optBoolean("folder") && !link;
             String name=f.optString("name");
             add(rows,app.style.fileCard(dir ? "folder" : link ? "link" : "file", name, dir ? text("Folder") : f.optString("size"),
-                () -> { if(dir)run("filesFolder","name",name);else fileMenu(f); },() -> fileMenu(f),f.optBoolean("hidden")));
+                () -> {
+                    if (dir) run("filesFolder", "name", name);
+                    else if (link) fileMenu(f);
+                    else preview(name);
+                }, () -> fileMenu(f), f.optBoolean("hidden")));
         }
         if (entries.length()==0) rows.addView(app.label(text("Folder is empty"),15,TermianStyle.MUTED));
     }
@@ -292,7 +319,12 @@ final class MobileFiles {
                     .setPositiveButton(text("Retry"),(d,w) -> run("filesControl","retry",true))
                     .setOnCancelListener(d -> run("filesControl","retry",false)).show();break;
                 case "export": save(e.optString("name"),e.optString("path"),e.optBoolean("tree"));break;
-                case "closed": ready=false;activity.setText(e.optString("value"));break;
+                case "preview": if (reader != null) reader.receive(e); break;
+                case "closed":
+                    ready=false;
+                    activity.setText(e.optString("value"));
+                    if (reader != null) reader.disconnected(e.optString("value"));
+                    break;
                 case "error": case "transferDone": activity.setText(e.optString("value"));break;
                 default: app.handle(e,"filesAnswer",""); break;
             }
@@ -314,11 +346,11 @@ final class MobileFiles {
         return type==null ? "application/octet-stream" : type;
     }
 
-    private void openSaved(Uri document,String name,boolean chooser) {
+    private void openSaved(Uri document,String name) {
         Intent view=new Intent(Intent.ACTION_VIEW).setDataAndType(document,contentType(name))
             .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         view.setClipData(android.content.ClipData.newRawUri(name,document));
-        try { app.startActivity(chooser ? Intent.createChooser(view,text("Open with...")) : view); }
+        try { app.startActivity(Intent.createChooser(view,text("Open with..."))); }
         catch (android.content.ActivityNotFoundException | SecurityException error) {
             app.toast(text("No app could open the saved file."));
         }
@@ -341,7 +373,7 @@ final class MobileFiles {
         if(result!=Activity.RESULT_OK || intent==null || intent.getData()==null) {
             if (download) {
                 app.call("filesRelease");
-                openAfterSave=0;
+                chooseAppAfterSave=false;
             }
             documentBusy=false;
             return;
@@ -349,8 +381,8 @@ final class MobileFiles {
         Uri document=intent.getData();
         if(download) {
             String source=export, name=exportName;
-            int open=openAfterSave;
-            openAfterSave=0;
+            boolean open=chooseAppAfterSave;
+            chooseAppAfterSave=false;
             new Thread(() -> {
                 String problem=null;
                 try {
@@ -363,8 +395,8 @@ final class MobileFiles {
                     app.call("filesRelease");
                     documentBusy=false;
                     activity.setText(error==null?text("Download saved"):error);
-                    if (error==null && !tree && open!=0 && !app.isFinishing() && !app.privacyLocked())
-                        openSaved(document,name,open==2);
+                    if (error==null && !tree && open && !app.isFinishing() && !app.privacyLocked())
+                        openSaved(document,name);
                 });
             }).start();
         } else {

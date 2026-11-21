@@ -2,8 +2,10 @@ package app.termian.mobile;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -11,6 +13,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -64,8 +67,11 @@ public final class MainActivity extends Activity {
     TermianStyle style;
     private JSONArray tabs = new JSONArray();
     private String tabId = "", page = "vault", vaultName = "";
-    private boolean wide, locked;
-    private LinearLayout privacy;
+    private boolean wide, locked = true, promptOnStart;
+    private DeviceAuth deviceAuth;
+    private ScrollView privacy;
+    private TextView privacyHint;
+    private Button privacyAction;
     private TerminalView terminal, secondaryTerminal;
     private LinearLayout terminalSurface;
     private String secondaryId = "";
@@ -104,6 +110,8 @@ public final class MainActivity extends Activity {
         setRussian(getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false));
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         style = new TermianStyle(this);
+        deviceAuth = new DeviceAuth(this, state);
+        promptOnStart = state == null;
         appFrame = new FrameLayout(this);
         root = column();
         root.setBackgroundColor(BACKGROUND);
@@ -119,9 +127,28 @@ public final class MainActivity extends Activity {
             }
             return Build.VERSION.SDK_INT >= 30 ? WindowInsets.CONSUMED : insets.consumeSystemWindowInsets();
         });
+        showPrivacy();
         setContentView(appFrame);
         if (Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
             android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::back);
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        deviceAuth.save(state);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (!locked) return;
+        refreshPrivacy();
+        if (promptOnStart && deviceAuth.secure()) {
+            promptOnStart = false;
+            deviceAuth.request();
+        }
+    }
+
+    private void openVault() {
         File data = new File(getNoBackupFilesDir(), "termian");
         try {
             if (!data.isDirectory() && !data.mkdirs()) throw new java.io.IOException(text("Не удалось создать каталог Vault."));
@@ -142,7 +169,7 @@ public final class MainActivity extends Activity {
     @Override public void onStart() {
         super.onStart();
         visible = true;
-        if (opened) handler.post(poll);
+        resumePolling();
         if (updates != null) updates.start();
     }
 
@@ -154,6 +181,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        deviceAuth.cancelBiometric();
         handler.removeCallbacksAndMessages(null);
         if (question != null) question.dismiss();
         if (updates != null) updates.close();
@@ -308,6 +336,7 @@ public final class MainActivity extends Activity {
     void page(String value) {
         closeDrawer();
         if (page.equals("settings") && !value.equals("settings")) updates.detach();
+        if (page.equals("sftp") && !value.equals("sftp")) files.closePreview();
         if (!value.equals("terminal")) ime().hideSoftInputFromWindow(root.getWindowToken(),0);
         page=value;
         redrawHosts();
@@ -656,8 +685,12 @@ public final class MainActivity extends Activity {
     @Override public void onBackPressed() { back(); }
 
     private void back() {
-        if (locked) return;
+        if (locked) {
+            if (!opened) finish();
+            return;
+        }
         if(drawer!=null) { closeDrawer(); return; }
+        if (opened && page.equals("sftp") && files.closePreview()) return;
         if (opened && page.equals("settings")) {
             if (settings.back()) renderSettings();
             else page(settingsReturn);
@@ -679,13 +712,13 @@ public final class MainActivity extends Activity {
     }
 
     void typed(String value) {
-        if (!ready || value.isEmpty()) return;
+        if (locked || !ready || value.isEmpty()) return;
         if (control && value.codePointCount(0, value.length()) == 1) key(value, value, false, false, false);
         else call("text", "value", value);
     }
 
     void key(String key, String typed, boolean ctrl, boolean alt, boolean shift) {
-        if (!ready) return;
+        if (locked || !ready) return;
         call("key", "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
         if(control) setControl(false);
     }
@@ -705,10 +738,14 @@ public final class MainActivity extends Activity {
         if (text != null && text.length() <= 262144) call("paste", "value", text.toString());
     }
 
+    private void resumePolling() {
+        handler.removeCallbacks(poll);
+        if (visible && opened && !locked) handler.post(poll);
+    }
+
     private final Runnable poll = new Runnable() {
         @Override public void run() {
-            if (!visible || !opened) return;
-            if (locked) { handler.postDelayed(this,150); return; }
+            if (!visible || !opened || locked) return;
             if (active || syncing || files.polling || vault.forwarding) {
                 JSONObject info = call("poll");
                 JSONArray now = info.optJSONArray("tabs");
@@ -1068,9 +1105,9 @@ public final class MainActivity extends Activity {
             }
         });
     }
-    @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
+    @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request,result,data);
-        if (files != null) files.result(request,result,data);
+        if (!deviceAuth.result(request,result) && files != null) files.result(request,result,data);
     }
 
     void runSnippet(JSONObject snippet) {
@@ -1149,44 +1186,88 @@ public final class MainActivity extends Activity {
         selectTab(tabs.optJSONObject(index).optString("id"));
     }
 
-    void privacyPassword(boolean thenLock) {
-        LinearLayout form = column();
-        boolean set = call("settingsState").optBoolean("privacyConfigured");
-        EditText current = set ? field(form,text("Current password"),"",PASSWORD) : null;
-        EditText password = field(form,text("Lock password"),"",PASSWORD);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(text("Privacy lock")).setView(form)
-            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),null).show();
-        dialog.getButton(-1).setOnClickListener(v -> {
-            JSONObject r = call("savePrivacy","password",value(password),"current",current == null ? "" : value(current));
-            if (r.has("error")) toast(r.optString("error"));
-            else { dialog.dismiss(); if (thenLock) lock(); }
-        });
-    }
-
     boolean privacyLocked() { return locked; }
 
-    private void lock() {
-        if (updates != null) updates.detach();
-        if (!call("settingsState").optBoolean("privacyConfigured")) { privacyPassword(true); return; }
-        dismissQuestion();
+    void lock() {
+        if (!opened || locked) return;
         locked = true;
-        privacy = column();
-        privacy.setGravity(Gravity.CENTER);
+        handler.removeCallbacks(poll);
+        updates.detach();
+        dismissQuestion();
+        closeDrawer();
+        ime().hideSoftInputFromWindow(root.getWindowToken(), 0);
+        showPrivacy();
+    }
+
+    private void showPrivacy() {
+        root.setVisibility(View.GONE);
+        privacy = new ScrollView(this);
         privacy.setBackgroundColor(BACKGROUND);
-        privacy.setPadding(dp(30), dp(24), dp(30), dp(24));
-        privacy.addView(style.icon("privacy_lock",ACCENT), new LinearLayout.LayoutParams(dp(42),dp(42)));
-        privacy.addView(label(text("Termian is locked"),24,TermianStyle.TEXT));
-        EditText password = field(privacy,text("Password"),"",PASSWORD);
-        privacy.addView(button(text("Unlock"),() -> {
-            JSONObject r = call("unlock","password",value(password));
-            if (r.has("error")) { toast(r.optString("error")); return; }
-            locked = false;
-            setContentView(appFrame);
-            if (!tabId.isEmpty()) useTab(call("selectTab","id",tabId));
+        privacy.setFillViewport(true);
+        LinearLayout panel = column();
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(dp(24), dp(24), dp(24), dp(24));
+        panel.addView(style.icon("privacy_lock", ACCENT), new LinearLayout.LayoutParams(dp(42), dp(42)));
+        TextView title = label(text("Termian is locked"), 24, TermianStyle.TEXT);
+        title.setGravity(Gravity.CENTER);
+        panel.addView(title);
+        privacyHint = label("", 16, MUTED);
+        privacyHint.setGravity(Gravity.CENTER);
+        panel.addView(privacyHint);
+        privacyAction = button(text("Unlock"), this::requestAuthentication);
+        style.action(privacyAction, TermianStyle.ACTIVE);
+        privacyAction.setMinWidth(dp(160));
+        panel.addView(privacyAction, new LinearLayout.LayoutParams(-2, -2));
+        privacy.addView(panel, new ScrollView.LayoutParams(-1, -2));
+        appFrame.addView(privacy, new FrameLayout.LayoutParams(-1, -1));
+        refreshPrivacy();
+    }
+
+    private void refreshPrivacy() {
+        boolean secure = deviceAuth.secure();
+        privacyHint.setText(text(secure ? "Confirm with Android to continue." : "Set up a screen lock in Android to open Termian."));
+        privacyAction.setText(text(secure ? "Unlock" : "Open Android security settings"));
+    }
+
+    private void requestAuthentication() {
+        if (deviceAuth.secure()) {
+            promptOnStart = false;
+            deviceAuth.request();
+        } else {
+            try {
+                startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS));
+            } catch (ActivityNotFoundException | SecurityException e) {
+                toast(text("Android could not open the security settings."));
+            }
+        }
+    }
+
+    void authenticationUnavailable() {
+        if (!locked || isFinishing() || isDestroyed()) return;
+        refreshPrivacy();
+        toast(text("Authentication did not complete."));
+    }
+
+    void deviceAuthenticated() {
+        if (!locked || isFinishing() || isDestroyed()) return;
+        if (!deviceAuth.secure()) {
+            authenticationUnavailable();
+            return;
+        }
+        locked = false;
+        appFrame.removeView(privacy);
+        privacy = null;
+        privacyHint = null;
+        privacyAction = null;
+        root.setVisibility(View.VISIBLE);
+        if (!opened) {
+            openVault();
+            if (visible && updates != null) updates.start();
+        } else {
             redrawHosts();
             renderSettings();
-        }));
-        setContentView(privacy);
+        }
+        resumePolling();
     }
 
 }

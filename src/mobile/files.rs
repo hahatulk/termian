@@ -20,6 +20,8 @@ pub(super) struct Browser {
     temp: tempfile::TempDir,
     transfer: Option<(TransferId, bool, String, bool)>,
     export: Option<(String, bool)>,
+    preview: Option<u64>,
+    next_preview: u64,
 }
 
 impl Browser {
@@ -43,6 +45,8 @@ impl Browser {
             temp,
             transfer: None,
             export: None,
+            preview: None,
+            next_preview: 0,
         })
     }
 
@@ -133,6 +137,25 @@ impl Browser {
                 }
             }
             "filesRefresh" => self.refresh(),
+            "filesPreview" => {
+                if self.loading {
+                    return Err("Wait for the folder listing.".into());
+                }
+                if self.preview.is_some() {
+                    return Err("Wait for the previous preview to finish.".into());
+                }
+                let e = entry()?;
+                if e.is_dir || e.is_link || !files::valid_entry_name(&e.name) {
+                    return Err("Select a regular file for preview.".into());
+                }
+                let path = relative(e);
+                let offset = args["offset"].as_u64().ok_or("Invalid preview offset.")?;
+                self.next_preview += 1;
+                let request = self.next_preview;
+                self.remote.preview(request, path, offset)?;
+                self.preview = Some(request);
+                return Ok(json!({"request":request.to_string()}));
+            }
             "filesFolder" => {
                 let e = entry()?;
                 if !e.is_dir || e.is_link {
@@ -276,7 +299,17 @@ impl Browser {
                 },
                 RemoteEvent::Closed(error) => {
                     self.ready = false;
+                    self.preview = None;
                     events.push(json!({"type":"closed","value":error.unwrap_or_else(|| "Disconnected".into())}));
+                }
+                RemoteEvent::Preview { request, result } if self.preview == Some(request) => {
+                    self.preview = None;
+                    let request = request.to_string();
+                    events.push(match result {
+                        Ok(page) => json!({"type":"preview", "request":request, "text":page.text,
+                            "end":page.end, "size":page.size, "next":page.next}),
+                        Err(error) => json!({"type":"preview", "request":request, "error":error}),
+                    });
                 }
                 RemoteEvent::Transfer { id, event } => match event {
                     TransferEvent::Progress(p) => {
