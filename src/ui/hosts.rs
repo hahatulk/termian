@@ -1,5 +1,6 @@
 //! Vaults tab: navigation sidebar and the Hosts screen.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, KeyDownEvent, SharedString, Stateful, Window};
 use termian_native::session;
 use termian_native::theme;
@@ -187,7 +188,7 @@ impl Shell {
     }
 
     fn render_sidebar(&self, cx: &mut Context<Self>) -> Div {
-        div().w(px(185.)).h_full().flex_none().p_2().flex().flex_col().gap_1().bg(rgb(theme::SIDEBAR)).children(
+        div().w(px(185.)).h_full().flex_none().p_2().flex().flex_col().gap_1().bg(rgb(theme::SIDEBAR)).child(self.vault_picker_button(cx)).children(
             SECTIONS.map(|(section, label, icon_name)| {
                 let active = section == self.section;
                 div()
@@ -204,7 +205,7 @@ impl Shell {
                     .when(active, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(motion::sidebar_marker(theme::ACCENT)))
                     .surface_feedback(if active { theme::SURFACE_ACTIVE } else { theme::SIDEBAR })
                     .child(glyph(icon_name, 14., theme::TEXT))
-                    .child(label)
+                    .child(tr(label))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.section = section;
                         cx.notify();
@@ -255,7 +256,7 @@ impl Shell {
             .bg(rgb(theme::INPUT))
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
-            .child(div().flex_1().child(text_input::text("hosts-search", &self.query, "Find a host or ssh user@hostname...", focused, Mode::Line, cx)))
+            .child(div().flex_1().child(text_input::text("hosts-search", &self.query, tr("Find a host or ssh user@hostname..."), focused, Mode::Line, cx)))
             .child(
                 div()
                     .id("connect")
@@ -266,7 +267,7 @@ impl Shell {
                     .text_xs()
                     .text_color(rgb(if self.query.trim().is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
                     .when(!self.query.trim().is_empty(), |d| d.surface_feedback(theme::SURFACE))
-                    .child("CONNECT")
+                    .child(tr("CONNECT"))
                     .on_click(cx.listener(|shell, _, window, cx| shell.connect_query(window, cx))),
             );
 
@@ -285,7 +286,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(1.))
-                    .child(tool_button("new-host", "new_host", "NEW HOST").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
+                    .child(tool_button("new-host", "new_host", tr("NEW HOST")).rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_host(window, cx))))
                     // The split button's arrow: New Host / New Group, as in the legacy toolbar.
                     .child(
                         split_arrow("new-menu")
@@ -295,10 +296,10 @@ impl Shell {
                             })),
                     ),
             )
-            .child(tool_button("terminal", "terminal", "TERMINAL").on_click(cx.listener(|shell, _, window, cx| {
+            .child(tool_button("terminal", "terminal", tr("TERMINAL")).on_click(cx.listener(|shell, _, window, cx| {
                 shell.open_local_terminal(window, cx);
             })))
-            .child(tool_button("serial", "serial", "SERIAL").on_click(cx.listener(|shell, _, window, cx| shell.open_serial(window, cx))))
+            .child(tool_button("serial", "serial", tr("SERIAL")).on_click(cx.listener(|shell, _, window, cx| shell.open_serial(window, cx))))
             .child(div().flex_1())
             .child(self.ping_all_button(cx))
             .children(self.listing_controls("hosts", false, true, window, cx));
@@ -306,12 +307,12 @@ impl Shell {
         let mut body = div().id("hosts-scroll").flex_1().overflow_y_scroll().px(px(super::sections::BODY_PADDING)).pb_5();
 
         if let Some(error) = &self.vault_error {
-            body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(format!("Vault: {error}")));
+            body = body.child(div().pt_5().text_color(rgb(theme::TILE_UBUNTU)).child(termian_native::ui_format!("Vault: {error}", "Хранилище: {error}")));
         }
 
         if !self.query.trim().is_empty() {
             let results = self.vault.search(&self.query);
-            body = body.child(section_title(if results.is_empty() { "No hosts found" } else { "Hosts" }));
+            body = body.child(section_title(if results.is_empty() { tr("No hosts found") } else { tr("Hosts") }));
             return div().flex_1().h_full().flex().flex_col().child(search).child(toolbar).child(
                 body.child(self.cards("hosts").children(results.into_iter().map(|h| self.render_host(h, cx)))),
             );
@@ -325,7 +326,7 @@ impl Shell {
         let groups = self.listed("hosts", self.vault.child_groups(self.group), |g| g.label.as_str(), |g| g.id);
         if !groups.is_empty() {
             body = body
-                .child(section_title("Groups"))
+                .child(section_title(tr("Groups")))
                 .child(self.cards("hosts").children(groups.into_iter().map(|g| self.render_group(g, cx))));
         }
 
@@ -335,11 +336,11 @@ impl Shell {
         // Legacy shows a host being created as the first card, outlined.
         let draft = self.host_editor.as_ref().filter(|e| e.is_new && e.host.group == self.group).map(|e| {
             let address = e.host.address.trim();
-            let title = if address.is_empty() { "Enter IP or Hostname...".to_owned() } else { address.to_owned() };
+            let title = if address.is_empty() { tr("Enter IP or Hostname...").to_owned() } else { address.to_owned() };
             card("host-draft".into(), tile("new_host", theme::TILE_BLUE), title, "ssh".into()).border_1().border_color(rgb(theme::ACCENT))
         });
         if !hosts.is_empty() || draft.is_some() {
-            body = body.child(section_title("Hosts")).child(self.cards("hosts").children(draft).children(
+            body = body.child(section_title(tr("Hosts"))).child(self.cards("hosts").children(draft).children(
                 hosts.into_iter().map(|h| self.render_host(h, cx)),
             ));
         }
@@ -374,10 +375,8 @@ impl Shell {
             .group(group)
             .child(edit)
             .child(self.ping_dot(host, cx))
-            .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, window, cx| {
-                if event.is_keyboard() || event.click_count() >= 2 {
-                    shell.connect_host(id, window, cx);
-                }
+            .on_click(cx.listener(move |shell, _, window, cx| {
+                shell.connect_host(id, window, cx);
             }))
             .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
                 shell.open_host_menu(id, event, cx);
@@ -387,7 +386,7 @@ impl Shell {
     fn render_group(&self, group: &Group, cx: &mut Context<Self>) -> Stateful<Div> {
         let id = group.id;
         let count = self.vault.hosts_under(Some(id)).len();
-        let noun = if count == 1 { "Host" } else { "Hosts" };
+        let noun = if count == 1 { tr("Host") } else { tr("Hosts") };
         let hover = SharedString::from(format!("group-card-{id}"));
         let edit = div()
             .id(SharedString::from(format!("group-edit-{id}")))
@@ -430,7 +429,7 @@ impl Shell {
                     cx.notify();
                 }))
         };
-        let mut row = div().pt_5().flex().items_center().gap_2().text_sm().child(crumb("crumb-root", "All hosts".into(), None, cx));
+        let mut row = div().pt_5().flex().items_center().gap_2().text_sm().child(crumb("crumb-root", tr("All hosts").into(), None, cx));
         for (i, group) in path.iter().enumerate() {
             row = row.child(div().text_color(rgb(theme::TEXT_MUTED)).child("›"));
             row = if i + 1 == path.len() {

@@ -2,6 +2,7 @@
 //! host header, progress (connect, the host key point while it is checked,
 //! terminal), the pending question and the connection log.
 
+use termian_native::language::text as tr;
 use std::time::Duration;
 
 use gpui::{
@@ -194,7 +195,7 @@ pub fn render_connected(label: &str, subtitle: String, os: Option<&str>, key: u6
         .gap_3()
         .child(os_tile(os).size(px(40.)))
         .child(div().flex_1().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child(label.to_owned())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
-        .child(button("connected-logs", "Show logs", false, false));
+        .child(button("connected-logs", tr("Show logs"), false, false));
     let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
     let bar = div()
         .relative()
@@ -229,11 +230,11 @@ pub fn render<V: 'static>(
     // After a failure the log is always shown and the header button copies it.
     let header_button = if let Some(error) = &state.error {
         let text = state.logs.iter().chain(std::iter::once(error)).cloned().collect::<Vec<_>>().join("\n");
-        button("copy-logs", "Copy logs", false, true)
+        button("copy-logs", tr("Copy logs"), false, true)
             .flex_none()
             .on_click(move |_, _, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone())))
     } else {
-        button("show-logs", if state.show_logs { "Hide logs" } else { "Show logs" }, false, true)
+        button("show-logs", if state.show_logs { tr("Hide logs") } else { tr("Show logs") }, false, true)
             .on_click(cx.listener(move |view, _, _, cx| toggle_logs(view, cx)))
     };
     let header = div()
@@ -273,8 +274,8 @@ pub fn render<V: 'static>(
             .children(state.logs.iter().map(|line| log_line(line)))
             .children(extra.map(|error| div().child(format!("😨 {error}"))))
     };
-    let close_button = |id: &str| button(id, "Close", false, true).on_click(cx.listener(move |view, _, window, cx| close(view, window, cx)));
-    let start_over = || button("login-retry", "Start over", true, true).on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx)));
+    let close_button = |id: &str| button(id, tr("Close"), false, true).on_click(cx.listener(move |view, _, window, cx| close(view, window, cx)));
+    let start_over = || button("login-retry", tr("Start over"), true, true).on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx)));
 
     let mut body = div().w_full().pt_6().flex().flex_col().gap_4();
     let title = |text: &str| div().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT_MUTED)).child(text.to_owned());
@@ -282,11 +283,11 @@ pub fn render<V: 'static>(
     if let Some(error) = &state.error {
         if let Some(info) = &state.changed_key {
             body = body
-                .child(title("Host key has changed"))
-                .child(paragraph(format!("The host key of {} is different from the one saved in known hosts.", info.host)))
+                .child(title(tr("Host key has changed")))
+                .child(paragraph(termian_native::ui_format!("The host key of {} is different from the one saved in known hosts.", "Ключ {} отличается от сохранённого ключа.", info.host)))
                 .child(paragraph(format!("{} fingerprint is SHA256:", info.algorithm)))
                 .child(paragraph(info.fingerprint.clone()))
-                .child(paragraph("The connection was refused to protect you from a possible man-in-the-middle attack."));
+                .child(paragraph(tr("The connection was refused to protect you from a possible man-in-the-middle attack.")));
         } else {
             body = body
                 .child(
@@ -297,13 +298,13 @@ pub fn render<V: 'static>(
                         .text_sm()
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(rgb(FAILED))
-                        .child("Connection failed with connection log:"),
+                        .child(tr("Connection failed with connection log:")),
                 )
                 .child(log_box(Some(error)));
         }
         let main_actions = div().flex().gap_3()
             .child(close_button("login-close").flex_1().min_w_0().h(px(42.)).px_2())
-            .child(button("login-retry", "Retry", true, true)
+            .child(button("login-retry", tr("Retry"), true, true)
                 .flex_1().min_w_0().h(px(42.)).px_2().gap_2().flex_row_reverse()
                 .child(svg().path(icon("sync")).size(px(14.)).flex_none().text_color(rgb(0xffffff)))
                 .on_click(cx.listener(move |view, _, window, cx| retry(view, window, cx))));
@@ -312,9 +313,9 @@ pub fn render<V: 'static>(
         let mut footer = div().flex().flex_col().gap_1().child(main_actions);
         if actions.edit_host.is_some() || actions.verbose.is_some() {
             let secondary_actions = div().flex().flex_wrap().justify_center().gap_x_2()
-                .children(actions.edit_host.map(|edit_host| secondary("login-edit-host", "Edit host")
+                .children(actions.edit_host.map(|edit_host| secondary("login-edit-host", tr("Edit host"))
                     .on_click(cx.listener(move |view, _, window, cx| edit_host(view, window, cx)))))
-                .children(actions.verbose.map(|verbose| secondary("login-verbose", "Retry with verbose logs")
+                .children(actions.verbose.map(|verbose| secondary("login-verbose", tr("Retry with verbose logs"))
                     .on_click(cx.listener(move |view, _, window, cx| verbose(view, window, cx)))));
             footer = footer.child(secondary_actions);
         }
@@ -323,23 +324,23 @@ pub fn render<V: 'static>(
         match &state.question {
             Some(Question::HostKey(info)) => {
                 body = body
-                    .child(title("Are you sure you want to connect?"))
-                    .child(paragraph(format!("The authenticity of {} can not be established.", info.host)))
+                    .child(title(tr("Are you sure you want to connect?")))
+                    .child(paragraph(termian_native::ui_format!("The authenticity of {} can not be established.", "Не удалось проверить подлинность {}.", info.host)))
                     .child(paragraph(format!("{} fingerprint is SHA256:", info.algorithm)))
                     .child(paragraph(info.fingerprint.clone()))
-                    .child(paragraph("Do you want to add it to the list of known hosts?"))
+                    .child(paragraph(tr("Do you want to add it to the list of known hosts?")))
                     .child(
                         div()
                             .flex()
                             .gap_3()
-                            .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| {
+                            .child(button("login-close", tr("Close"), false, true).on_click(cx.listener(move |view, _, window, cx| {
                                 answer(view, Answer::HostKey(HostKeyDecision::Reject), window, cx)
                             })))
                             .child(div().flex_1())
-                            .child(button("login-once", "Continue", false, true).on_click(cx.listener(move |view, _, window, cx| {
+                            .child(button("login-once", tr("Continue"), false, true).on_click(cx.listener(move |view, _, window, cx| {
                                 answer(view, Answer::HostKey(HostKeyDecision::Once), window, cx)
                             })))
-                            .child(button("login-save", "Add and continue", true, true).on_click(cx.listener(
+                            .child(button("login-save", tr("Add and continue"), true, true).on_click(cx.listener(
                                 move |view, _, window, cx| answer(view, Answer::HostKey(HostKeyDecision::Save), window, cx),
                             ))),
                     );
@@ -362,11 +363,11 @@ pub fn render<V: 'static>(
                     div()
                         .flex()
                         .gap_3()
-                        .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| {
+                        .child(button("login-close", tr("Close"), false, true).on_click(cx.listener(move |view, _, window, cx| {
                             answer(view, Answer::Text(None), window, cx)
                         })))
                         .child(div().flex_1())
-                        .child(button("login-submit", "Continue", true, true).on_click(cx.listener(move |view, _, window, cx| {
+                        .child(button("login-submit", tr("Continue"), true, true).on_click(cx.listener(move |view, _, window, cx| {
                             submit(view, window, cx)
                         }))),
                 );
@@ -441,7 +442,7 @@ fn username_question<V: 'static>(
                 .bg(rgb(theme::TITLE_BAR))
                 .text_xs()
                 .text_color(rgb(if typing { theme::ACCENT } else { theme::TEXT_MUTED }))
-                .child("Username"),
+                .child(tr("Username")),
         )
         .child(text_input::text("login-input", &state.input, "", typing, Mode::Line, cx));
     let handle = focus.clone();
@@ -459,7 +460,7 @@ fn username_question<V: 'static>(
         .gap_2()
         .text_sm()
         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-        .child(text_input::text("login-identities", &state.identity_query, "Search identities", searching, Mode::Line, cx));
+        .child(text_input::text("login-identities", &state.identity_query, tr("Search identities"), searching, Mode::Line, cx));
     let handle = focus.clone();
     let search = text_input::field(search, "login-identities", Mode::Line, move |view, window, cx| {
         ui(view, LoginUi::SearchIdentities, cx);
@@ -506,7 +507,7 @@ fn username_question<V: 'static>(
             .relative()
             .flex()
             .child(
-                primary(button("login-continue-save", "Continue & Save", true, !empty))
+                primary(button("login-continue-save", tr("Continue & Save"), true, !empty))
                     .rounded_r_none()
                     .when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| continue_save(view, window, cx)))),
             )
@@ -539,13 +540,13 @@ fn username_question<V: 'static>(
                                 .text_sm()
                                 .text_color(rgb(theme::TEXT))
                                 .hover(|d| d.bg(rgb(theme::SURFACE_ACTIVE)))
-                                .child("Continue")
+                                .child(tr("Continue"))
                                 .on_click(cx.listener(move |view, _, window, cx| submit(view, window, cx))),
                         ),
                 )
             }),
         None => div().child(
-            primary(button("login-submit", "Continue", true, !empty)).when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| submit(view, window, cx)))),
+            primary(button("login-submit", tr("Continue"), true, !empty)).when(!empty, |d| d.on_click(cx.listener(move |view, _, window, cx| submit(view, window, cx)))),
         ),
     };
 
@@ -560,7 +561,7 @@ fn username_question<V: 'static>(
                 .pt_4()
                 .flex()
                 .items_center()
-                .child(button("login-close", "Close", false, true).on_click(cx.listener(move |view, _, window, cx| answer(view, Answer::Text(None), window, cx))))
+                .child(button("login-close", tr("Close"), false, true).on_click(cx.listener(move |view, _, window, cx| answer(view, Answer::Text(None), window, cx))))
                 .child(div().flex_1())
                 .child(continue_button),
         )

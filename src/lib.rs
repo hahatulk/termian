@@ -14,6 +14,7 @@ pub mod legacy;
 pub mod listing;
 pub mod log_backup;
 pub mod log_comment;
+pub mod language;
 pub mod login;
 pub mod motion;
 #[cfg(target_os = "android")]
@@ -42,4 +43,5 @@ pub mod theme;
 pub mod transfer;
 pub mod updater;
 pub mod vault;
+pub mod vault_set;
 pub mod workspace_template;

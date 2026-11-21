@@ -5,6 +5,7 @@
 //! «Create a workspace» saves the selection as a template), or the "Recent
 //! sessions" empty state when there is neither.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, AnyElement, ClickEvent, Context, Div, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::theme;
 use termian_native::vault::HostId;
@@ -150,7 +151,8 @@ impl Shell {
                 .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(host.display_label().to_owned()))
                 .child(div().flex_none().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(self.vault.host_location(host)))
                 .on_click(cx.listener(move |shell, event: &ClickEvent, window, cx| {
-                    if matches!(event, ClickEvent::Keyboard(key) if key.button == gpui::KeyboardButton::Enter) || event.click_count() >= 2 {
+                    if matches!(event, ClickEvent::Keyboard(key) if key.button == gpui::KeyboardButton::Enter)
+                        || (!event.is_keyboard() && !event.modifiers().secondary() && !event.modifiers().shift) {
                         shell.launch(vec![id], window, cx);
                         return;
                     }
@@ -191,7 +193,7 @@ impl Shell {
         let label = match &renaming {
             Some(text) => {
                 let field = div().id("workspace-label").flex_1().min_w_0()
-                    .child(text_input::text("workspace-label", text, "New Workspace", true, Mode::Line, cx));
+                    .child(text_input::text("workspace-label", text, tr("New Workspace"), true, Mode::Line, cx));
                 text_input::field(field, "workspace-label", Mode::Line, |shell, window, _| window.focus(&shell.launcher_focus), cx).into_any_element()
             }
             None => div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(template.label.clone()).into_any_element(),
@@ -281,7 +283,7 @@ impl Shell {
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::DIALOG_ROW }))
             .surface_feedback(theme::TITLE_BAR)
-            .child(div().flex_1().child(text_input::text("launcher-search", query, "Search hosts or tabs", focused, Mode::Line, cx)))
+            .child(div().flex_1().child(text_input::text("launcher-search", query, tr("Search hosts or tabs"), focused, Mode::Line, cx)))
             .child(div().mx(px(5.)).text_color(rgb(theme::TEXT_MUTED)).child(PALETTE_SHORTCUT))
             .on_click(cx.listener(|shell, _, window, cx| shell.open_palette(String::new(), window, cx)));
 
@@ -308,17 +310,17 @@ impl Shell {
                     .flex_col()
                     .items_center()
                     .gap_3()
-                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Recent sessions"))
+                    .child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Recent sessions")))
                     .child(
                         div()
                             .text_sm()
                             .text_color(rgb(theme::TEXT_MUTED))
-                            .child(format!("Your recent sessions will be visible here. In the meantime, start connecting with {PALETTE_SHORTCUT}")),
+                            .child(termian_native::ui_format!("Your recent sessions will be visible here. In the meantime, start connecting with {PALETTE_SHORTCUT}", "Здесь появятся недавние сеансы. Для подключения нажмите {PALETTE_SHORTCUT}")),
                     )
             } else {
                 let any = !self.launcher.selected.is_empty();
                 // Greyed like legacy until a connection is selected.
-                let restore = dialog::button("recent-restore", "Restore", if any { Kind::Accent } else { Kind::Regular }, !any)
+                let restore = dialog::button("recent-restore", tr("Restore"), if any { Kind::Accent } else { Kind::Regular }, !any)
                     .h(px(30.))
                     .px_3()
                     .when(any, |d| {
@@ -328,14 +330,14 @@ impl Shell {
                         }))
                     })
                     .into_any_element();
-                let create = dialog::button("recent-create-workspace", "Create a workspace", Kind::Regular, !any)
+                let create = dialog::button("recent-create-workspace", tr("Create a workspace"), Kind::Regular, !any)
                     .h(px(30.))
                     .px_3()
                     .when(any, |d| d.on_click(cx.listener(|shell, _, _, cx| shell.create_workspace(cx))))
                     .into_any_element();
-                let workspaces = (!saved.is_empty()).then(|| section("Workspace templates", Vec::new()).children(saved.iter().map(|t| self.template_row(t, cx))));
+                let workspaces = (!saved.is_empty()).then(|| section(tr("Workspace templates"), Vec::new()).children(saved.iter().map(|t| self.template_row(t, cx))));
                 let recent = (!recent.is_empty()).then(|| {
-                    section("Recent connections", vec![create, restore])
+                    section(tr("Recent connections"), vec![create, restore])
                         .children(recent.into_iter().enumerate().filter_map(|(i, id)| self.launcher_row(id, self.launcher.selected.contains(&id), i % 2 == 1, cx)))
                 });
                 div().w_full().flex().flex_col().gap(px(20.)).children(workspaces).children(recent)

@@ -25,9 +25,27 @@ use crate::{
     store::Store,
     terminal::{self, Modifiers, Terminal},
     vault::{Host, Vault},
+    vault_set::{Destination, VaultSet},
 };
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
+
+#[no_mangle]
+pub extern "system" fn Java_app_termian_mobile_MainActivity_setRussian(
+    _: JNIEnv, _: JClass, russian: jni::sys::jboolean,
+) {
+    use crate::language::{self, Language};
+    language::set(if russian == jni::sys::JNI_TRUE { Language::Russian } else { Language::English });
+}
+
+#[no_mangle]
+pub extern "system" fn Java_app_termian_mobile_MainActivity_text(
+    mut env: JNIEnv, _: JClass, value: JString,
+) -> jstring {
+    let Ok(value) = env.get_string(&value) else { return std::ptr::null_mut() };
+    let source = value.to_string_lossy();
+    env.new_string(crate::language::text(&source)).map(JString::into_raw).unwrap_or(std::ptr::null_mut())
+}
 
 struct Connection {
     session: Option<Session>,
@@ -47,6 +65,7 @@ struct Connection {
 
 struct App {
     store: Store,
+    vaults: VaultSet,
     root: PathBuf,
     vault: Vault,
     sessions: BTreeMap<u64, Connection>,
@@ -89,9 +108,11 @@ fn text<'a>(v: &'a Value, field: &str) -> &'a str {
 
 impl App {
     fn new(root: PathBuf, key: [u8; 32]) -> Result<Self, String> {
-        let store = Store::new(root.join("vault.bin"), key);
-        let vault = store.load()?.unwrap_or_default();
-        let logs = root.join("session-logs-v2");
+        let base = Store::new(root.join("vault.bin"), key);
+        let personal = base.load()?.unwrap_or_default();
+        let (vaults, store, vault) = VaultSet::load(base, personal)?;
+        let root = store.path().parent().ok_or("Invalid Vault path.")?.to_owned();
+        let logs = store.logs_dir();
         crate::session_log::prune(
             &logs,
             std::time::SystemTime::now(),
@@ -99,6 +120,7 @@ impl App {
         );
         Ok(Self {
             store,
+            vaults,
             root,
             vault,
             sessions: BTreeMap::new(),
@@ -114,6 +136,37 @@ impl App {
             log_download: None,
             size: (40, 24),
         })
+    }
+
+    fn list_vaults(&self) -> Value {
+        let entries = self.vaults.entries().iter().map(|entry| {
+            json!({"id": entry.id.to_string(), "name": entry.name()})
+        }).collect::<Vec<_>>();
+        json!({"entries": entries, "selected": self.vaults.selected().to_string(), "vaultName": self.vaults.selected_name()})
+    }
+
+    fn change_vault(&mut self, dest: Destination<'_>) -> Result<Value, String> {
+        use crate::language::text as tr;
+        if let Destination::Existing(id) = dest {
+            if id == self.vaults.selected() {
+                return Ok(json!({"vaultName": self.vaults.selected_name()}));
+            }
+        }
+        if !self.sessions.is_empty() || self.files.is_some() || !self.forwards.is_empty() {
+            return Err(tr("Close sessions and SFTP, and stop port forwarding before switching Vaults.").into());
+        }
+        if self.sync.is_some() || self.cloud_check.is_some() || self.log_download.is_some() {
+            return Err(tr("Wait for the current operation to finish before switching Vaults.").into());
+        }
+        let (store, vault) = self.vaults.select(&self.vault, dest)?;
+        self.root = store.path().parent().ok_or("Invalid Vault path.")?.to_owned();
+        self.store = store;
+        self.vault = vault;
+        self.ticket = None;
+        self.selected = None;
+        self.secondary = None;
+        self.broadcast = false;
+        Ok(json!({"vaultName": self.vaults.selected_name()}))
     }
 
     fn hosts(&self) -> Value {
@@ -512,6 +565,11 @@ impl App {
             return Err("Дождитесь завершения синхронизации.".into());
         }
         match op {
+            "vaultList" => Ok(self.list_vaults()),
+            "vaultSelect" => self.change_vault(Destination::Existing(
+                text(args, "id").parse().map_err(|_| "Vault not found.")?
+            )),
+            "vaultCreate" => self.change_vault(Destination::New(text(args, "name"))),
             "hosts" => Ok(json!({"hosts": self.hosts()})),
             "saveHost" => self.edit_host(args),
             "deleteHost" => {
@@ -612,6 +670,7 @@ impl App {
                     auto_sync: false,
                 };
                 config.validate()?;
+                self.vaults.check_cloud_url(&config.url)?;
                 let mut vault = self.vault.clone();
                 vault.cloud = Some(config);
                 self.save(vault)?;
@@ -871,9 +930,9 @@ pub extern "system" fn Java_app_termian_mobile_MainActivity_nativeCall(
                     .try_into()
                     .map_err(|_| "Некорректный ключ Vault.")?;
                 let opened = App::new(PathBuf::from(text(&args, "root")), bytes)?;
-                let hosts = opened.hosts();
+                let reply = json!({"hosts": opened.hosts(), "vaultName": opened.vaults.selected_name()});
                 *app = Some(opened);
-                Ok(json!({"hosts":hosts}))
+                Ok(reply)
             }
             "close" => {
                 if let Some(open) = app.as_mut() {

@@ -2,6 +2,7 @@
 //! Parent Group), the group card's right-click menu, the "New Group" item
 //! under NEW HOST, and "Remove a group" with the hosts that go with it.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, Window};
 use termian_native::theme;
 use termian_native::vault::{Group, GroupId};
@@ -115,19 +116,19 @@ impl Shell {
             .overflow_y_scroll()
             .flex()
             .flex_col()
-            .child("You are going to remove this group:")
-            .child(row(tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {}", if count == 1 { "Host" } else { "Hosts" })));
+            .child(tr("You are going to remove this group:"))
+            .child(row(tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {}", if count == 1 { tr("Host") } else { tr("Hosts") })));
         if !hosts.is_empty() {
             body = body
-                .child(div().pt(px(15.)).child(if hosts.len() == 1 { "And this host:" } else { "And these hosts:" }))
+                .child(div().pt(px(15.)).child(if hosts.len() == 1 { tr("And this host:") } else { tr("And these hosts:") }))
                 .children(hosts.into_iter().map(|h| row(host_tile(h), h.display_label().to_owned(), h.subtitle())));
         }
         let title = match count {
-            0 => "Remove a group".to_owned(),
-            1 => "Remove a group and a host".to_owned(),
+            0 => tr("Remove a group").to_owned(),
+            1 => tr("Remove a group and a host").to_owned(),
             n => format!("Remove a group and {n} hosts"),
         };
-        dialog::card(&title, false, close, div().child(body), vec![dialog::button("remove-group-confirm", "Remove", Kind::Error, false)
+        dialog::card(&title, false, close, div().child(body), vec![dialog::button("remove-group-confirm", tr("Remove"), Kind::Error, false)
             .on_click(cx.listener(move |shell, _, _, cx| shell.remove_group(id, cx)))
             .into_any_element()])
     }
@@ -145,7 +146,7 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { "New Group" } else { "Group Details" }))
+            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { tr("New Group") } else { tr("Group Details") }))
             .when(!editor.is_new, |d| d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT))))
             .child(
                 div()
@@ -170,7 +171,7 @@ impl Shell {
             })));
 
         let label = field_box(focused).id("group-label").flex_1()
-            .child(text_input::text("group-label", &group.label, "Label", focused, Mode::Line, cx));
+            .child(text_input::text("group-label", &group.label, tr("Label"), focused, Mode::Line, cx));
         let label = text_input::field(label, "group-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx);
 
         let parent = group.parent.map(|p| self.vault.group_path(p));
@@ -197,20 +198,20 @@ impl Shell {
                     cx.notify();
                 }))
             };
-            let mut list = div().id("group-parent-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No group".into(), cx));
+            let mut list = div().id("group-parent-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, tr("No group").into(), cx));
             for choice_group in self.vault.parent_choices(group.id) {
                 list = list.child(choice(Some(choice_group.id), self.vault.group_path(choice_group.id), cx));
             }
             gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list))
         });
 
-        let general = card("General")
+        let general = card(tr("General"))
             .child(div().flex().items_center().gap_3().child(tile("group", theme::TILE_BLUE).size(px(36.)).rounded_lg()).child(label))
             .child(div().relative().child(picker).children(parents));
 
         let menu = editor.menu_open.then(|| {
             let disabled = editor.is_new;
-            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("group-menu").child(menu_row("group-menu-remove".into(), "Remove", true, disabled).when(!disabled, |d| {
+            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("group-menu").child(menu_row("group-menu-remove".into(), tr("Remove"), true, disabled).when(!disabled, |d| {
                 d.on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.group_editor {
                         editor.menu_open = false;
@@ -274,19 +275,19 @@ impl Shell {
         }
         let items = match menu.group {
             Some(id) => menu_panel("group-card-menu")
-                .child(menu_row("group-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_group(id, window, cx))))
-                .child(menu_row("group-menu-remove".into(), "Remove", true, false).on_click(cx.listener(|shell, _, _, cx| {
+                .child(menu_row("group-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_group(id, window, cx))))
+                .child(menu_row("group-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(menu) = &mut shell.group_menu {
                         menu.confirm_remove = true;
                     }
                     cx.notify();
                 }))),
             None => menu_panel("new-menu")
-                .child(menu_row("new-menu-host".into(), "New Host", false, false).on_click(cx.listener(|shell, _, window, cx| {
+                .child(menu_row("new-menu-host".into(), tr("New Host"), false, false).on_click(cx.listener(|shell, _, window, cx| {
                     shell.group_menu = None;
                     shell.new_host(window, cx);
                 })))
-                .child(menu_row("new-menu-group".into(), "New Group", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_group(window, cx)))),
+                .child(menu_row("new-menu-group".into(), tr("New Group"), false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_group(window, cx)))),
         };
         let viewport = window.viewport_size();
         let left = menu.position.x.min(viewport.width - px(230.));

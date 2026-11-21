@@ -1,3 +1,4 @@
+use termian_native::language::text as tr;
 use gpui::{
     div, prelude::*, px, rgb, svg, Animation, AnimationExt, AnyElement, Context, FocusHandle,
     SharedString, Subscription, Transformation, Window,
@@ -180,7 +181,7 @@ impl Shell {
             Key::Edited => {
                 if local_password && value.len() > MAX_BYTES {
                     value.zeroize();
-                    self.privacy.hint = "The password is too long.";
+                    self.privacy.hint = tr("The password is too long.");
                 }
                 cx.notify();
             }
@@ -290,7 +291,7 @@ impl Shell {
                         shell.open_privacy(window, cx);
                     } else {
                         shell.privacy_focus(window);
-                        shell.privacy.hint = "Authentication did not complete.";
+                        shell.privacy.hint = tr("Authentication did not complete.");
                         cx.notify();
                     }
                 });
@@ -317,7 +318,7 @@ impl Shell {
             .is_some_and(|after| Instant::now() < after)
         {
             self.privacy.input.zeroize();
-            self.privacy.hint = "Too many attempts. Try again in a few seconds.";
+            self.privacy.hint = tr("Too many attempts. Try again in a few seconds.");
             cx.notify();
             return;
         }
@@ -349,11 +350,11 @@ impl Shell {
             return;
         }
         self.privacy.failures += 1;
-        self.privacy.hint = "Incorrect password.";
+        self.privacy.hint = tr("Incorrect password.");
         if self.privacy.failures >= 5 {
             self.privacy.retry_at = Some(Instant::now() + Duration::from_secs(10));
             self.privacy.failures = 0;
-            self.privacy.hint = "Too many attempts. Try again in 10 seconds.";
+            self.privacy.hint = tr("Too many attempts. Try again in 10 seconds.");
         }
         cx.notify();
     }
@@ -361,9 +362,9 @@ impl Shell {
     fn save_privacy_password(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.privacy.input.is_empty() || self.privacy.input != self.privacy.repeat {
             self.privacy.hint = if self.privacy.input.is_empty() {
-                "Enter a password."
+                tr("Enter a password.")
             } else {
-                "The passwords do not match."
+                tr("The passwords do not match.")
             };
             self.privacy.repeat.zeroize();
             if self.privacy.input.is_empty() {
@@ -391,7 +392,7 @@ impl Shell {
                     }
                     shell.vault.privacy_password = previous;
                 }
-                shell.privacy.hint = "Could not save the lock password.";
+                shell.privacy.hint = tr("Could not save the lock password.");
                 shell.privacy_focus(window);
                 cx.notify();
             });
@@ -432,7 +433,7 @@ impl Shell {
                     .items_center()
                     .justify_center()
                     .icon_feedback()
-                    .tooltip(|_, cx| cx.new(|_| Tooltip("Lock Termian".into())).into())
+                    .tooltip(|_, cx| cx.new(|_| Tooltip(tr("Lock Termian").into())).into())
                     .child(glyph)
                     .on_click(cx.listener(|shell, _, window, cx| shell.lock_privacy(window, cx))),
             )
@@ -520,7 +521,7 @@ impl Shell {
             .child(div().text_xl().child(if setup {
                 "Set a lock password"
             } else {
-                "Termian is locked"
+                tr("Termian is locked")
             }));
         if setup {
             content = content
@@ -528,17 +529,17 @@ impl Shell {
                     div()
                         .text_sm()
                         .text_color(rgb(theme::TEXT_MUTED))
-                        .child("This password is for this device."),
+                        .child(tr("This password is for this device.")),
                 )
-                .child(field(false, "Lock password", cx))
-                .child(field(true, "Repeat password", cx));
+                .child(field(false, tr("Lock password"), cx))
+                .child(field(true, tr("Repeat password"), cx));
         } else if has_password {
             content = content.child(field(
                 false,
                 if has_local {
-                    "Lock password"
+                    tr("Lock password")
                 } else {
-                    "Cloud encryption password"
+                    tr("Cloud encryption password")
                 },
                 cx,
             ));
@@ -552,11 +553,11 @@ impl Shell {
                     super::dialog::button(
                         "privacy-submit",
                         if busy {
-                            "Please wait…"
+                            tr("Please wait…")
                         } else if setup {
-                            "Lock Termian"
+                            tr("Lock Termian")
                         } else {
-                            "Unlock"
+                            tr("Unlock")
                         },
                         Kind::Accent,
                         busy,
@@ -570,7 +571,7 @@ impl Shell {
         }
         if setup {
             actions = actions.child(
-                super::dialog::button("privacy-cancel", "Cancel", Kind::Regular, busy).when(
+                super::dialog::button("privacy-cancel", tr("Cancel"), Kind::Regular, busy).when(
                     !busy,
                     |d| {
                         d.on_click(cx.listener(|shell, _, window, cx| {
@@ -584,9 +585,9 @@ impl Shell {
                 super::dialog::button(
                     "privacy-touch-id",
                     if self.privacy.auth_pending {
-                        "Waiting for macOS…"
+                        tr("Waiting for macOS…")
                     } else {
-                        "Use Touch ID or Mac password"
+                        tr("Use Touch ID or Mac password")
                     },
                     Kind::Regular,
                     busy,

@@ -18,6 +18,10 @@ pub struct Entry {
 }
 
 impl Entry {
+    pub fn is_hidden(&self) -> bool {
+        self.name.starts_with('.')
+    }
+
     /// "Kind" column: `folder`, `link`, or the file extension.
     pub fn kind(&self) -> String {
         if self.is_link {
@@ -173,7 +177,7 @@ impl Panel {
         let mut rows: Vec<&Entry> =
             self.entries
                 .iter()
-                .filter(|e| self.show_hidden || !e.name.starts_with('.'))
+                .filter(|e| self.show_hidden || !e.is_hidden())
                 .filter(|e| filter.is_empty() || e.name.to_lowercase().contains(&filter))
                 .collect();
         rows.sort_by(|a, b| {
@@ -453,10 +457,12 @@ mod tests {
     #[test]
     fn dotfiles_are_hidden_by_default() {
         let mut p = panel();
-        p.set_entries(vec![entry(".git", true, 0, 0), entry("src", true, 0, 0)]);
+        p.set_entries(vec![entry(".git", true, 0, 0), entry(".env", false, 0, 0), entry("src", true, 0, 0)]);
         assert_eq!(names(&p), ["src"]);
         p.show_hidden = true;
-        assert_eq!(names(&p), [".git", "src"]);
+        assert_eq!(names(&p), [".git", "src", ".env"]);
+        assert!(p.entry(".git").unwrap().is_hidden() && p.entry(".env").unwrap().is_hidden());
+        assert!(!p.entry("src").unwrap().is_hidden());
     }
 
     #[test]

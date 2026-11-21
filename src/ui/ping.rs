@@ -1,3 +1,4 @@
+use termian_native::language::text as tr;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
@@ -28,11 +29,13 @@ enum Status {
 struct Request {
     id: HostId,
     address: String,
+    port: u16,
     ticket: u64,
 }
 
 struct Entry {
     address: String,
+    port: u16,
     ticket: u64,
     status: Status,
 }
@@ -49,6 +52,7 @@ pub(crate) struct HostPings {
 impl HostPings {
     fn enqueue(&mut self, host: &Host) {
         let address = host.address.trim();
+        let port = host.port.unwrap_or(22);
         if address.is_empty() || matches!(self.status(host), Some(Status::Queued | Status::Running))
         {
             return;
@@ -59,6 +63,7 @@ impl HostPings {
             host.id,
             Entry {
                 address: address.to_owned(),
+                port,
                 ticket,
                 status: Status::Queued,
             },
@@ -66,6 +71,7 @@ impl HostPings {
         self.queue.push_back(Request {
             id: host.id,
             address: address.to_owned(),
+            port,
             ticket,
         });
     }
@@ -73,7 +79,7 @@ impl HostPings {
     fn status(&self, host: &Host) -> Option<Status> {
         self.entries
             .get(&host.id)
-            .filter(|entry| entry.address == host.address.trim())
+            .filter(|entry| entry.address == host.address.trim() && entry.port == host.port.unwrap_or(22))
             .map(|entry| entry.status)
     }
 
@@ -169,7 +175,7 @@ impl Shell {
             let current = self
                 .vault
                 .host(request.id)
-                .is_some_and(|host| host.address.trim() == request.address);
+                .is_some_and(|host| host.address.trim() == request.address && host.port.unwrap_or(22) == request.port);
             let Some(entry) = self.host_pings.entry(&request) else {
                 continue;
             };
@@ -180,7 +186,8 @@ impl Shell {
             entry.status = Status::Running;
             self.host_pings.active += 1;
             let address = request.address.clone();
-            let work = cx.background_spawn(async move { ping::check(&address) });
+            let port = request.port;
+            let work = cx.background_spawn(async move { ping::check(&address, port) });
             cx.spawn(async move |this, cx| {
                 let start = Instant::now();
                 let reply = work.await;
@@ -195,7 +202,7 @@ impl Shell {
                     let current = shell
                         .vault
                         .host(request.id)
-                        .is_some_and(|host| host.address.trim() == request.address);
+                        .is_some_and(|host| host.address.trim() == request.address && host.port.unwrap_or(22) == request.port);
                     if let Some(entry) = shell.host_pings.entry(&request) {
                         if current {
                             entry.status = Status::Done(reply);
@@ -218,9 +225,9 @@ impl Shell {
         let waiting = self.host_pings.batch;
         let enabled = !waiting && !self.vault.hosts.is_empty();
         let tooltip = if waiting {
-            format!("Pinging hosts ({})", self.host_pings.pending())
+            termian_native::ui_format!("Pinging hosts ({})", "Проверка хостов ({})", self.host_pings.pending())
         } else {
-            "Ping all saved hosts".to_owned()
+            tr("Ping all saved hosts").to_owned()
         };
         div()
             .id("ping-all-hosts")
@@ -259,7 +266,7 @@ impl Shell {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(theme::TEXT))
-                    .child("PING ALL")
+                    .child(tr("PING ALL"))
             })
             .tooltip(move |_, cx| cx.new(|_| Tooltip(tooltip.clone())).into())
     }
@@ -269,26 +276,27 @@ impl Shell {
         let status = self.host_pings.status(host);
         let waiting = matches!(status, Some(Status::Queued | Status::Running));
         let (color, text) = match status {
-            None => (theme::TEXT_MUTED, "Ping host".to_owned()),
-            Some(Status::Queued) => (0xffbb73, "Waiting to ping".to_owned()),
-            Some(Status::Running) => (SCAN, "Pinging host".to_owned()),
+            None => (theme::TEXT_MUTED, tr("Ping host").to_owned()),
+            Some(Status::Queued) => (0xffbb73, tr("Waiting to ping").to_owned()),
+            Some(Status::Running) => (SCAN, tr("Pinging host").to_owned()),
             Some(Status::Done(Reply::Echo(ms))) => (
                 theme::ACCENT,
                 ms.map_or_else(
                     || "Ping replied. Click to ping again".to_owned(),
-                    |ms| format!("Ping: {ms:.1} ms. Click to ping again"),
+                    |ms| termian_native::ui_format!("Ping: {ms:.1} ms. Click to ping again", "Пинг: {ms:.1} мс. Нажмите для повторной проверки"),
                 ),
             ),
+            Some(Status::Done(Reply::SshPort(ms))) => (theme::ACCENT, termian_native::ui_format!("SSH port reached in {ms:.1} ms. No ICMP reply", "Порт SSH доступен за {ms:.1} мс. Нет ответа ICMP")),
             Some(Status::Done(Reply::NoReply)) => {
-                (theme::ERROR, "No ping reply. Click to try again".to_owned())
+                (theme::ERROR, tr("No ping reply. Click to try again").to_owned())
             }
             Some(Status::Done(Reply::Unresolved)) => (
                 theme::ERROR,
-                "Address could not be resolved. Click to try again".to_owned(),
+                tr("Address could not be resolved. Click to try again").to_owned(),
             ),
             Some(Status::Done(Reply::Unavailable)) => (
                 theme::ERROR,
-                "Ping unavailable. Click to try again".to_owned(),
+                tr("Ping unavailable. Click to try again").to_owned(),
             ),
         };
         div()

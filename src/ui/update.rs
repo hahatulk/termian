@@ -3,6 +3,7 @@
 //! a notice in the corner offers a restart. The user chooses when, so open SSH
 //! sessions are never cut off by an update.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, Context, Div, FontWeight, Stateful, Task};
 use std::time::Duration;
 use termian_native::updater::{self, Channel, Mode, Package, Schedule, State, Status};
@@ -42,7 +43,7 @@ impl Shell {
             }
             Err(error) => {
                 (self.vault.update_channel, self.vault.update_schedule) = previous;
-                self.update.settings_error = Some(format!("Не удалось сохранить настройки обновлений: {error}"));
+                self.update.settings_error = Some(termian_native::ui_format!("Could not save update settings: {error}", "Не удалось сохранить настройки обновлений: {error}"));
             }
         }
         cx.notify();
@@ -176,10 +177,10 @@ impl Shell {
             return None;
         }
         let (title, text, action) = if installed {
-            (format!("Termian {version} установлен"), self.update.restart_error.clone()
-                .unwrap_or_else(|| "Новая версия запустится после перезапуска. Открытые SSH-сессии при перезапуске закроются.".into()), "Перезапустить")
+            (termian_native::ui_format!("Termian {version} is ready", "Termian {version} установлен"), self.update.restart_error.clone()
+                .unwrap_or_else(|| "Новая версия запустится после перезапуска. Открытые SSH-сессии при перезапуске закроются.".into()), tr("Перезапустить"))
         } else {
-            (format!("Доступен Termian {version}"), "Скачать обновление можно в Settings → Version.".into(), "Скачать")
+            (termian_native::ui_format!("Termian {version} is available", "Доступен Termian {version}"), tr("Скачать обновление можно в Settings → Version.").into(), tr("Скачать"))
         };
         Some(super::motion::toast(
             div()
@@ -206,7 +207,7 @@ impl Shell {
                         .flex()
                         .justify_end()
                         .gap_2()
-                        .child(notice_button("update-later", "Позже", false).on_click(cx.listener(move |shell, _, _, cx| {
+                        .child(notice_button("update-later", tr("Позже"), false).on_click(cx.listener(move |shell, _, _, cx| {
                             if installed {
                                 shell.update.dismissed = true;
                             } else {

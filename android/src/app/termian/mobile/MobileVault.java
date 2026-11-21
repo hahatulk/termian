@@ -1,5 +1,7 @@
 package app.termian.mobile;
 
+import static app.termian.mobile.MainActivity.text;
+
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -81,12 +83,12 @@ final class MobileVault {
                 content.setLayoutParams(lp);
             }
         });
-        EditText quick=searchField("Search hosts or tabs",true);
+        EditText quick=searchField(text("Search hosts or tabs"),true);
         quick.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
         content.addView(quick,new LinearLayout.LayoutParams(-1,app.dp(48)));
         LinearLayout actions=new LinearLayout(app);
         actions.setPadding(0,app.dp(10),0,app.dp(12));
-        actions.addView(app.style.tool("terminal","TERMINAL",TermianStyle.SURFACE,app::localTerminal),
+        actions.addView(app.style.tool("terminal",text("TERMINAL"),TermianStyle.SURFACE,app::localTerminal),
             new LinearLayout.LayoutParams(0,app.dp(48),1));
         actions.addView(app.style.tool("sftp","SFTP",TermianStyle.SURFACE,() -> app.page("sftp")),
             new LinearLayout.LayoutParams(0,app.dp(48),1));
@@ -98,19 +100,19 @@ final class MobileVault {
             results.removeAllViews();
             if(query.isEmpty()) {
                 if(list("workspaces").length()>0) {
-                    LinearLayout block=launcherBlock(results,"Workspace templates");
+                    LinearLayout block=launcherBlock(results,text("Workspace templates"));
                     for(int i=0;i<list("workspaces").length();i++) {
                         JSONObject item=list("workspaces").optJSONObject(i);
                         add(block,app.style.card("workspace",TermianStyle.TILE,item.optString("label"),item.optInt("count")+" terminals",
-                            () -> app.openWorkspace(item),() -> new AlertDialog.Builder(app).setTitle("Delete workspace template?")
-                                .setNegativeButton("Cancel",null).setPositiveButton("Delete",(d,w) ->
+                            () -> app.openWorkspace(item),() -> new AlertDialog.Builder(app).setTitle(text("Delete workspace template?"))
+                                .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(d,w) ->
                                     app.updateHosts(app.call("deleteWorkspace","id",item.optString("id")))).show()));
                     }
                 }
                 JSONArray recent=list("recent");
-                LinearLayout block=launcherBlock(results,recent.length()==0 ? "Recent sessions" : "Recent connections");
+                LinearLayout block=launcherBlock(results,recent.length()==0 ? text("Recent sessions") : text("Recent connections"));
                 for(int i=0;i<recent.length();i++) add(block,hostCard(recent.optJSONObject(i),false));
-                if(recent.length()==0) block.addView(app.label("Recent connections appear here after you open a terminal.",14,TermianStyle.MUTED));
+                if(recent.length()==0) block.addView(app.label(text("Recent connections appear here after you open a terminal."),14,TermianStyle.MUTED));
                 return;
             }
             LinearLayout block=launcherBlock(results,"Search results");
@@ -119,10 +121,10 @@ final class MobileVault {
             for(int i=0;i<tabs.length();i++) {
                 JSONObject tab=tabs.optJSONObject(i);
                 if(tab!=null && contains(tab.optString("label"),query))
-                    add(block,app.style.card("terminal",TermianStyle.TILE,tab.optString("label"),"Open terminal",
+                    add(block,app.style.card("terminal",TermianStyle.TILE,tab.optString("label"),text("Open terminal"),
                         () -> app.selectTab(tab.optString("id")),null));
             }
-            add(block,app.style.card("connect",TermianStyle.TILE,"Quick Connect",query,() -> app.quickConnect(query),null));
+            add(block,app.style.card("connect",TermianStyle.TILE,text("Quick Connect"),query,() -> app.quickConnect(query),null));
         };
         quick.setOnEditorActionListener((v,id,event) -> {openLauncherQuery(MainActivity.value(quick));return true;});
         watch(quick,update);
@@ -179,13 +181,13 @@ final class MobileVault {
         searchRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
         searchRow.setPadding(app.dp(12),app.dp(8),app.dp(12),0);
         boolean hosts=section.equals("Hosts");
-        EditText search=searchField(hosts ? "Find a host or ssh user@hostname..." : "Search "+section,false);
+        EditText search=searchField(hosts ? text("Find a host or ssh user@hostname...") : "Search "+section,false);
         search.setText(filter);
         searchRow.addView(search,new LinearLayout.LayoutParams(0,app.dp(48),1));
         if(hosts) {
             search.setImeOptions(android.view.inputmethod.EditorInfo.IME_ACTION_GO);
             search.setOnEditorActionListener((text,id,event) -> {openQuery(filter);return true;});
-            searchRow.addView(app.style.iconAction("connect","Connect",() -> openQuery(filter)));
+            searchRow.addView(app.style.iconAction("connect",text("Connect"),() -> openQuery(filter)));
         }
         page.addView(searchRow);
         toolbar(page);
@@ -195,7 +197,7 @@ final class MobileVault {
         fill();
     }
 
-    String sectionTitle() { return section; }
+    String sectionTitle() { return text(section); }
 
     void addSections(LinearLayout items, boolean current) {
         for(int i=0;i<SECTIONS.length;i++) {
@@ -216,21 +218,21 @@ final class MobileVault {
         boolean hosts=section.equals("Hosts");
         LinearLayout left=new LinearLayout(app);
         if(hosts) {
-            left.addView(app.style.iconAction("new_host","New Host",() -> app.edit(null)));
-            left.addView(app.style.iconAction("caret_down","New host or group",TermianStyle.MUTED,48,11,this::addRecord));
+            left.addView(app.style.iconAction("new_host",text("New Host"),() -> app.edit(null)));
+            left.addView(app.style.iconAction("caret_down",text("New host or group"),TermianStyle.MUTED,48,11,this::addRecord));
         } else if(!section.equals("Known Hosts") && !section.equals("Logs")) {
             int at=java.util.Arrays.asList(SECTIONS).indexOf(section);
-            left.addView(app.style.iconAction(ICONS[at],"New",this::addRecord));
+            left.addView(app.style.iconAction(ICONS[at],text("New"),this::addRecord));
         }
         toolbar.addView(left,new LinearLayout.LayoutParams(0,-2,1));
-        if(!section.equals("Logs")) toolbar.addView(app.style.iconAction(grid ? "grid" : "list",grid ? "Grid view" : "List view",() -> {
+        if(!section.equals("Logs")) toolbar.addView(app.style.iconAction(grid ? "grid" : "list",grid ? text("Grid view") : text("List view"),() -> {
             grid=!grid;
             app.getPreferences(android.content.Context.MODE_PRIVATE).edit().putBoolean("grid:"+section,grid).apply();
             refresh();
         }));
-        if(!section.equals("Logs")) toolbar.addView(app.style.iconAction("sorting","Sort",() -> {
-            String[] order={"Newest to oldest","Oldest to newest","A to Z","Z to A"};
-            new AlertDialog.Builder(app).setTitle("Sort").setSingleChoiceItems(order,sort,(d,w) -> {
+        if(!section.equals("Logs")) toolbar.addView(app.style.iconAction("sorting",text("Sort"),() -> {
+            String[] order={text("Newest to oldest"),text("Oldest to newest"),text("A to Z"),text("Z to A")};
+            new AlertDialog.Builder(app).setTitle(text("Sort")).setSingleChoiceItems(order,sort,(d,w) -> {
                 app.getPreferences(android.content.Context.MODE_PRIVATE).edit().putInt("sort:"+section,w).apply();
                 d.dismiss();
                 refresh();
@@ -249,22 +251,22 @@ final class MobileVault {
         for(JSONObject item=g;item!=null && path.size()<32;item=find("groups",value(item,"parent"))) path.add(0,item);
         LinearLayout line=new LinearLayout(app);
         line.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        line.addView(app.style.iconAction("arrow_left","Parent group",() -> back()));
+        line.addView(app.style.iconAction("arrow_left",text("Parent group"),() -> back()));
         TextView current=app.label(g.optString("label"),14,TermianStyle.TEXT);
         current.setSingleLine(true);
         current.setEllipsize(android.text.TextUtils.TruncateAt.END);
         current.setOnClickListener(view -> {
             String[] labels=new String[path.size()+1];
-            labels[0]="Personal";
+            labels[0]=text("Personal");
             for(int i=0;i<path.size();i++) labels[i+1]=path.get(i).optString("label");
-            new AlertDialog.Builder(app).setTitle("Go to group").setItems(labels,(dialog,i) -> {
+            new AlertDialog.Builder(app).setTitle(text("Go to group")).setItems(labels,(dialog,i) -> {
                 group=i==0 ? "" : path.get(i-1).optString("id");
                 refresh();
             }).show();
         });
         app.style.action(current,TermianStyle.BG);
         line.addView(current,new LinearLayout.LayoutParams(0,-2,1));
-        line.addView(app.style.iconAction("caret_down","Group path",() -> current.performClick()));
+        line.addView(app.style.iconAction("caret_down",text("Group path"),() -> current.performClick()));
         page.addView(line);
     }
 
@@ -371,28 +373,28 @@ final class MobileVault {
                 ArrayList<JSONObject> groups=sorted("groups");
                 boolean hasGroups=false;
                 for(JSONObject g:groups) if(group.equals(value(g,"parent")) && matches(g.optString("label"))) {
-                    if(!hasGroups) {header("Groups");hasGroups=true;}
-                    card(app.style.card("group",TermianStyle.TILE,g.optString("label"),"Group",
+                    if(!hasGroups) {header(text("Groups"));hasGroups=true;}
+                    card(app.style.card("group",TermianStyle.TILE,g.optString("label"),text("Group"),
                         () -> {group=value(g,"id");filter="";refresh();},() -> groupEditor(g)));
                 }
                 boolean hasHosts=false;
                 for(JSONObject h:matchingHosts(filter)) if(group.equals(value(h,"groupId")) || !filter.isEmpty()) {
-                    if(!hasHosts) {header("Hosts");hasHosts=true;}
+                    if(!hasHosts) {header(text("Hosts"));hasHosts=true;}
                     card(hostCard(h,true));
                 }
                 break;
             case "Keychain":
-                header("Keys");collection("keys","keychain",this::keyEditor);
-                header("Identities");collection("identities","identity",this::identityEditor);
+                header(text("Keys"));collection("keys","keychain",this::keyEditor);
+                header(text("Identities"));collection("identities","identity",this::identityEditor);
                 break;
             case "Snippets":
-                header("Packages");collection("packages","group",this::packageEditor);
-                header("Snippets");collection("snippets","snippets",this::snippetMenu);
+                header(text("Packages"));collection("packages","group",this::packageEditor);
+                header(text("Snippets"));collection("snippets","snippets",this::snippetMenu);
                 break;
             case "Known Hosts":
                 collection("known","known_hosts",row -> new AlertDialog.Builder(app).setTitle(row.optString("label"))
                     .setMessage(row.optString("subtitle")+"\\n\\nForget this saved host key?")
-                    .setNegativeButton("Cancel",null).setPositiveButton("Forget",(d,w)->app.updateHosts(app.call("deleteKnown","id",value(row,"id")))).show());
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Forget"),(d,w)->app.updateHosts(app.call("deleteKnown","id",value(row,"id")))).show());
                 break;
             case "Port Forwarding":
                 for(JSONObject r:sorted("rules")) {
@@ -454,7 +456,7 @@ final class MobileVault {
     }
 
     private void hostMenu(JSONObject host) {
-        new AlertDialog.Builder(app).setTitle(host.optString("label")).setItems(new String[]{"Connect","Connect with SFTP","Edit","Duplicate"},(d,i) -> {
+        new AlertDialog.Builder(app).setTitle(host.optString("label")).setItems(new String[]{text("Connect"),text("Connect with SFTP"),text("Edit"),text("Duplicate")},(d,i) -> {
             if (i==0) app.connect(host);
             if (i==1) app.openFiles(host);
             if (i==2) app.edit(host);
@@ -464,15 +466,15 @@ final class MobileVault {
 
     private void addRecord() {
         switch(section) {
-            case "Hosts": new AlertDialog.Builder(app).setTitle("New").setItems(new String[]{"Host","Group"},(d,i) -> {
+            case "Hosts": new AlertDialog.Builder(app).setTitle(text("New")).setItems(new String[]{text("Host"),text("Group")},(d,i) -> {
                 if (i==0) app.edit(null);
                 else groupEditor(null);
             }).show(); break;
-            case "Keychain": new AlertDialog.Builder(app).setTitle("New").setItems(new String[]{"Key","Identity"},(d,i) -> {
+            case "Keychain": new AlertDialog.Builder(app).setTitle(text("New")).setItems(new String[]{text("Key"),text("Identity")},(d,i) -> {
                 if (i==0) keyEditor(null);
                 else identityEditor(null);
             }).show(); break;
-            case "Snippets": new AlertDialog.Builder(app).setTitle("New").setItems(new String[]{"Snippet","Package"},(d,i) -> {
+            case "Snippets": new AlertDialog.Builder(app).setTitle(text("New")).setItems(new String[]{text("Snippet"),text("Package")},(d,i) -> {
                 if (i==0) snippetEditor(null);
                 else packageEditor(null);
             }).show(); break;
@@ -499,15 +501,15 @@ final class MobileVault {
                 add(rows,app.style.card(row.optBoolean("saved")?"bookmark_filled":"logs",TermianStyle.TILE,row.optString("label"),
                     detail, () -> app.openLog(row), () -> logMenu(row)));
         }
-        if (items.length()==0) rows.addView(app.label("No session logs",15,TermianStyle.MUTED));
+        if (items.length()==0) rows.addView(app.label(text("No session logs"),15,TermianStyle.MUTED));
     }
 
     private void logMenu(JSONObject row) {
-        new AlertDialog.Builder(app).setTitle(row.optString("label")).setItems(new String[]{"Open log","Save comment","Remove bookmark"},(d,i) -> {
+        new AlertDialog.Builder(app).setTitle(row.optString("label")).setItems(new String[]{text("Open log"),text("Save comment"),text("Remove bookmark")},(d,i) -> {
             if (i==0) app.openLog(row);
             if (i==1) {
                 LinearLayout form=app.column();
-                EditText note=field(form,"Comment",value(row,"comment"),true);
+                EditText note=field(form,text("Comment"),value(row,"comment"),true);
                 editor("Saved comment",form,null,"",() -> app.call("saveLog","id",value(row,"id"),"comment",MainActivity.value(note)));
             }
             if (i==2) app.updateHosts(app.call("unbookmarkLog","id",value(row,"id")));
@@ -515,16 +517,16 @@ final class MobileVault {
     }
 
     private void snippetMenu(JSONObject row) {
-        new AlertDialog.Builder(app).setTitle(row.optString("display")).setItems(new String[]{"Run in selected terminal","Edit"},(d,i) -> {
-            if(i==0) new AlertDialog.Builder(app).setTitle("Run snippet?").setMessage(row.optString("script"))
-                .setNegativeButton("Cancel",null).setPositiveButton("Run",(a,b) -> app.runSnippet(row)).show();
+        new AlertDialog.Builder(app).setTitle(row.optString("display")).setItems(new String[]{text("Run in selected terminal"),text("Edit")},(d,i) -> {
+            if(i==0) new AlertDialog.Builder(app).setTitle(text("Run snippet?")).setMessage(row.optString("script"))
+                .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Run"),(a,b) -> app.runSnippet(row)).show();
             else snippetEditor(row);
         }).show();
     }
 
     private void ruleMenu(JSONObject row) {
         boolean running=row.optBoolean("running");
-        new AlertDialog.Builder(app).setTitle(row.optString("label")).setItems(new String[]{running?"Stop":"Start","Edit"},(d,i) -> {
+        new AlertDialog.Builder(app).setTitle(row.optString("label")).setItems(new String[]{running?text("Stop"):text("Start"),text("Edit")},(d,i) -> {
             if(i==0) app.allowNetwork(() -> {
                 JSONObject result=app.call("forwardToggle","id",value(row,"id"));
                 forwarding=true;
@@ -557,7 +559,7 @@ final class MobileVault {
 
     Spinner pick(LinearLayout form,String title,JSONArray choices,String initial) {
         ArrayList<String> names=new ArrayList<>(), ids=new ArrayList<>();
-        names.add("None"); ids.add("");
+        names.add(text("None")); ids.add("");
         if(choices!=null) for(int i=0;i<choices.length();i++) {
             JSONObject row=choices.optJSONObject(i);
             names.add(row.optString("label"));
@@ -590,10 +592,10 @@ final class MobileVault {
     private void editor(String title,LinearLayout form,String deleteOp,String id,java.util.function.Supplier<JSONObject> save) {
         form.setPadding(app.dp(16),0,app.dp(16),app.dp(12));
         AlertDialog.Builder build=new AlertDialog.Builder(app).setTitle(title).setView(app.scroll(form))
-            .setNegativeButton("Cancel",null).setPositiveButton("Save",null);
-        if(deleteOp!=null&&!id.isEmpty()) build.setNeutralButton("Delete",(d,w) ->
-            new AlertDialog.Builder(app).setTitle(deleteOp.equals("deleteGroup")?"Delete group and its hosts?":"Delete this record?")
-            .setNegativeButton("Cancel",null).setPositiveButton("Delete",(a,b)->app.updateHosts(app.call(deleteOp,"id",id))).show());
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),null);
+        if(deleteOp!=null&&!id.isEmpty()) build.setNeutralButton(text("Delete"),(d,w) ->
+            new AlertDialog.Builder(app).setTitle(deleteOp.equals("deleteGroup")?text("Delete group and its hosts?"):text("Delete this record?"))
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(a,b)->app.updateHosts(app.call(deleteOp,"id",id))).show());
         AlertDialog dialog=build.show();
         dialog.getButton(-1).setOnClickListener(v -> {
             JSONObject response=save.get();
@@ -605,71 +607,72 @@ final class MobileVault {
 
     private void groupEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
-        Spinner parent=pick(form,"Parent group",list("groups"),row==null?group:value(row,"parent"));
+        EditText label=field(form,text("Label"),value(row,"label"),false);
+        Spinner parent=pick(form,text("Parent group"),list("groups"),row==null?group:value(row,"parent"));
         String id=value(row,"id");
-        editor("Group",form,"deleteGroup",id,() -> app.call("saveGroup","id",id,"label",MainActivity.value(label),"parent",choice(parent)));
+        editor(text("Group"),form,"deleteGroup",id,() -> app.call("saveGroup","id",id,"label",MainActivity.value(label),"parent",choice(parent)));
     }
 
     private void identityEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
-        EditText user=field(form,"Username",value(row,"username"),false);
-        EditText pass=app.field(form,"Password","",MainActivity.PASSWORD);
+        EditText label=field(form,text("Label"),value(row,"label"),false);
+        EditText user=field(form,text("Username"),value(row,"username"),false);
+        EditText pass=app.field(form,text("Password"),"",MainActivity.PASSWORD);
         CheckBox clear=app.check(form,"Remove saved password");
-        Spinner key=pick(form,"SSH key",list("keys"),value(row,"key"));
+        Spinner key=pick(form,text("SSH key"),list("keys"),value(row,"key"));
         String id=value(row,"id");
-        editor("Identity",form,"deleteIdentity",id,() -> app.call("saveIdentity","id",id,"label",MainActivity.value(label),
+        editor(text("Identity"),form,"deleteIdentity",id,() -> app.call("saveIdentity","id",id,"label",MainActivity.value(label),
             "username",MainActivity.value(user),"password",MainActivity.value(pass),"clearPassword",clear.isChecked(),"key",choice(key)));
     }
 
     private void keyEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
-        if(row!=null && !row.isNull("publicKey")) form.addView(app.button("Copy public key",() -> {
+        EditText label=field(form,text("Label"),value(row,"label"),false);
+        if(row!=null && !row.isNull("publicKey")) form.addView(app.button(text("Copy public key"),() -> {
             ClipboardManager clip=app.getSystemService(ClipboardManager.class);
-            clip.setPrimaryClip(ClipData.newPlainText("SSH public key",row.optString("publicKey")));
+            clip.setPrimaryClip(ClipData.newPlainText(text("SSH public key"),row.optString("publicKey")));
         }));
-        EditText key=field(form,"Private key","",true);
+        EditText key=field(form,text("Private key"),"",true);
         key.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        EditText pass=app.field(form,"Passphrase","",MainActivity.PASSWORD);
-        CheckBox generate=app.check(form,"Generate ED25519 key");
-        EditText cert=field(form,"OpenSSH certificate",value(row,"certificate"),true);
+        EditText pass=app.field(form,text("Passphrase"),"",MainActivity.PASSWORD);
+        CheckBox generate=app.check(form,text("Generate ED25519 key"));
+        EditText cert=field(form,text("OpenSSH certificate"),value(row,"certificate"),true);
         String id=value(row,"id");
-        editor("SSH key",form,"deleteKey",id,() -> app.call("saveKey","id",id,"label",MainActivity.value(label),
+        editor(text("SSH key"),form,"deleteKey",id,() -> app.call("saveKey","id",id,"label",MainActivity.value(label),
             "privateKey",MainActivity.value(key),"password",MainActivity.value(pass),"generate",generate.isChecked(),"certificate",MainActivity.value(cert)));
     }
 
     private void packageEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
+        EditText label=field(form,text("Label"),value(row,"label"),false);
         String id=value(row,"id");
-        editor("Snippet package",form,"deletePackage",id,() -> app.call("savePackage","id",id,"label",MainActivity.value(label)));
+        editor(text("Snippet package"),form,"deletePackage",id,() -> app.call("savePackage","id",id,"label",MainActivity.value(label)));
     }
 
     private void snippetEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
+        EditText label=field(form,text("Label"),value(row,"label"),false);
         EditText script=field(form,"Script",value(row,"script"),true);
-        Spinner pack=pick(form,"Package",list("packages"),value(row,"package"));
+        Spinner pack=pick(form,text("Package"),list("packages"),value(row,"package"));
         String id=value(row,"id");
-        editor("Snippet",form,"deleteSnippet",id,() -> app.call("saveSnippet","id",id,"label",MainActivity.value(label),
+        editor(text("Snippet"),form,"deleteSnippet",id,() -> app.call("saveSnippet","id",id,"label",MainActivity.value(label),
             "script",MainActivity.value(script),"package",choice(pack)));
     }
 
     private void ruleEditor(JSONObject row) {
         LinearLayout form=app.column();
-        EditText label=field(form,"Label",value(row,"label"),false);
-        Spinner type=spinner(form,"Type",new String[]{"Local","Remote","Dynamic"});
+        EditText label=field(form,text("Label"),value(row,"label"),false);
+        String[] kinds={"Local","Remote","Dynamic"};
+        Spinner type=spinner(form,text("Type"),java.util.Arrays.stream(kinds).map(MainActivity::text).toArray(String[]::new));
         type.setSelection(value(row,"kind").equals("Remote")?1:value(row,"kind").equals("Dynamic")?2:0);
-        Spinner host=pick(form,"Host",list("hosts"),value(row,"host"));
-        EditText bind=field(form,"Bind address",row==null?"127.0.0.1":value(row,"bind"),false);
-        EditText port=app.field(form,"Listening port",value(row,"port"),InputType.TYPE_CLASS_NUMBER);
-        port.setHint("0 = choose an available port");
+        Spinner host=pick(form,text("Host"),list("hosts"),value(row,"host"));
+        EditText bind=field(form,text("Bind address"),row==null?"127.0.0.1":value(row,"bind"),false);
+        EditText port=app.field(form,text("Listening port"),value(row,"port"),InputType.TYPE_CLASS_NUMBER);
+        port.setHint(text("0 = choose an available port"));
         LinearLayout target=app.column();
         form.addView(target);
-        EditText destination=field(target,"Destination",value(row,"destination"),false);
-        EditText remote=app.field(target,"Destination port",value(row,"destinationPort"),InputType.TYPE_CLASS_NUMBER);
+        EditText destination=field(target,text("Destination"),value(row,"destination"),false);
+        EditText remote=app.field(target,text("Destination port"),value(row,"destinationPort"),InputType.TYPE_CLASS_NUMBER);
         target.setVisibility(type.getSelectedItemPosition()==2 ? View.GONE : View.VISIBLE);
         type.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View item, int position, long value) {
@@ -678,18 +681,18 @@ final class MobileVault {
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
         String id=value(row,"id");
-        editor("Port forwarding rule",form,"deleteRule",id,() -> {
+        editor(text("Port forwarding rule"),form,"deleteRule",id,() -> {
             if (!validatePort(port,0)) return null;
             boolean dynamic=type.getSelectedItemPosition()==2;
             if (!dynamic) {
                 if (MainActivity.value(destination).trim().isEmpty()) {
-                    destination.setError("Enter a destination address");
+                    destination.setError(text("Enter a destination address"));
                     destination.requestFocus();
                     return null;
                 }
                 if (!validatePort(remote,1)) return null;
             }
-            return app.call("saveRule","id",id,"kind",type.getSelectedItem().toString(),
+            return app.call("saveRule","id",id,"kind",kinds[type.getSelectedItemPosition()],
                 "label",MainActivity.value(label),"host",choice(host),"bind",MainActivity.value(bind),"port",MainActivity.value(port),
                 "destination",dynamic ? "" : MainActivity.value(destination),
                 "destinationPort",dynamic ? "" : MainActivity.value(remote));
@@ -708,10 +711,10 @@ final class MobileVault {
 
     void terminalSettings(JSONObject current) {
         LinearLayout form=app.column();
-        EditText font=app.field(form,"Font size",value(current,"font"),InputType.TYPE_CLASS_NUMBER);
+        EditText font=app.field(form,text("Font size"),value(current,"font"),InputType.TYPE_CLASS_NUMBER);
         String name=value(current,"theme");
-        EditText theme=field(form,"Color theme",name,false);
-        editor("Terminal",form,null,"",() -> {
+        EditText theme=field(form,text("Color theme"),name,false);
+        editor(text("Terminal"),form,null,"",() -> {
             JSONObject result=app.call("saveTerminal","font",MainActivity.value(font),"theme",MainActivity.value(theme));
             if (!result.has("error")) app.applyTerminalFont(result.optJSONObject("terminal").optInt("font",14));
             return result;

@@ -239,14 +239,14 @@ impl Header {
     /// Tooltip of the sync button; `time` formats `synced_at`.
     pub fn sync_title(&self, time: impl Fn(i64) -> String) -> String {
         match &self.settled {
-            _ if self.syncing() => "Синхронизация…".into(),
-            Status::Checked(Preview::Unconfigured) => "Синхронизация — облако не настроено".into(),
+            _ if self.syncing() => crate::language::text("Синхронизация…").into(),
+            Status::Checked(Preview::Unconfigured) => crate::language::text("Синхронизация — облако не настроено").into(),
             Status::Checked(Preview::Synced | Preview::Empty) => {
-                format!("Синхронизировано{}", self.synced_at.map(|t| format!(" · {}", time(t))).unwrap_or_default())
+                crate::ui_format!("Sync complete{}", "Синхронизировано{}", self.synced_at.map(|t| format!(" · {}", time(t))).unwrap_or_default())
             }
-            Status::Error { message, .. } => format!("Ошибка синхронизации: {message}"),
-            Status::Checked(Preview::Conflicts(conflicts)) => format!("Конфликты синхронизации: {}", conflicts.len()),
-            _ => "Есть что синхронизировать".into(),
+            Status::Error { message, .. } => crate::ui_format!("Sync error: {}", "Ошибка синхронизации: {}", crate::language::text(message)),
+            Status::Checked(Preview::Conflicts(conflicts)) => crate::ui_format!("Sync conflicts: {}", "Конфликты синхронизации: {}", conflicts.len()),
+            _ => crate::language::text("Есть что синхронизировать").into(),
         }
     }
 
@@ -508,24 +508,24 @@ pub fn server_host(url: &str) -> String {
 
 /// Settings → Account → «Своё облако» status line (legacy `Hs`).
 pub fn settings_status(status: &Status, url: Option<&str>) -> (String, Tone) {
-    let Some(url) = url else { return ("Сервер не настроен".into(), Tone::Idle) };
+    let Some(url) = url else { return (crate::language::text("Сервер не настроен").into(), Tone::Idle) };
     let host = server_host(url);
     let summary = |preview: &Preview| match preview {
-        Preview::Synced => "данные совпадают".to_owned(),
-        Preview::Empty => "снимок пуст".to_owned(),
-        Preview::Conflicts(_) => "изменения есть на обеих сторонах".to_owned(),
+        Preview::Synced => crate::language::text("данные совпадают").to_owned(),
+        Preview::Empty => crate::language::text("снимок пуст").to_owned(),
+        Preview::Conflicts(_) => crate::language::text("изменения есть на обеих сторонах").to_owned(),
         Preview::Changes(_) => match preview.counts() {
-            (up, 0) => format!("есть локальные изменения: {up}"),
-            (0, down) => format!("на сервере новые данные: {down}"),
-            _ => "изменения есть на обеих сторонах".to_owned(),
+            (up, 0) => crate::ui_format!("local changes: {up}", "есть локальные изменения: {up}"),
+            (0, down) => crate::ui_format!("new server data: {down}", "на сервере новые данные: {down}"),
+            _ => crate::language::text("изменения есть на обеих сторонах").to_owned(),
         },
         Preview::Unconfigured => String::new(),
     };
     match status {
-        Status::Checking | Status::Syncing => (format!("Проверка подключения к {host}…"), Tone::Busy),
-        Status::Checked(Preview::Unconfigured) => ("Сервер не настроен".into(), Tone::Idle),
-        Status::Checked(preview) => (format!("Подключено к {host} · {}", summary(preview)), Tone::Ok),
-        Status::Error { .. } => (format!("Нет подключения к {host}"), Tone::Error),
+        Status::Checking | Status::Syncing => (crate::ui_format!("Checking connection to {host}…", "Проверка подключения к {host}…"), Tone::Busy),
+        Status::Checked(Preview::Unconfigured) => (crate::language::text("Сервер не настроен").into(), Tone::Idle),
+        Status::Checked(preview) => (crate::ui_format!("Connected to {host} · {}", "Подключено к {host} · {}", summary(preview)), Tone::Ok),
+        Status::Error { .. } => (crate::ui_format!("Cannot connect to {host}", "Нет подключения к {host}"), Tone::Error),
     }
 }
 
@@ -677,14 +677,14 @@ mod tests {
     #[test]
     fn the_header_keeps_the_settled_state_while_checking() {
         let mut header = Header::default();
-        assert_eq!((header.sync_title(|_| String::new()), header.sync_badge()), ("Синхронизация — облако не настроено".into(), None));
+        assert_eq!((header.sync_title(|_| String::new()), header.sync_badge()), ("Sync: cloud is not configured".into(), None));
         header.synced_at = Some(1);
         header.set(Status::Checked(Preview::Synced));
         header.set(Status::Checking);
-        assert_eq!(header.sync_title(|_| "10:00".into()), "Синхронизировано · 10:00");
+        assert_eq!(header.sync_title(|_| "10:00".into()), "Sync complete · 10:00");
         assert_eq!(header.sync_badge(), Some(("✓", TONE_OK)));
         header.set(Status::Syncing);
-        assert_eq!((header.sync_title(|_| String::new()).as_str(), header.sync_badge()), ("Синхронизация…", None));
+        assert_eq!((header.sync_title(|_| String::new()).as_str(), header.sync_badge()), ("Syncing…", None));
         let change = sync::Change { upload: true, kind: "hosts".into(), label: "web".into(), action: "modified" };
         header.set(Status::Checked(Preview::Changes(vec![change])));
         assert_eq!(header.sync_badge(), Some(("!", TONE_WARNING)));
@@ -818,14 +818,14 @@ mod tests {
     fn settings_status_reads_like_the_legacy_account_tab() {
         let url = Some("https://sync.example:8443/base");
         let change = |upload| crate::sync::Change { upload, kind: "hosts".into(), label: "web".into(), action: "modified" };
-        assert_eq!(settings_status(&Status::default(), None), ("Сервер не настроен".to_owned(), Tone::Idle));
-        assert_eq!(settings_status(&Status::Checking, url).0, "Проверка подключения к sync.example:8443…");
-        assert_eq!(settings_status(&Status::Checked(Preview::Synced), url), ("Подключено к sync.example:8443 · данные совпадают".to_owned(), Tone::Ok));
-        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(true), change(true)])), url).0.ends_with("есть локальные изменения: 2"));
-        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false)])), url).0.ends_with("на сервере новые данные: 1"));
-        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false), change(true)])), url).0.ends_with("обеих сторонах"));
+        assert_eq!(settings_status(&Status::default(), None), ("Server not configured".to_owned(), Tone::Idle));
+        assert_eq!(settings_status(&Status::Checking, url).0, "Checking connection to sync.example:8443…");
+        assert_eq!(settings_status(&Status::Checked(Preview::Synced), url), ("Connected to sync.example:8443 · data matches".to_owned(), Tone::Ok));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(true), change(true)])), url).0.ends_with("local changes: 2"));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false)])), url).0.ends_with("new server data: 1"));
+        assert!(settings_status(&Status::Checked(Preview::Changes(vec![change(false), change(true)])), url).0.ends_with("both sides have changes"));
         let error = Status::Error { message: "x".into(), credentials: false };
-        assert_eq!(settings_status(&error, url), ("Нет подключения к sync.example:8443".to_owned(), Tone::Error));
+        assert_eq!(settings_status(&error, url), ("Cannot connect to sync.example:8443".to_owned(), Tone::Error));
         assert!(connected(&Status::Checked(Preview::Empty)) && !connected(&error) && !connected(&Status::Checking));
         assert_eq!(server_host("https://h.example/x"), "h.example");
     }

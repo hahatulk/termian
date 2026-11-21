@@ -1,5 +1,7 @@
 package app.termian.mobile;
 
+import static app.termian.mobile.MainActivity.text;
+
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
@@ -39,6 +41,8 @@ final class MobileFiles {
         refreshChooser();
     }
 
+    boolean canSwitchVault() { return !documentBusy && !polling; }
+
     void arrange(boolean wide) {
         view.removeAllViews();
         view.setOrientation(wide ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
@@ -46,10 +50,10 @@ final class MobileFiles {
             LinearLayout local=app.column();
             local.setBackgroundColor(TermianStyle.SIDEBAR);
             local.setPadding(app.dp(12),app.dp(8),app.dp(12),app.dp(8));
-            local.addView(app.label("Local",18,TermianStyle.TEXT));
-            local.addView(app.label("Choose Android files or folders to upload.",13,TermianStyle.MUTED));
-            local.addView(app.style.tool("upload","SELECT FILE",TermianStyle.SURFACE,() -> chooseLocal(false)));
-            local.addView(app.style.tool("group","SELECT FOLDER",TermianStyle.SURFACE,() -> chooseLocal(true)));
+            local.addView(app.label(text("Local"),18,TermianStyle.TEXT));
+            local.addView(app.label(text("Choose Android files or folders to upload."),13,TermianStyle.MUTED));
+            local.addView(app.style.tool("upload",text("SELECT FILE"),TermianStyle.SURFACE,() -> chooseLocal(false)));
+            local.addView(app.style.tool("group",text("SELECT FOLDER"),TermianStyle.SURFACE,() -> chooseLocal(true)));
             view.addView(local,new LinearLayout.LayoutParams(0,-1,1));
             View divider=new View(app);
             divider.setBackgroundColor(TermianStyle.BAR);
@@ -60,7 +64,7 @@ final class MobileFiles {
     }
 
     private void chooseLocal(boolean tree) {
-        if(!ready) { app.toast("Connect to an SSH host first."); return; }
+        if(!ready) { app.toast(text("Connect to an SSH host first.")); return; }
         pick(tree);
     }
 
@@ -72,8 +76,8 @@ final class MobileFiles {
         header.setBackgroundColor(TermianStyle.SIDEBAR);
         header.addView(app.label("SFTP",16,TermianStyle.TEXT),new LinearLayout.LayoutParams(0,-2,1));
         remote.addView(header,new LinearLayout.LayoutParams(-1,app.dp(48)));
-        remote.addView(app.label("Connect to host",18,TermianStyle.TEXT));
-        remote.addView(app.label("Select a saved host to browse its files.",13,TermianStyle.MUTED));
+        remote.addView(app.label(text("Connect to host"),18,TermianStyle.TEXT));
+        remote.addView(app.label(text("Select a saved host to browse its files."),13,TermianStyle.MUTED));
         ScrollView scroll=new ScrollView(app);
         LinearLayout items=app.column();
         items.setPadding(app.dp(12),0,app.dp(12),0);
@@ -89,8 +93,8 @@ final class MobileFiles {
     void open(JSONObject host) {
         if (documentBusy) return;
         if (polling) {
-            new AlertDialog.Builder(app).setTitle("Switch SFTP host?").setMessage("The current SFTP connection and its transfers will close.")
-                .setNegativeButton("Cancel",null).setPositiveButton("Switch",(d,w) -> start(host)).show();
+            new AlertDialog.Builder(app).setTitle(text("Switch SFTP host?")).setMessage(text("The current SFTP connection and its transfers will close."))
+                .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Switch"),(d,w) -> start(host)).show();
         } else start(host);
     }
 
@@ -107,9 +111,9 @@ final class MobileFiles {
             TextView name=app.label(host.optString("label"),16,TermianStyle.TEXT);
             name.setMaxLines(1);
             header.addView(name,new LinearLayout.LayoutParams(0,-2,1));
-            header.addView(app.style.iconAction("upload","Upload",() -> new AlertDialog.Builder(app).setTitle("Upload")
-                .setItems(new String[]{"File","Folder"},(d,w)->pick(w==1)).show()));
-            header.addView(app.style.iconAction("close","Disconnect",this::close));
+            header.addView(app.style.iconAction("upload",text("Upload"),() -> new AlertDialog.Builder(app).setTitle(text("Upload"))
+                .setItems(new String[]{text("File"),text("Folder")},(d,w)->pick(w==1)).show()));
+            header.addView(app.style.iconAction("close",text("Disconnect"),this::close));
             remote.addView(header,new LinearLayout.LayoutParams(-1,app.dp(48)));
             activity=app.label("Connecting…",14,TermianStyle.MUTED);
             remote.addView(activity);
@@ -117,15 +121,15 @@ final class MobileFiles {
             path.setMaxLines(2);
             remote.addView(path);
             LinearLayout actions=new LinearLayout(app);
-            actions.addView(app.style.iconAction("arrow_left","Back folder",() -> run("filesBack")));
-            actions.addView(app.style.iconAction("arrow_right","Forward folder",() -> run("filesForward")));
+            actions.addView(app.style.iconAction("arrow_left",text("Back folder"),() -> run("filesBack")));
+            actions.addView(app.style.iconAction("arrow_right",text("Forward folder"),() -> run("filesForward")));
             actions.addView(app.button("Up",() -> run("filesUp")),new LinearLayout.LayoutParams(0,app.dp(48),1));
-            actions.addView(app.button("Refresh",() -> run("filesRefresh")),new LinearLayout.LayoutParams(0,app.dp(48),1));
-            View more=app.style.iconAction("dots","File actions",() -> {});
+            actions.addView(app.button(text("Refresh"),() -> run("filesRefresh")),new LinearLayout.LayoutParams(0,app.dp(48),1));
+            View more=app.style.iconAction("dots",text("File actions"),() -> {});
             more.setOnClickListener(anchor -> {
                 android.widget.PopupMenu menu=new android.widget.PopupMenu(app,anchor);
-                menu.getMenu().add("New Folder").setOnMenuItemClickListener(v -> { folderDialog(null); return true; });
-                menu.getMenu().add("Cancel transfer").setOnMenuItemClickListener(v -> { run("filesControl","retry",false); return true; });
+                menu.getMenu().add(text("New Folder")).setOnMenuItemClickListener(v -> { folderDialog(null); return true; });
+                menu.getMenu().add(text("Cancel transfer")).setOnMenuItemClickListener(v -> { run("filesControl","retry",false); return true; });
                 menu.show();
             });
             actions.addView(more);
@@ -140,7 +144,7 @@ final class MobileFiles {
     }
 
     private void close() {
-        if (documentBusy) {app.toast("Finish the file picker or save operation first.");return;}
+        if (documentBusy) {app.toast(text("Finish the file picker or save operation first."));return;}
         app.call("filesClose");
         polling=false;
         ready=false;
@@ -160,16 +164,16 @@ final class MobileFiles {
     }
 
     private void run(String operation,Object... values) {
-        if (!ready) { app.toast("Connect to an SFTP host first."); return; }
-        if (documentBusy) { app.toast("Finish the current file operation first."); return; }
+        if (!ready) { app.toast(text("Connect to an SFTP host first.")); return; }
+        if (documentBusy) { app.toast(text("Finish the current file operation first.")); return; }
         error(app.call(operation,values));
     }
 
     private void folderDialog(JSONObject file) {
         LinearLayout form=app.column();
-        EditText text=app.field(form,"Name",file==null?"":file.optString("name"),InputType.TYPE_CLASS_TEXT);
-        new AlertDialog.Builder(app).setTitle(file==null?"New folder":"Rename").setView(form)
-            .setNegativeButton("Cancel",null).setPositiveButton("Save",(d,w) -> {
+        EditText text=app.field(form,text("Name"),file==null?"":file.optString("name"),InputType.TYPE_CLASS_TEXT);
+        new AlertDialog.Builder(app).setTitle(file==null?text("New folder"):text("Rename")).setView(form)
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),(d,w) -> {
                 String name=MainActivity.value(text);
                 if(file==null)run("filesMkdir","newName",name);
                 else run("filesRename","name",file.optString("name"),"newName",name);
@@ -182,12 +186,12 @@ final class MobileFiles {
         String name=file.optString("name");
         java.util.ArrayList<String> options=new java.util.ArrayList<>();
         if(!link) {
-            if(folder) options.add("Open");
-            options.add("Download");
+            if(folder) options.add(text("Open"));
+            options.add(text("Download"));
         }
-        options.add("Rename");
-        if(!link) options.add("Permissions");
-        options.add("Delete");
+        options.add(text("Rename"));
+        if(!link) options.add(text("Permissions"));
+        options.add(text("Delete"));
         new AlertDialog.Builder(app).setTitle(name).setItems(options.toArray(new String[0]),(d,w) -> {
             switch(options.get(w)) {
                 case "Open": run("filesFolder","name",name);break;
@@ -195,14 +199,14 @@ final class MobileFiles {
                 case "Rename": folderDialog(file);break;
                 case "Permissions":
                     LinearLayout form=app.column();
-                    EditText mode=app.field(form,"Octal mode",MainActivity.fieldValue(file,"mode"),InputType.TYPE_CLASS_NUMBER);
-                    new AlertDialog.Builder(app).setTitle("Permissions").setView(form)
-                        .setNegativeButton("Cancel",null).setPositiveButton("Apply",(a,b) -> run("filesChmod","name",name,"mode",MainActivity.value(mode))).show();
+                    EditText mode=app.field(form,text("Octal mode"),MainActivity.fieldValue(file,"mode"),InputType.TYPE_CLASS_NUMBER);
+                    new AlertDialog.Builder(app).setTitle(text("Permissions")).setView(form)
+                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Apply"),(a,b) -> run("filesChmod","name",name,"mode",MainActivity.value(mode))).show();
                     break;
                 case "Delete":
                     new AlertDialog.Builder(app).setTitle("Delete " + name + "?")
-                        .setMessage(folder&&!link?"This deletes the folder and its contents.": "This deletes the remote entry.")
-                        .setNegativeButton("Cancel",null).setPositiveButton("Delete",(a,b) -> run("filesDelete","name",name)).show();
+                        .setMessage(folder&&!link?text("This deletes the folder and its contents."): text("This deletes the remote entry."))
+                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(a,b) -> run("filesDelete","name",name)).show();
                     break;
             }
         }).show();
@@ -212,7 +216,7 @@ final class MobileFiles {
         for(int i=0;i<events.length();i++) {
             JSONObject e=events.optJSONObject(i);
             switch(e.optString("type")) {
-                case "connected": ready=true;activity.setText("Connected");break;
+                case "connected": ready=true;activity.setText(text("Connected"));break;
                 case "listing":
                     path.setText(e.optString("path"));
                     rows.removeAllViews();
@@ -221,15 +225,15 @@ final class MobileFiles {
                         JSONObject f=entries.optJSONObject(j);
                         boolean dir=f.optBoolean("folder") && !f.optBoolean("link");
                         String name=f.optString("name");
-                        add(rows,app.style.card(dir?"group":"file",TermianStyle.TILE,name,dir?"Folder":f.optString("size"),
+                        add(rows,app.style.card(dir?"group":"file",TermianStyle.TILE,name,dir?text("Folder"):f.optString("size"),
                             () -> { if(dir)run("filesFolder","name",name);else fileMenu(f); },() -> fileMenu(f)));
                     }
-                    if(entries.length()==0) rows.addView(app.label("Folder is empty",15,TermianStyle.MUTED));
+                    if(entries.length()==0) rows.addView(app.label(text("Folder is empty"),15,TermianStyle.MUTED));
                     break;
                 case "progress": activity.setText(e.optString("value"));break;
-                case "retry": new AlertDialog.Builder(app).setTitle("Transfer stopped").setMessage(e.optString("value"))
-                    .setNegativeButton("Cancel",(d,w) -> run("filesControl","retry",false))
-                    .setPositiveButton("Retry",(d,w) -> run("filesControl","retry",true))
+                case "retry": new AlertDialog.Builder(app).setTitle(text("Transfer stopped")).setMessage(e.optString("value"))
+                    .setNegativeButton(text("Cancel"),(d,w) -> run("filesControl","retry",false))
+                    .setPositiveButton(text("Retry"),(d,w) -> run("filesControl","retry",true))
                     .setOnCancelListener(d -> run("filesControl","retry",false)).show();break;
                 case "export": save(e.optString("name"),e.optString("path"),e.optBoolean("tree"));break;
                 case "closed": ready=false;activity.setText(e.optString("value"));break;
@@ -275,12 +279,12 @@ final class MobileFiles {
                     if (tree) new DocumentTree(app.getContentResolver(),document).exportFrom(java.nio.file.Paths.get(source),name);
                     else try(InputStream in=new FileInputStream(source);
                         OutputStream out=app.getContentResolver().openOutputStream(document,"wt")) { DocumentTree.copy(in,out); }
-                } catch(Exception e){ problem=tree ? "Could not save the folder. Check the selected location for copied files." : "Could not save the file."; }
+                } catch(Exception e){ problem=tree ? text("Could not save the folder. Check the selected location for copied files.") : text("Could not save the file."); }
                 String error=problem;
                 app.runOnUiThread(() -> {
                     app.call("filesRelease");
                     documentBusy=false;
-                    activity.setText(error==null?"Download saved":error);
+                    activity.setText(error==null?text("Download saved"):error);
                 });
             }).start();
         } else {
@@ -299,17 +303,17 @@ final class MobileFiles {
                             OutputStream out=new FileOutputStream(staged)) { DocumentTree.copy(in,out); }
                     }
                 } catch(Exception e) {
-                    app.runOnUiThread(() -> {documentBusy=false; activity.setText("Could not read the selected item.");});
+                    app.runOnUiThread(() -> {documentBusy=false; activity.setText(text("Could not read the selected item."));});
                     return;
                 }
                 String label=name;
                 app.runOnUiThread(() -> {
                     documentBusy=false;
                     LinearLayout form=app.column();
-                    EditText title=app.field(form,"Remote name",label,InputType.TYPE_CLASS_TEXT);
-                    android.widget.CheckBox replace=app.check(form,"Replace existing item");
-                    new AlertDialog.Builder(app).setTitle(tree ? "Upload folder" : "Upload file").setView(form)
-                        .setNegativeButton("Cancel",null).setPositiveButton("Upload",(d,w) ->
+                    EditText title=app.field(form,text("Remote name"),label,InputType.TYPE_CLASS_TEXT);
+                    android.widget.CheckBox replace=app.check(form,text("Replace existing item"));
+                    new AlertDialog.Builder(app).setTitle(tree ? text("Upload folder") : text("Upload file")).setView(form)
+                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Upload"),(d,w) ->
                             run("filesUpload","tree",tree,"newName",MainActivity.value(title),"replace",replace.isChecked())).show();
                 });
             }).start();

@@ -2,6 +2,7 @@
 //! sorting menus, and on Hosts the tag filter; plus the New Forwarding
 //! split-button menu.
 
+use termian_native::language::text as tr;
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{anchored, div, prelude::*, px, rgb, svg, AnyElement, Context, Corner, Div, FocusHandle, KeyDownEvent, MouseButton, Point, Pixels, SharedString, Stateful, Window};
@@ -211,7 +212,7 @@ impl Shell {
                         .border_1()
                         .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
                         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                        .child(text_input::text("listing-search", text, "Search", focused, Mode::Line, cx));
+                        .child(text_input::text("listing-search", text, tr("Search"), focused, Mode::Line, cx));
                     text_input::field(input, "listing-search", Mode::Line, |shell, window, _| window.focus(&shell.list_focus), cx)
                         .into_any_element()
                 }
@@ -284,7 +285,7 @@ impl Shell {
         match kind {
             MenuKind::View(key) => {
                 let view = self.listing(key).view;
-                for (mode, name, label) in [(ViewMode::Grid, "grid", "Grid"), (ViewMode::List, "list", "List")] {
+                for (mode, name, label) in [(ViewMode::Grid, "grid", tr("Grid")), (ViewMode::List, "list", tr("List"))] {
                     panel = panel.child(
                         row(format!("view-{label}"), svg().path(icon(name)).size(px(16.)).text_color(rgb(theme::TEXT_MUTED)), label, view == mode)
                             .on_click(cx.listener(move |shell, _, window, cx| shell.set_listing(key, |l| l.view = mode, window, cx))),
@@ -325,7 +326,7 @@ impl Shell {
                         .border_1()
                         .border_color(rgb(if focused { theme::ACCENT } else { theme::SURFACE_ACTIVE }))
                         .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-                        .child(text_input::text("tag-search", &self.list.tag_query, "Search tags", focused, Mode::Line, cx));
+                        .child(text_input::text("tag-search", &self.list.tag_query, tr("Search tags"), focused, Mode::Line, cx));
                 panel = panel.child(text_input::field(input, "tag-search", Mode::Line, |shell, window, _| window.focus(&shell.tag_focus), cx));
                 for tag in listing::all_tags(&self.vault.hosts).into_iter().filter(|t| t.to_lowercase().contains(&query)) {
                     let chosen = self.list.tags.contains(&tag);
@@ -356,7 +357,7 @@ impl Shell {
                         .items_center()
                         .text_color(rgb(if any { theme::TEXT } else { theme::TEXT_MUTED }))
                         .when(any, |d| d.menu_feedback(false))
-                        .child("Clear selection")
+                        .child(tr("Clear selection"))
                         .on_click(cx.listener(|shell, _, _, cx| {
                             shell.list.tags.clear();
                             cx.notify();
@@ -364,7 +365,7 @@ impl Shell {
                 );
             }
             MenuKind::NewForwarding => {
-                for (kind, letter, label) in [(RuleKind::Local, "L", "Local Forwarding"), (RuleKind::Remote, "R", "Remote Forwarding"), (RuleKind::Dynamic, "D", "Dynamic Forwarding")] {
+                for (kind, letter, label) in [(RuleKind::Local, "L", tr("Local Forwarding")), (RuleKind::Remote, "R", tr("Remote Forwarding")), (RuleKind::Dynamic, "D", tr("Dynamic Forwarding"))] {
                     panel = panel.child(row(format!("new-rule-{letter}"), badge(letter), label, false).on_click(cx.listener(move |shell, _, window, cx| {
                         shell.close_list_menu(window, cx);
                         shell.new_rule_of(kind, window, cx);

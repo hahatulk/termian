@@ -4,6 +4,7 @@
 //! «Open with…» associations; Logs the log switch; Version the updater.
 //! It reads the main window's [`Shell`] and acts through it.
 
+use termian_native::language::text as tr;
 use std::path::PathBuf;
 
 use gpui::{
@@ -31,10 +32,11 @@ pub enum Tab {
     Logs,
     Shortcuts,
     Version,
+    Language,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 6] = [Tab::Account, Tab::Terminal, Tab::Sftp, Tab::Logs, Tab::Shortcuts, Tab::Version];
+    pub const ALL: [Tab; 7] = [Tab::Account, Tab::Terminal, Tab::Sftp, Tab::Logs, Tab::Shortcuts, Tab::Version, Tab::Language];
 
     pub fn title(self) -> &'static str {
         match self {
@@ -44,6 +46,7 @@ impl Tab {
             Tab::Logs => "Logs",
             Tab::Shortcuts => "Shortcuts",
             Tab::Version => "Version",
+            Tab::Language => "Language",
         }
     }
 }
@@ -69,6 +72,7 @@ pub struct SettingsWindow {
     /// The text field being typed into, and its text.
     pub(super) editing: Option<(Field, String)>,
     sftp_error: Option<String>,
+    language_error: Option<String>,
     /// Terminal: the open drop-down list.
     pub(super) menu: Option<Menu>,
     /// Terminal: «Detect OS Script» is expanded.
@@ -134,10 +138,12 @@ impl Shell {
                 let bounds = Bounds::centered(None, size(px(960.), px(720.)), cx);
                 let options = WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    titlebar: Some(TitlebarOptions { title: Some("Settings".into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
+                    titlebar: Some(TitlebarOptions { title: Some(tr("Settings").into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
                     ..Default::default()
                 };
                 cx.open_window(options, |window, cx| {
+                    #[cfg(windows)]
+                    super::assets::set_window_icon(window);
                     cx.new(|cx| {
                         let focus = cx.focus_handle();
                         window.focus(&focus);
@@ -153,6 +159,7 @@ impl Shell {
                             disable_logs: false,
                             editing: None,
                             sftp_error: None,
+                            language_error: None,
                             menu: None,
                             script_open: false,
                             recording: None,
@@ -177,7 +184,7 @@ impl Shell {
 
     /// Records sessions again, or stops and deletes this vault's logs.
     pub fn set_logs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) -> Result<(), String> {
-        if self.log_sync_busy() { return Err("Дождитесь завершения синхронизации.".into()); }
+        if self.log_sync_busy() { return Err(tr("Дождитесь завершения синхронизации.").into()); }
         self.vault.logs_disabled = !enabled;
         let mut failed = 0;
         if !enabled {
@@ -188,7 +195,7 @@ impl Shell {
         }
         cx.notify();
         self.store.save(&self.vault)?;
-        if failed != 0 { return Err(format!("Запись отключена. Не удалось удалить журналов: {failed}.")); }
+        if failed != 0 { return Err(termian_native::ui_format!("Could not save logs: {failed}. Recording is off.", "Запись отключена. Не удалось удалить журналов: {failed}.")); }
         Ok(())
     }
 }
@@ -239,7 +246,7 @@ impl Shell {
             .child(
                 div().id("app-menu-button").size(px(30.)).flex_none().flex().items_center()
                     .justify_center().rounded_md().icon_feedback()
-                    .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Application menu".into())).into())
+                    .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip(tr("Application menu").into())).into())
                     .child(svg().path(super::assets::icon("dots")).w(px(16.)).h(px(4.)).text_color(rgb(theme::TEXT)))
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         if let Some(at) = click_anchor.get() {
@@ -262,13 +269,13 @@ impl Shell {
         let at = self.app_menu.as_ref()?.at;
         let mut items: Vec<(&str, Box<dyn gpui::Action>)> = vec![
             ("Settings…", Box::new(OpenSettings)),
-            ("Vaults", Box::new(OpenVaults)),
+            (tr("Vaults"), Box::new(OpenVaults)),
             ("SFTP", Box::new(OpenSftp)),
         ];
         if cfg!(target_os = "macos") {
-            items.push(("Доступ к файлам…", Box::new(OpenFileAccess)));
+            items.push((tr("Доступ к файлам…"), Box::new(OpenFileAccess)));
         }
-        items.push(("Quit Termian", Box::new(Quit)));
+        items.push((tr("Quit Termian"), Box::new(Quit)));
         let panel = super::host_editor::menu_panel("app-menu")
             .tab_group()
             .track_focus(&self.app_menu_focus)
@@ -414,7 +421,7 @@ impl SettingsWindow {
 
     fn clear_logs(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.shell.read(cx).log_sync_busy() {
-            self.logs_result = Some((false, "Дождитесь завершения синхронизации и повторите очистку.".into()));
+            self.logs_result = Some((false, tr("Дождитесь завершения синхронизации и повторите очистку.").into()));
             cx.notify();
             return;
         }
@@ -458,15 +465,15 @@ impl SettingsWindow {
         let checking = matches!(status, Status::Checking);
 
         let account = section(vec![
-            section_title("Локальная учётная запись").into_any_element(),
-            div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Локальный пользователь").into_any_element(),
-            body_text("Профиль постоянно активен. Вход в аккаунт Termius не требуется.").into_any_element(),
-            body_text("Выход, смена аккаунта и удаление учётной записи отключены. Синхронизация работает через ваше облако.").into_any_element(),
+            section_title(tr("Локальная учётная запись")).into_any_element(),
+            div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child(tr("Локальный пользователь")).into_any_element(),
+            body_text(tr("Профиль постоянно активен. Вход в аккаунт Termius не требуется.")).into_any_element(),
+            body_text(tr("Выход, смена аккаунта и удаление учётной записи отключены. Синхронизация работает через ваше облако.")).into_any_element(),
         ]);
 
         let mut cloud = vec![
-            section_title("Своё облако").into_any_element(),
-            body_text("Личная синхронизация с вашим сервером. Кнопки отправки и получения заменяют снимок целиком после подтверждения.").into_any_element(),
+            section_title(tr("Своё облако")).into_any_element(),
+            body_text(tr("Личная синхронизация с вашим сервером. Кнопки отправки и получения заменяют снимок целиком после подтверждения.")).into_any_element(),
             div()
                 .mt(px(12.))
                 .flex()
@@ -480,15 +487,15 @@ impl SettingsWindow {
         ];
         if let (true, Status::Error { message, credentials }) = (configured, &status) {
             cloud.push(
-                notice(false, message.clone())
+                notice(false, tr(message).to_owned())
                     .when(*credentials, |d| {
-                        d.child(div().mt(px(4.)).text_color(rgb(MUTED)).child("Автоматическая проверка приостановлена до изменения настроек или ручной проверки."))
+                        d.child(div().mt(px(4.)).text_color(rgb(MUTED)).child(tr("Автоматическая проверка приостановлена до изменения настроек или ручной проверки.")))
                     })
                     .into_any_element(),
             );
         }
         cloud.push(
-            checkbox("settings-auto-sync", "Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)", configured && auto_sync)
+            checkbox("settings-auto-sync", tr("Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)"), configured && auto_sync)
                 .mt(px(12.))
                 .text_size(px(13.))
                 .text_color(rgb(theme::TEXT))
@@ -506,33 +513,33 @@ impl SettingsWindow {
                 })
                 .into_any_element(),
         );
-        let mut buttons = vec![action_button("settings-cloud-config", if configured { "Настройки подключения" } else { "Подключить сервер" }, false, false)
+        let mut buttons = vec![action_button("settings-cloud-config", if configured { tr("Настройки подключения") } else { tr("Подключить сервер") }, false, false)
             .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(None, window, cx))))
             .into_any_element()];
         if configured {
             buttons.push(
-                action_button("settings-cloud-sync", "Синхронизировать", false, false)
+                action_button("settings-cloud-sync", tr("Синхронизировать"), false, false)
                     .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(Some(Operation::Sync), window, cx))))
                     .into_any_element(),
             );
         }
         if configured {
             buttons.push(
-                action_button("settings-cloud-upload", "Отправить данные на сервер", false, false)
+                action_button("settings-cloud-upload", tr("Отправить данные на сервер"), false, false)
                     .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(Some(Operation::Upload), window, cx))))
                     .into_any_element(),
             );
         }
         if connected {
             buttons.push(
-                action_button("settings-cloud-download", "Получить данные с сервера", false, false)
+                action_button("settings-cloud-download", tr("Получить данные с сервера"), false, false)
                     .on_click(cx.listener(|settings, _, _, cx| settings.in_main(cx, |shell, window, cx| shell.open_cloud(Some(Operation::Download), window, cx))))
                     .into_any_element(),
             );
         }
         if configured {
             buttons.push(
-                action_button("settings-cloud-check", "Проверить", false, checking)
+                action_button("settings-cloud-check", tr("Проверить"), false, checking)
                     .when(!checking, |d| d.on_click(cx.listener(|settings, _, _, cx| settings.shell.update(cx, |shell, cx| shell.check_cloud(false, cx)))))
                     .into_any_element(),
             );
@@ -540,19 +547,19 @@ impl SettingsWindow {
         cloud.push(actions_row().children(buttons).into_any_element());
 
         let mut logs = vec![
-            section_title("Логи сессий").into_any_element(),
-            body_text("Логи всего вывода терминала хранятся 60 дней. Очистка удаляет записи на экране Logs, файлы логов на этом устройстве и их копии в своём облаке за выбранный период.")
+            section_title(tr("Логи сессий")).into_any_element(),
+            body_text(tr("Логи всего вывода терминала хранятся 60 дней. Очистка удаляет записи на экране Logs, файлы логов на этом устройстве и их копии в своём облаке за выбранный период."))
                 .into_any_element(),
         ];
         logs.push(match self.logs_period {
             Some(index) => actions_row()
-                .child(div().text_size(px(13.)).text_color(rgb(theme::TEXT)).child(format!("Удалить логи {}? Это нельзя отменить.", PERIODS[index].2)))
+                .child(div().text_size(px(13.)).text_color(rgb(theme::TEXT)).child(termian_native::ui_format!("Delete logs for {}? This cannot be undone.", "Удалить логи {}? Это нельзя отменить.", PERIODS[index].2)))
                 .child(
-                    action_button("settings-logs-delete", if self.logs_busy { "Удаление…" } else { "Удалить" }, false, self.logs_busy)
+                    action_button("settings-logs-delete", if self.logs_busy { tr("Удаление…") } else { tr("Удалить") }, false, self.logs_busy)
                         .when(!self.logs_busy, |d| d.on_click(cx.listener(move |settings, _, _, cx| settings.clear_logs(index, cx)))),
                 )
                 .child(
-                    action_button("settings-logs-cancel", "Отмена", false, self.logs_busy).when(!self.logs_busy, |d| {
+                    action_button("settings-logs-cancel", tr("Отмена"), false, self.logs_busy).when(!self.logs_busy, |d| {
                         d.on_click(cx.listener(|settings, _, _, cx| {
                             settings.logs_period = None;
                             cx.notify();
@@ -599,8 +606,8 @@ impl SettingsWindow {
                         .bg(rgb(theme::SURFACE_ACTIVE))
                         .child(gpui::svg().path(super::assets::icon("folder")).size(px(24.)).text_color(rgb(theme::TEXT))),
                 )
-                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("No file type associations yet"))
-                .child(div().max_w(px(310.)).text_center().text_size(px(14.)).text_color(rgb(MUTED)).child("Apps you choose using the “Open with…” option to open files via SFTP will appear here."))
+                .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("No file type associations yet")))
+                .child(div().max_w(px(310.)).text_center().text_size(px(14.)).text_color(rgb(MUTED)).child(tr("Apps you choose using the “Open with…” option to open files via SFTP will appear here.")))
                 .into_any_element()])
             .into_any_element()];
         }
@@ -635,8 +642,8 @@ impl SettingsWindow {
                         window.focus(&settings.focus);
                     }, cx)
                 })
-                .child(action_button(SharedString::from(format!("settings-app-edit-{ext}")), "Изменить…", false, false).on_click(cx.listener(move |_, _, window, cx| {
-                    let answer = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Choose application".into()) });
+                .child(action_button(SharedString::from(format!("settings-app-edit-{ext}")), tr("Изменить…"), false, false).on_click(cx.listener(move |_, _, window, cx| {
+                    let answer = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(tr("Choose application").into()) });
                     let ext = pick_ext.clone();
                     cx.spawn_in(window, async move |this, cx| {
                         let Ok(Ok(Some(paths))) = answer.await else { return };
@@ -671,7 +678,7 @@ impl SettingsWindow {
                 )
         });
         vec![section(vec![
-            section_title("File type associations").into_any_element(),
+            section_title(tr("File type associations")).into_any_element(),
             div()
                 .mt(px(15.))
                 .p(px(10.))
@@ -679,7 +686,7 @@ impl SettingsWindow {
                 .bg(rgb(0x23263a))
                 .text_size(px(14.))
                 .text_color(rgb(theme::TEXT))
-                .child(div().px(px(10.)).h(px(40.)).flex().items_center().gap(px(10.)).child(div().w(px(150.)).child("File Type")).child("Open With"))
+                .child(div().px(px(10.)).h(px(40.)).flex().items_center().gap(px(10.)).child(div().w(px(150.)).child(tr("File Type"))).child(tr("Open With")))
                 .children(rows)
                 .into_any_element(),
         ])
@@ -691,8 +698,8 @@ impl SettingsWindow {
         let enabled = !self.shell.read(cx).vault.logs_disabled;
         let open = self.menu == Some(Menu::Logs);
         let mut card = vec![
-            div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Logs retention policies").into_any_element(),
-            div().mt(px(10.)).text_size(px(14.)).text_color(rgb(MUTED)).child("Control how logs are stored in your vaults.").into_any_element(),
+            div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Logs retention policies")).into_any_element(),
+            div().mt(px(10.)).text_size(px(14.)).text_color(rgb(MUTED)).child(tr("Control how logs are stored in your vaults.")).into_any_element(),
             div().my(px(10.)).h(px(1.)).w_full().bg(rgb(0x353950)).into_any_element(),
             div()
                 .p(px(10.))
@@ -707,10 +714,10 @@ impl SettingsWindow {
                         .text_size(px(14.))
                         .text_color(rgb(theme::TEXT))
                         .child(gpui::svg().path(super::assets::icon("vaults")).size(px(16.)).text_color(rgb(theme::TEXT)))
-                        .child("Personal"),
+                        .child(tr("Personal")),
                 )
                 .child(
-                    super::settings_terminal::picker("settings-logs", if enabled { "Enabled" } else { "Disabled" }, open)
+                    super::settings_terminal::picker("settings-logs", if enabled { tr("Enabled") } else { tr("Disabled") }, open)
                         .text_size(px(14.))
                         .on_click(cx.listener(|settings, _, _, cx| {
                             settings.menu = if settings.menu == Some(Menu::Logs) { None } else { Some(Menu::Logs) };
@@ -722,14 +729,14 @@ impl SettingsWindow {
         if open {
             card.push(
                 super::settings_terminal::menu_list(vec![
-                    super::settings_terminal::menu_item("settings-logs-enabled".into(), "Enabled", enabled)
+                    super::settings_terminal::menu_item("settings-logs-enabled".into(), tr("Enabled"), enabled)
                         .on_click(cx.listener(|settings, _, _, cx| {
                             settings.menu = None;
                             settings.disable_logs = false;
                             settings.logs_result = settings.shell.update(cx, |shell, cx| shell.set_logs_enabled(true, cx)).err().map(|e| (false, e));
                         }))
                         .into_any_element(),
-                    super::settings_terminal::menu_item("settings-logs-disabled".into(), "Disabled", !enabled)
+                    super::settings_terminal::menu_item("settings-logs-disabled".into(), tr("Disabled"), !enabled)
                         .on_click(cx.listener(move |settings, _, _, cx| {
                             settings.menu = None;
                             settings.disable_logs = enabled || settings.shell.read(cx).vault.history.iter().any(|e| e.log.is_some());
@@ -749,7 +756,7 @@ impl SettingsWindow {
                     .bg(rgb(0x23263a))
                     .text_size(px(14.))
                     .text_color(rgb(theme::TEXT))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Confirm disabling logs"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("Confirm disabling logs")))
                     .child(
                         div()
                             .mt(px(10.))
@@ -761,12 +768,12 @@ impl SettingsWindow {
                     .child(
                         actions_row()
                             .justify_end()
-                            .child(action_button("settings-logs-keep", "Cancel", false, false).on_click(cx.listener(|settings, _, _, cx| {
+                            .child(action_button("settings-logs-keep", tr("Cancel"), false, false).on_click(cx.listener(|settings, _, _, cx| {
                                 settings.disable_logs = false;
                                 cx.notify();
                             })))
                             .child(
-                                action_button("settings-logs-disable", "Disable Logs", false, false)
+                                action_button("settings-logs-disable", tr("Disable Logs"), false, false)
                                     .bg(rgb(ERROR_TONE))
                                     .border_color(rgb(ERROR_TONE))
                                     .on_click(cx.listener(|settings, _, _, cx| {
@@ -782,6 +789,39 @@ impl SettingsWindow {
         vec![div().w_full().max_w(px(700.)).mx_auto().mt(px(30.)).p(px(15.)).rounded(px(15.)).bg(rgb(CARD)).children(card).into_any_element()]
     }
 
+    fn render_language(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
+        use termian_native::language::{self, Language};
+        let active = self.shell.read(cx).vault.language;
+        let choices = Language::ALL.map(|value| {
+            action_button(value.label(), value.label(), value == active, value == active)
+                .when(value == active, |d| d.opacity(1.))
+                .when(value != active, |d| d.on_click(cx.listener(move |settings, _, window, cx| {
+                    settings.language_error = settings.shell.update(cx, |shell, cx| {
+                        let old = std::mem::replace(&mut shell.vault.language, value);
+                        match shell.store.save(&shell.vault) {
+                            Ok(()) => {
+                                language::set(value);
+                                cx.refresh_windows();
+                                cx.notify();
+                                None
+                            }
+                            Err(error) => {
+                                shell.vault.language = old;
+                                Some(error)
+                            }
+                        }
+                    });
+                    window.set_window_title(language::text("Settings"));
+                    cx.notify();
+                })))
+        });
+        vec![div().p(px(30.)).flex().flex_col().gap_3()
+            .child(div().text_size(px(20.)).child(language::text("Language")))
+            .child(div().flex().flex_wrap().gap_2().children(choices))
+            .when_some(self.language_error.clone(), |d, error| d.child(error))
+            .into_any_element()]
+    }
+
     fn render_version(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
         let shell = self.shell.read(cx);
         let status = shell.update.status.clone();
@@ -794,9 +834,9 @@ impl SettingsWindow {
         });
         let busy = matches!(status.state, State::Checking | State::Downloading);
         let modes = [
-            (UpdateMode::Manual, "settings-update-manual", "Выключено"),
-            (UpdateMode::Check, "settings-update-check-only", "Только проверять"),
-            (UpdateMode::Download, "settings-update-auto-download", "Проверять и скачивать"),
+            (UpdateMode::Manual, "settings-update-manual", tr("Выключено")),
+            (UpdateMode::Check, "settings-update-check-only", tr("Только проверять")),
+            (UpdateMode::Download, "settings-update-auto-download", tr("Проверять и скачивать")),
         ].map(|(mode, id, label)| {
             let selected = schedule.mode == mode;
             let disabled = busy || selected;
@@ -809,10 +849,10 @@ impl SettingsWindow {
                 })))
         });
         let intervals = [
-            (Interval::Hour, "settings-update-1h", "1 ч"),
-            (Interval::SixHours, "settings-update-6h", "6 ч"),
-            (Interval::TwelveHours, "settings-update-12h", "12 ч"),
-            (Interval::Day, "settings-update-24h", "24 ч"),
+            (Interval::Hour, "settings-update-1h", tr("1 ч")),
+            (Interval::SixHours, "settings-update-6h", tr("6 ч")),
+            (Interval::TwelveHours, "settings-update-12h", tr("12 ч")),
+            (Interval::Day, "settings-update-24h", tr("24 ч")),
         ].map(|(interval, id, label)| {
             let selected = schedule.interval == interval;
             let disabled = busy || schedule.mode == UpdateMode::Manual || selected;
@@ -825,8 +865,8 @@ impl SettingsWindow {
                 })))
         });
         let channels = [
-            (Channel::Latest, "settings-update-latest", "Latest"),
-            (Channel::PreRelease, "settings-update-pre-release", "Pre-release"),
+            (Channel::Latest, "settings-update-latest", tr("Latest")),
+            (Channel::PreRelease, "settings-update-pre-release", tr("Pre-release")),
         ].map(|(channel, id, label)| {
             let selected = selected_channel == channel;
             let disabled = busy || status.state == State::Installed || selected;
@@ -837,13 +877,13 @@ impl SettingsWindow {
                 })))
         });
         let button = if status.state == State::Installed {
-            action_button("settings-update-restart", "Перезапустить и обновить", true, false)
+            action_button("settings-update-restart", tr("Перезапустить и обновить"), true, false)
                 .on_click(cx.listener(|settings, _, _, cx| settings.shell.update(cx, |shell, cx| shell.restart_for_update(cx))))
         } else {
             let label = match status.state {
-                State::Checking => "Проверка…",
-                State::Downloading => "Загрузка…",
-                _ => "Проверить обновления",
+                State::Checking => tr("Проверка…"),
+                State::Downloading => tr("Загрузка…"),
+                _ => tr("Проверить обновления"),
             };
             let disabled = busy || status.state == State::Disabled;
             action_button("settings-update-check", label, false, disabled)
@@ -854,7 +894,7 @@ impl SettingsWindow {
             .p(px(30.))
             .flex()
             .flex_col()
-            .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child("Version"))
+            .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(tr("Version")))
             .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(MUTED)).child(format!("termian {}", termian_native::updater::current_version())))
             .child(
                 div()
@@ -863,16 +903,16 @@ impl SettingsWindow {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child("Обновления"))
-                    .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Канал обновлений"))
+                    .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(tr("Обновления")))
+                    .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child(tr("Канал обновлений")))
                     .child(div().flex().flex_wrap().gap_2().children(channels))
                     .child(div().text_size(px(13.)).text_color(rgb(MUTED)).child(match selected_channel {
-                        Channel::Latest => "Стабильные выпуски.",
-                        Channel::PreRelease => "Предварительные выпуски для тестирования.",
+                        Channel::Latest => tr("Стабильные выпуски."),
+                        Channel::PreRelease => tr("Предварительные выпуски для тестирования."),
                     }))
-                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Автообновление"))
+                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child(tr("Автообновление")))
                     .child(div().flex().flex_wrap().gap_2().children(modes))
-                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Интервал проверки"))
+                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child(tr("Интервал проверки")))
                     .child(div().flex().flex_wrap().gap_2().children(intervals))
                     .when_some(settings_error, |d, error| d.child(div().text_size(px(13.)).text_color(rgb(ERROR_TONE)).child(error)))
                     .child(div().mt(px(8.)).text_size(px(14.)).text_color(rgb(MUTED)).child(text))
@@ -888,7 +928,7 @@ impl SettingsWindow {
                     })
                     .when_some(status.error.clone().filter(|_| status.state == State::Error), |d, error| d.child(div().text_size(px(13.)).text_color(rgb(ERROR_TONE)).child(error)))
                     .child(div().mt(px(4.)).flex().flex_wrap().gap(px(8.)).child(button)
-                        .when(status.state == State::Available, |d| d.child(action_button("settings-update-download", "Скачать обновление", true, false)
+                        .when(status.state == State::Available, |d| d.child(action_button("settings-update-download", tr("Скачать обновление"), true, false)
                             .on_click(cx.listener(|settings, _, _, cx| settings.shell.update(cx, |shell, cx| shell.download_update(cx))))))),
             )
             .into_any_element()]
@@ -903,6 +943,7 @@ impl Render for SettingsWindow {
             Tab::Sftp => self.render_sftp(cx),
             Tab::Logs => self.render_logs(cx),
             Tab::Version => self.render_version(cx),
+            Tab::Language => self.render_language(cx),
             Tab::Terminal => self.render_terminal(cx),
             Tab::Shortcuts => self.render_shortcuts(cx),
         };
@@ -922,7 +963,7 @@ impl Render for SettingsWindow {
                 .text_color(rgb(theme::TEXT))
                 .when(selected, |d| d.bg(rgb(theme::SURFACE_ACTIVE)).child(super::motion::sidebar_marker(theme::ACCENT)))
                 .surface_feedback(if selected { theme::SURFACE_ACTIVE } else { FOREGROUND })
-                .child(tab.title())
+                .child(termian_native::language::text(tab.title()))
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     settings.commit_edit(cx);
                     settings.submit_recording(cx);
@@ -951,7 +992,7 @@ impl Render for SettingsWindow {
                     .border_color(rgb(BORDER))
                     .text_size(px(18.))
                     .font_weight(FontWeight::BOLD)
-                    .child("Settings"),
+                    .child(tr("Settings")),
             )
             .child(
                 div()
@@ -973,6 +1014,6 @@ mod tests {
     #[test]
     fn tabs_follow_the_legacy_settings_routes() {
         let titles: Vec<_> = Tab::ALL.iter().map(|t| t.title()).collect();
-        assert_eq!(titles, ["Account", "Terminal", "SFTP", "Logs", "Shortcuts", "Version"]);
+        assert_eq!(titles, ["Account", "Terminal", "SFTP", "Logs", "Shortcuts", "Version", "Language"]);
     }
 }

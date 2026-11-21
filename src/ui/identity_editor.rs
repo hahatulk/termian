@@ -1,6 +1,7 @@
 //! New Identity / identity details: the legacy Keychain form with Label,
 //! Username*, Password and Key. Saved once it has a username.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::theme;
 use termian_native::vault::Identity;
@@ -35,12 +36,12 @@ impl Shell {
     pub fn render_keychain_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let at = self.keychain_menu?;
         let items = super::host_editor::menu_panel("keychain-menu")
-            .child(menu_row("keychain-menu-key".into(), "New Key", false, false).on_click(cx.listener(|shell, _, window, cx| {
+            .child(menu_row("keychain-menu-key".into(), tr("New Key"), false, false).on_click(cx.listener(|shell, _, window, cx| {
                 shell.keychain_menu = None;
                 shell.new_key(window, cx);
             })))
-            .child(menu_row("keychain-menu-generate".into(), "Generate Key", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_generated_key(window, cx))))
-            .child(menu_row("keychain-menu-identity".into(), "New Identity", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_identity(window, cx))));
+            .child(menu_row("keychain-menu-generate".into(), tr("Generate Key"), false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_generated_key(window, cx))))
+            .child(menu_row("keychain-menu-identity".into(), tr("New Identity"), false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_identity(window, cx))));
         // Window coordinates; the Vaults content starts below the tab strip, beside the sidebar.
         Some(
             gpui::deferred(
@@ -157,7 +158,7 @@ impl Shell {
             .items_center()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { "New Identity" } else { "Identity" }))
+            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if editor.created_here { tr("New Identity") } else { tr("Identity") }))
             .child(dialog::collapse_button("identity-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.identity_editor = None;
                 cx.notify();
@@ -189,7 +190,7 @@ impl Shell {
                     }))
                 })
             };
-            let mut list = div().id("identity-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No key".into(), true, cx));
+            let mut list = div().id("identity-key-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, tr("No key").into(), true, cx));
             for key in &self.vault.keys {
                 let usable = key.private_key.is_some();
                 let note = if usable { "" } else { " — not available in this client" };
@@ -206,16 +207,16 @@ impl Shell {
             .gap(px(10.))
             .rounded_lg()
             .bg(rgb(theme::SURFACE))
-            .child(div().flex().items_center().gap_3().child(tile("identity", theme::TILE_BLUE).size(px(36.)).rounded_lg()).child(self.identity_input(Field::Label, "Label", &identity.label, false, window, cx).flex_1()))
+            .child(div().flex().items_center().gap_3().child(tile("identity", theme::TILE_BLUE).size(px(36.)).rounded_lg()).child(self.identity_input(Field::Label, tr("Label"), &identity.label, false, window, cx).flex_1()))
             .child(self.identity_input(Field::Username, "Username*", &identity.username, false, window, cx))
-            .child(self.identity_input(Field::Password, "Password", identity.password.as_deref().unwrap_or(""), true, window, cx))
+            .child(self.identity_input(Field::Password, tr("Password"), identity.password.as_deref().unwrap_or(""), true, window, cx))
             .child(div().relative().child(picker).children(list));
 
         let id = identity.id;
         let saved = self.vault.identity(id).is_some();
         let footer = saved.then(|| {
             div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).flex().justify_end().child(
-                dialog::button("identity-remove", "Remove", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
+                dialog::button("identity-remove", tr("Remove"), Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.identity_editor {
                         editor.confirm_remove = true;
                     }
@@ -231,7 +232,7 @@ impl Shell {
                 cx.notify();
             }));
             dialog::backdrop(dialog::card("Remove identity", false, close, dialog::text("Are you sure you want to delete this identity?"), vec![
-                dialog::button("identity-remove-confirm", "Remove", Kind::Error, false)
+                dialog::button("identity-remove-confirm", tr("Remove"), Kind::Error, false)
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.vault.remove_identity(id);
                         shell.save_vault();

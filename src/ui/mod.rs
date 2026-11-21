@@ -33,4 +33,5 @@ pub mod sftp;
 pub mod sftp_actions;
 pub mod terminal_view;
 pub mod update;
+pub mod vault_picker;
 pub mod workspace;

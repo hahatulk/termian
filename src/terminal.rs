@@ -64,6 +64,7 @@ pub fn blend(color: u32, under: u32, alpha: u8) -> u32 {
 pub struct Run {
     pub text: String,
     pub columns: usize,
+    pub cell_columns: usize,
     pub fg: u32,
     pub bg: u32,
     pub bold: bool,
@@ -213,16 +214,28 @@ impl Terminal {
     }
 
     /// Starts a selection at a viewport cell; `word` selects whole words (double-click).
-    pub fn start_selection(&mut self, row: usize, column: usize, word: bool) {
-        let point = self.viewport_point(row, column);
+    pub fn start_selection(&mut self, row: usize, column: usize, side: Side, word: bool) {
+        let (point, side) = self.selection_edge(row, column, side);
         let kind = if word { SelectionType::Semantic } else { SelectionType::Simple };
-        self.term.selection = Some(Selection::new(kind, point, Side::Left));
+        self.term.selection = Some(Selection::new(kind, point, side));
     }
 
-    pub fn extend_selection(&mut self, row: usize, column: usize) {
-        let point = self.viewport_point(row, column);
+    pub fn extend_selection(&mut self, row: usize, column: usize, side: Side) {
+        let (point, side) = self.selection_edge(row, column, side);
         if let Some(selection) = self.term.selection.as_mut() {
-            selection.update(point, Side::Right);
+            selection.update(point, side);
+        }
+    }
+
+    fn selection_edge(&self, row: usize, column: usize, side: Side) -> (Point, Side) {
+        let point = self.viewport_point(row, column);
+        let flags = self.term.grid()[point].flags;
+        if flags.contains(Flags::WIDE_CHAR) && point.column.0 + 1 < self.term.columns() {
+            (point, Side::Left)
+        } else if flags.contains(Flags::WIDE_CHAR_SPACER) {
+            (point, Side::Right)
+        } else {
+            (point, side)
         }
     }
 
@@ -360,11 +373,11 @@ impl Terminal {
             let line = &mut lines[row];
             for (ch, fg, bg, bold, width) in cells {
                 match line.last_mut() {
-                    Some(run) if run.fg == fg && run.bg == bg && run.bold == bold => {
+                    Some(run) if run.fg == fg && run.bg == bg && run.bold == bold && run.cell_columns == width => {
                         run.text.push(ch);
                         run.columns += width;
                     }
-                    _ => line.push(Run { text: ch.to_string(), columns: width, fg, bg, bold }),
+                    _ => line.push(Run { text: ch.to_string(), columns: width, cell_columns: width, fg, bg, bold }),
                 }
             }
         }
@@ -587,8 +600,8 @@ mod tests {
     fn selects_and_copies_text() {
         let mut t = Terminal::new(20, 3);
         t.feed(b"hello world\r\nsecond line");
-        t.start_selection(0, 6, false);
-        t.extend_selection(1, 5);
+        t.start_selection(0, 6, Side::Left, false);
+        t.extend_selection(1, 5, Side::Right);
         assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
         let runs = &t.snapshot().lines[0];
         let selection = Look::default().selection;
@@ -614,11 +627,41 @@ mod tests {
     }
 
     #[test]
+    fn drag_uses_cell_edges_in_both_directions() {
+        let mut t = Terminal::new(10, 2);
+        t.feed(b"abcd");
+        t.start_selection(0, 0, Side::Right, false);
+        t.extend_selection(0, 1, Side::Left);
+        assert_eq!(t.selection_text(), None);
+        t.extend_selection(0, 3, Side::Left);
+        assert_eq!(t.selection_text().as_deref(), Some("bc"));
+
+        t.start_selection(0, 3, Side::Left, false);
+        t.extend_selection(0, 0, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("bc"));
+    }
+
+    #[test]
+    fn wide_character_is_selected_as_one_unit() {
+        let mut t = Terminal::new(10, 2);
+        t.feed("a界b".as_bytes());
+        t.start_selection(0, 1, Side::Right, false);
+        t.extend_selection(0, 2, Side::Left);
+        assert_eq!(t.selection_text().as_deref(), Some("界"));
+        let snapshot = t.snapshot();
+        let selected = snapshot.lines[0].iter().find(|run| run.bg == Look::default().selection).unwrap();
+        assert_eq!((selected.text.as_str(), selected.columns, selected.cell_columns), ("界", 2, 2));
+
+        t.start_selection(0, 2, Side::Left, false);
+        t.extend_selection(0, 3, Side::Right);
+        assert_eq!(t.selection_text().as_deref(), Some("b"));
+    }
+
+    #[test]
     fn double_click_selects_a_word() {
         let mut t = Terminal::new(20, 1);
         t.feed(b"cd /opt/docker now");
-        t.start_selection(0, 5, true);
-        t.extend_selection(0, 5);
+        t.start_selection(0, 5, Side::Left, true);
         assert_eq!(t.selection_text().as_deref(), Some("/opt/docker"));
     }
 
@@ -627,8 +670,8 @@ mod tests {
         let mut t = Terminal::new(10, 2);
         t.feed(b"one\r\ntwo\r\nthree");
         t.scroll(1); // viewport now shows "one" and "two"
-        t.start_selection(1, 0, false);
-        t.extend_selection(1, 2);
+        t.start_selection(1, 0, Side::Left, false);
+        t.extend_selection(1, 2, Side::Right);
         assert_eq!(t.selection_text().as_deref(), Some("two"));
     }
 

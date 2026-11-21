@@ -1,3 +1,4 @@
+use termian_native::language::text as tr;
 use std::fmt::Debug;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
@@ -591,12 +592,12 @@ pub fn field<T: 'static>(
         let secret = matches!(mode, Mode::Secret);
         let undo = !secret && !matches!(mode, Mode::PrivateKey);
         for (label, key, shifted, enabled) in [
-            ("Undo", "z", false, undo),
-            ("Redo", "z", true, undo),
-            ("Cut", "x", false, !secret),
-            ("Copy", "c", false, !secret),
-            ("Paste", "v", false, true),
-            ("Select All", "a", false, true),
+            (tr("Undo"), "z", false, undo),
+            (tr("Redo"), "z", true, undo),
+            (tr("Cut"), "x", false, !secret),
+            (tr("Copy"), "c", false, !secret),
+            (tr("Paste"), "v", false, true),
+            (tr("Select All"), "a", false, true),
         ] {
             panel = panel.child(
                 div()

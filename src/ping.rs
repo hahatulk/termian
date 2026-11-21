@@ -1,17 +1,18 @@
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::time::{Duration, Instant};
 
 const TIMEOUT: Duration = Duration::from_millis(1200);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Reply {
     Echo(Option<f64>),
+    SshPort(f64),
     NoReply,
     Unresolved,
     Unavailable,
 }
 
-pub fn check(address: &str) -> Reply {
+pub fn check(address: &str, ssh_port: u16) -> Reply {
     let address = address.trim();
     let address = address
         .strip_prefix('[')
@@ -39,8 +40,12 @@ pub fn check(address: &str) -> Reply {
         if std::mem::replace(&mut tried[family], true) {
             continue;
         }
-        match send(addr) {
-            reply @ Reply::Echo(_) => return reply,
+        match probe(addr, ssh_port, send, |endpoint| {
+            let start = Instant::now();
+            TcpStream::connect_timeout(&endpoint, TIMEOUT)
+                .ok().map(|_| start.elapsed().as_secs_f64() * 1000.)
+        }) {
+            reply @ (Reply::Echo(_) | Reply::SshPort(_)) => return reply,
             Reply::NoReply => result = Reply::NoReply,
             other if result != Reply::NoReply => result = other,
             _ => {}
@@ -49,11 +54,25 @@ pub fn check(address: &str) -> Reply {
     result
 }
 
+fn probe(mut addr: SocketAddr, ssh_port: u16, echo: impl FnOnce(SocketAddr) -> Reply, tcp: impl FnOnce(SocketAddr) -> Option<f64>) -> Reply {
+    let answer = echo(addr);
+    let local = match addr.ip().to_canonical() {
+        IpAddr::V4(ip) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local() || ip.is_loopback(),
+    };
+    if local && ssh_port != 0 && !matches!(answer, Reply::Echo(_)) {
+        addr.set_port(ssh_port);
+        if let Some(ms) = tcp(addr) {
+            return Reply::SshPort(ms);
+        }
+    }
+    answer
+}
+
 #[cfg(not(windows))]
 fn send(addr: SocketAddr) -> Reply {
     use std::io::Read;
     use std::process::{Command, Stdio};
-    use std::time::Instant;
 
     #[cfg(target_os = "macos")]
     let (program, family) = (
@@ -110,6 +129,23 @@ fn send(addr: SocketAddr) -> Reply {
                 };
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_port_probe_follows_missing_echo() {
+        let local = SocketAddr::from(([127, 0, 0, 1], 0));
+        assert_eq!(probe(local, 2222, |_| Reply::NoReply, |addr| {
+            assert_eq!(addr, SocketAddr::from(([127, 0, 0, 1], 2222)));
+            Some(1.)
+        }), Reply::SshPort(1.));
+        assert_eq!(probe(local, 2222, |_| Reply::Echo(None), |_| panic!()), Reply::Echo(None));
+        let public = SocketAddr::from(([93, 184, 215, 14], 0));
+        assert_eq!(probe(public, 2222, |_| Reply::NoReply, |_| panic!()), Reply::NoReply);
     }
 }
 

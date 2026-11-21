@@ -1,6 +1,7 @@
 //! Command palette (⌘K): one search field over the window with Hosts, Tabs
 //! and Quick connect results; arrows choose, Enter runs, Escape closes.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::palette::{flatten, sections, Item};
 use termian_native::session::parse_destination;
@@ -122,7 +123,7 @@ impl Shell {
             .rounded(px(10.))
             .bg(rgb(theme::INPUT))
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT)))
-            .child(div().flex_1().child(text_input::text("palette", &palette.query, "Search hosts or tabs", focused, Mode::Line, cx)))
+            .child(div().flex_1().child(text_input::text("palette", &palette.query, tr("Search hosts or tabs"), focused, Mode::Line, cx)))
             .child(div().text_color(rgb(theme::TEXT_MUTED)).child(super::launcher::PALETTE_SHORTCUT));
 
         let field = text_input::field(field, "palette", Mode::Line, |shell, window, _| window.focus(&shell.palette_focus), cx);

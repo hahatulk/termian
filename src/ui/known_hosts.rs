@@ -3,6 +3,7 @@
 //! from `~/.ssh/known_hosts` (or a chosen file), and Remove from the card's
 //! right-click menu after «Remove known host».
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, AnyElement, Context, Div, MouseButton, MouseDownEvent, PathPromptOptions, Pixels, Point, Window};
 use termian_native::known_hosts::{self, Entry};
 use termian_native::theme;
@@ -29,10 +30,10 @@ pub struct KnownMenu {
 
 impl Shell {
     pub fn render_known_hosts(&self, window: &gpui::Window, cx: &mut Context<Self>) -> Div {
-        let file = known_hosts::read(&known_hosts::default_path());
+        let file = known_hosts::read(&self.store.known_hosts_path());
         let legacy = &self.vault.known_hosts;
         let body = if file.is_empty() && legacy.is_empty() {
-            empty_state("known_hosts", "No known hosts", "Host keys you trust appear here after the first connection.")
+            empty_state("known_hosts", tr("No known hosts"), tr("Host keys you trust appear here after the first connection."))
         } else {
             // File entries have no ids: their place in the file stands for one, after the legacy ones.
             let base = legacy.iter().map(|e| e.id).max().unwrap_or(0) + 1;
@@ -56,15 +57,15 @@ impl Shell {
                 });
                 cards.push(card(format!("known-{}", entry.id).into(), tile("known_hosts", theme::TILE_BLUE), entry.host.clone(), String::new()).on_mouse_down(MouseButton::Right, listener));
             }
-            div().child(section_title("Known Hosts")).child(self.cards("knownHosts").children(cards))
+            div().child(section_title(tr("Known Hosts"))).child(self.cards("knownHosts").children(cards))
         };
-        let import = tool_button("import-known", "download", "IMPORT").on_click(cx.listener(|shell, _, window, cx| shell.import_known_hosts(window, cx)));
+        let import = tool_button("import-known", "download", tr("IMPORT")).on_click(cx.listener(|shell, _, window, cx| shell.import_known_hosts(window, cx)));
         page("known-scroll", vec![import], self.listing_controls("knownHosts", true, false, window, cx), body)
     }
 
     /// Legacy reads `~/.ssh/known_hosts`, and asks for a file when there is none.
     fn import_known_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let target = known_hosts::default_path();
+        let target = self.store.known_hosts_path();
         let ssh = dirs::home_dir().unwrap_or_default().join(".ssh").join("known_hosts");
         if ssh.is_file() {
             if let Err(error) = known_hosts::import(&ssh, &target) {
@@ -73,7 +74,7 @@ impl Shell {
             cx.notify();
             return;
         }
-        let answer = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Import".into()) });
+        let answer = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(tr("Import").into()) });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = answer.await else { return };
             let Some(path) = paths.into_iter().next() else { return };
@@ -91,7 +92,7 @@ impl Shell {
     fn remove_known_host(&mut self, item: &Item, cx: &mut Context<Self>) {
         match item {
             Item::File(entry) => {
-                if let Err(error) = known_hosts::remove(&known_hosts::default_path(), std::slice::from_ref(entry)) {
+                if let Err(error) = known_hosts::remove(&self.store.known_hosts_path(), std::slice::from_ref(entry)) {
                     self.vault_error = Some(format!("Could not remove the known host: {error}"));
                 }
             }
@@ -113,13 +114,13 @@ impl Shell {
             }));
             let item = menu.item.clone();
             return Some(
-                dialog::backdrop(dialog::card("Remove known host", false, close, dialog::text("Are you sure you want to remove 1 known host?"), vec![dialog::button("known-remove-confirm", "Remove", Kind::Error, false)
+                dialog::backdrop(dialog::card(tr("Remove known host"), false, close, dialog::text("Are you sure you want to remove 1 known host?"), vec![dialog::button("known-remove-confirm", tr("Remove"), Kind::Error, false)
                     .on_click(cx.listener(move |shell, _, _, cx| shell.remove_known_host(&item, cx)))
                     .into_any_element()]))
                 .into_any_element(),
             );
         }
-        let items = menu_panel("known-menu").child(menu_row("known-menu-remove".into(), "Remove", true, false).on_click(cx.listener(|shell, _, _, cx| {
+        let items = menu_panel("known-menu").child(menu_row("known-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(|shell, _, _, cx| {
             if let Some(menu) = &mut shell.known_menu {
                 menu.confirm_remove = true;
             }

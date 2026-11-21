@@ -4,7 +4,7 @@ SSH/SFTP-клиент на Rust для macOS, Windows и Android. Подключ
 
 ## Установка
 
-В [GitHub Releases](https://github.com/hahatulk/termian/releases/latest) скачайте `.dmg` для macOS Apple Silicon, `-setup.exe` для Windows x64 или `.apk` для Android 8+.
+В [GitHub Releases](https://github.com/hahatulk/termian/releases/latest) скачайте `.dmg` для macOS Apple Silicon, `-setup.exe` для Windows x64 или `.apk` для Android 8+. На панели задач Windows окна Termian используют значок из EXE.
 
 ## Запуск из исходников
 
@@ -20,7 +20,13 @@ cargo run --locked --bin termian-native
 
 ## Первое подключение
 
-В Vaults → Hosts нажмите "NEW HOST", укажите адрес, имя пользователя и пароль или SSH-ключ. Откройте сохранённый хост из списка.
+В Vaults → Hosts нажмите "NEW HOST", укажите адрес, имя пользователя и пароль или SSH-ключ. Нажмите на сохранённый хост один раз, чтобы подключиться. В настольном терминале выделение мышью автоматически копирует текст и показывает "Copied!".
+
+Нажмите имя Vault в боковой панели, чтобы открыть список и выбрать хранилище. На компьютере новый Vault создаётся через "New Vault". Существующие данные открываются в "Personal". Для синхронизации разных Vault используйте отдельные облачные адреса.
+
+В настольном SFTP включите "Show Hidden Files" в меню действий. Имена скрытых файлов и папок серее, на папках есть значок перечёркнутого глаза.
+
+Язык интерфейса: Settings → Language. По умолчанию выбран English.
 
 ## Скриншоты
 
