@@ -116,16 +116,20 @@ final class MobileFiles {
             path=app.label("/",14,TermianStyle.TEXT);
             path.setMaxLines(2);
             remote.addView(path);
-            android.widget.HorizontalScrollView strip=new android.widget.HorizontalScrollView(app);
             LinearLayout actions=new LinearLayout(app);
             actions.addView(app.style.iconAction("arrow_left","Back folder",() -> run("filesBack")));
             actions.addView(app.style.iconAction("arrow_right","Forward folder",() -> run("filesForward")));
-            actions.addView(app.button("Up",() -> run("filesUp")));
-            actions.addView(app.button("Refresh",() -> run("filesRefresh")));
-            actions.addView(app.button("New Folder",() -> folderDialog(null)));
-            actions.addView(app.button("Cancel transfer",() -> run("filesControl","retry",false)));
-            strip.addView(actions);
-            remote.addView(strip);
+            actions.addView(app.button("Up",() -> run("filesUp")),new LinearLayout.LayoutParams(0,app.dp(48),1));
+            actions.addView(app.button("Refresh",() -> run("filesRefresh")),new LinearLayout.LayoutParams(0,app.dp(48),1));
+            View more=app.style.iconAction("dots","File actions",() -> {});
+            more.setOnClickListener(anchor -> {
+                android.widget.PopupMenu menu=new android.widget.PopupMenu(app,anchor);
+                menu.getMenu().add("New Folder").setOnMenuItemClickListener(v -> { folderDialog(null); return true; });
+                menu.getMenu().add("Cancel transfer").setOnMenuItemClickListener(v -> { run("filesControl","retry",false); return true; });
+                menu.show();
+            });
+            actions.addView(more);
+            remote.addView(actions);
             ScrollView scroll=new ScrollView(app);
             rows=app.column();
             rows.setPadding(app.dp(12),app.dp(8),app.dp(12),app.dp(8));

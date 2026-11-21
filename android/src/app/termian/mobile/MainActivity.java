@@ -14,14 +14,16 @@ import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -41,9 +43,10 @@ public final class MainActivity extends Activity {
     private static final int NETWORK_REQUEST = 11;
     static final int PASSWORD = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private LinearLayout root, titleBar, tabsBar, body, hosts, console, controls;
-    private HorizontalScrollView tabScroll;
-    private View lockAction, syncAction;
+    private FrameLayout appFrame, drawer;
+    private LinearLayout root, titleBar, body, hosts, console, drawerRows;
+    private ScrollView drawerPanel;
+    private TextView pageTitle;
     private LinearLayout hostEditor;
     private java.util.function.BooleanSupplier hostEdited;
     private int terminalBackground = TermianStyle.BAR;
@@ -93,20 +96,22 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         style = new TermianStyle(this);
+        appFrame = new FrameLayout(this);
         root = column();
         root.setBackgroundColor(BACKGROUND);
-        root.setOnApplyWindowInsetsListener((view, insets) -> {
+        appFrame.addView(root,new FrameLayout.LayoutParams(-1,-1));
+        appFrame.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                 android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
-                root.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+                view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
             } else {
-                root.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             }
             return Build.VERSION.SDK_INT >= 30 ? WindowInsets.CONSUMED : insets.consumeSystemWindowInsets();
         });
-        setContentView(root);
+        setContentView(appFrame);
         if (Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
             android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::back);
         File data = new File(getNoBackupFilesDir(), "termian");
@@ -152,8 +157,9 @@ public final class MainActivity extends Activity {
         super.onConfigurationChanged(config);
         if (opened) {
             readWindowWidth();
+            resizeDrawer();
             redrawHosts();
-            redrawTabs();
+            redrawNavigation();
             arrange();
         }
     }
@@ -201,18 +207,11 @@ public final class MainActivity extends Activity {
         titleBar.setBackgroundColor(TermianStyle.BAR);
         root.addView(titleBar,new LinearLayout.LayoutParams(-1,dp(56)));
 
-        tabScroll=new HorizontalScrollView(this);
-        tabScroll.setHorizontalScrollBarEnabled(false);
-        tabsBar=new LinearLayout(this);
-        tabsBar.setGravity(Gravity.CENTER_VERTICAL);
-        tabScroll.addView(tabsBar,new android.widget.FrameLayout.LayoutParams(-2,-1));
-        titleBar.addView(tabScroll,new LinearLayout.LayoutParams(0,-1,1));
-        titleBar.addView(style.iconAction("plus","New Tab",this::newLauncher));
-        lockAction=style.iconAction("privacy_lock","Lock",this::lock);
-        syncAction=style.iconAction("cloud_sync","Sync",this::cloudMenu);
-        titleBar.addView(lockAction);
-        titleBar.addView(syncAction);
-        titleBar.addView(style.iconAction("dots","Application menu",this::appMenu));
+        titleBar.addView(style.iconAction("menu","Open navigation menu",this::openDrawer));
+        pageTitle=style.text("",16,TermianStyle.TEXT,500);
+        pageTitle.setSingleLine(true);
+        pageTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titleBar.addView(pageTitle,new LinearLayout.LayoutParams(0,-2,1));
 
         body=new LinearLayout(this);
         root.addView(body,new LinearLayout.LayoutParams(-1,0,1));
@@ -243,20 +242,17 @@ public final class MainActivity extends Activity {
         ctrlButton=button("Ctrl",() -> setControl(!control));
         ctrlButton.setPadding(dp(9),0,dp(9),0);
         keys.addView(ctrlButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
-        HorizontalScrollView keyScroll=new HorizontalScrollView(this);
-        keyScroll.setHorizontalScrollBarEnabled(false);
-        controls=new LinearLayout(this);
-        keyScroll.addView(controls);
-        for (String[] pair : new String[][] {{"Esc","escape"},{"Tab","tab"},{"↑","up"},{"↓","down"},{"←","left"},{"→","right"},{"Enter","enter"}})
-            controls.addView(button(pair[0],() -> key(pair[1],null,false,false,false)),new LinearLayout.LayoutParams(-2,dp(48)));
-        controls.addView(button("Paste",this::paste),new LinearLayout.LayoutParams(-2,dp(48)));
-        keys.addView(keyScroll,new LinearLayout.LayoutParams(0,dp(48),1));
+        for (String[] pair : new String[][] {{"Esc","escape"},{"Tab","tab"}})
+            keys.addView(button(pair[0],() -> key(pair[1],null,false,false,false)),new LinearLayout.LayoutParams(dp(48),dp(48)));
+        View more=style.iconAction("dots","More terminal keys",() -> {});
+        more.setOnClickListener(this::moreTerminalKeys);
+        keys.addView(more);
         console.addView(keys);
 
         vault=new MobileVault(this);
         files=new MobileFiles(this);
         redrawHosts();
-        redrawTabs();
+        redrawNavigation();
         arrange();
     }
 
@@ -296,75 +292,136 @@ public final class MainActivity extends Activity {
     private void newLauncher() { page("new"); }
 
     void page(String value) {
+        closeDrawer();
         if (!value.equals("terminal")) ime().hideSoftInputFromWindow(root.getWindowToken(),0);
         page=value;
         redrawHosts();
-        redrawTabs();
+        redrawNavigation();
         arrange();
     }
 
-    private void redrawTabs() {
+    private void redrawNavigation() {
         int bar=page.equals("terminal") ? terminalBackground : TermianStyle.BAR;
         titleBar.setBackgroundColor(bar);
         console.setBackgroundColor(bar);
-        lockAction.setVisibility(widthDp<380 ? View.GONE : View.VISIBLE);
-        syncAction.setVisibility(widthDp<380 ? View.GONE : View.VISIBLE);
-        tabsBar.removeAllViews();
-        View focused=appendTab("vaults","Vaults",page.equals("vault"),false,() -> page("vault"),null);
-        View sftp=appendTab("sftp","SFTP",page.equals("sftp"),false,() -> page("sftp"),null);
-        if (page.equals("sftp")) focused=sftp;
-        if (page.equals("new")) focused=appendTab("new_tab","New Tab",true,false,this::newLauncher,
-            () -> page(tabId.isEmpty() ? "vault" : "terminal"));
-        for (int i=0;i<tabs.length();i++) {
+        String title=page.equals("sftp") ? "SFTP" : page.equals("new") ? "New Tab" : vault.sectionTitle();
+        if(page.equals("terminal")) {
+            title="Terminal";
+            for(int i=0;i<tabs.length();i++) {
+                JSONObject tab=tabs.optJSONObject(i);
+                if(tab!=null && tabId.equals(tab.optString("id"))) {
+                    title=tab.optString("label",title);
+                    break;
+                }
+            }
+        }
+        pageTitle.setText(title);
+    }
+
+    private void openDrawer() {
+        if(drawer!=null || locked) return;
+        ime().hideSoftInputFromWindow(root.getWindowToken(),0);
+        drawer=new FrameLayout(this);
+        View scrim=new View(this);
+        scrim.setBackgroundColor(0x99000000);
+        scrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        scrim.setOnClickListener(v -> closeDrawer());
+        drawer.addView(scrim,new FrameLayout.LayoutParams(-1,-1));
+
+        drawerPanel=new ScrollView(this);
+        drawerPanel.setBackgroundColor(TermianStyle.SIDEBAR);
+        drawerPanel.setFillViewport(true);
+        drawerPanel.setFocusableInTouchMode(true);
+        drawerPanel.setClickable(true);
+        drawerRows=column();
+        drawerRows.setPadding(dp(8),dp(8),dp(8),dp(12));
+        drawerPanel.addView(drawerRows,new FrameLayout.LayoutParams(-1,-2));
+        drawer.addView(drawerPanel,new FrameLayout.LayoutParams(drawerWidth(),-1,Gravity.LEFT));
+
+        root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        appFrame.addView(drawer,new FrameLayout.LayoutParams(-1,-1));
+        drawerMenu();
+        drawerPanel.requestFocus();
+    }
+
+    private int drawerWidth() { return dp(Math.min(320,Math.max(160,widthDp-48))); }
+
+    private void resizeDrawer() {
+        if(drawerPanel!=null) drawerPanel.setLayoutParams(new FrameLayout.LayoutParams(drawerWidth(),-1,Gravity.LEFT));
+    }
+
+    private void closeDrawer() {
+        if(drawer==null) return;
+        appFrame.removeView(drawer);
+        drawer=null;
+        drawerPanel=null;
+        drawerRows=null;
+        root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
+    }
+
+    private void drawerMenu() {
+        if(drawerRows==null) return;
+        int offset=drawerPanel.getScrollY();
+        drawerRows.removeAllViews();
+        LinearLayout header=new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(label("Termian",20,ACCENT),new LinearLayout.LayoutParams(0,-2,1));
+        header.addView(style.iconAction("close","Close navigation menu",this::closeDrawer));
+        drawerRows.addView(header);
+        drawerRows.addView(label("Vaults",12,MUTED));
+        vault.addSections(drawerRows,page.equals("vault"));
+        drawerEntry(drawerRows,"sftp","SFTP",page.equals("sftp"),() -> page("sftp"),null);
+
+        drawerRows.addView(label("Sessions",12,MUTED));
+        drawerEntry(drawerRows,"plus","New Tab",page.equals("new"),this::newLauncher,null);
+        drawerEntry(drawerRows,"terminal","Local Terminal",false,this::localTerminal,null);
+        for(int i=0;i<tabs.length();i++) {
             JSONObject tab=tabs.optJSONObject(i);
             if(tab==null) continue;
             String id=tab.optString("id");
-            boolean selected=page.equals("terminal") && id.equals(tabId);
-            String state=tab.optString("status");
-            boolean connecting=state.equals("Connecting…") || state.equals("Подключение…") ||
-                state.equals("Проверка ключа…") || state.equals("Вход…");
-            View item=appendTab("terminal",tab.optString("label"),selected,connecting,() -> selectTab(id),() -> closeTab(id));
-            if (selected) focused=item;
+            drawerEntry(drawerRows,"terminal",tab.optString("label"),page.equals("terminal") && id.equals(tabId),
+                () -> selectTab(id),() -> closeTab(id));
         }
-        View scrollTo=focused;
-        tabsBar.post(() -> {
-            if (scrollTo.getParent()!=tabsBar) return;
-            int left=tabScroll.getScrollX(), right=left+tabScroll.getWidth();
-            if (scrollTo.getLeft()<left) tabScroll.scrollTo(scrollTo.getLeft(),0);
-            else if (scrollTo.getRight()>right) tabScroll.scrollTo(scrollTo.getRight()-tabScroll.getWidth(),0);
+
+        drawerRows.addView(label("Application",12,MUTED));
+        drawerEntry(drawerRows,"cloud_sync","Sync",false,this::cloudMenu,null);
+        drawerEntry(drawerRows,"privacy_lock","Lock",false,this::lock,null);
+        drawerEntry(drawerRows,"dots","Settings",false,this::appMenu,null);
+        if(offset>0) {
+            ScrollView panel=drawerPanel;
+            panel.post(() -> { if(panel==drawerPanel) panel.scrollTo(0,offset); });
+        }
+    }
+
+    void drawerEntry(LinearLayout items, String icon, String title, boolean selected, Runnable action, Runnable close) {
+        LinearLayout row=new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(style.section(icon,title,selected,() -> { closeDrawer(); action.run(); }),
+            new LinearLayout.LayoutParams(0,-1,1));
+        if(close!=null) row.addView(style.iconAction("close","Close "+title,TermianStyle.MUTED,48,14,() -> {
+            closeDrawer();
+            close.run();
+        }));
+        items.addView(row,new LinearLayout.LayoutParams(-1,dp(48)));
+    }
+
+    void showVaultSection(Runnable select) {
+        confirmDiscard(() -> {
+            hostEditor=null;
+            hostEdited=null;
+            select.run();
+            page("vault");
         });
     }
 
-    private View appendTab(String icon, String name, boolean selected, boolean connecting, Runnable activate, Runnable close) {
-        LinearLayout tab=new LinearLayout(this);
-        tab.setGravity(Gravity.CENTER_VERTICAL);
-        int color=connecting ? TermianStyle.CONNECTING_TEXT : TermianStyle.TEXT;
-        int background=connecting ? TermianStyle.CONNECTING : page.equals("terminal")
-            ? TermianStyle.tint(terminalBackground,selected ? 36 : 16)
-            : selected ? TermianStyle.ACTIVE : TermianStyle.SURFACE;
-        tab.setPadding(dp(close!=null && selected ? 0 : 10),0,dp(10),0);
-        if (close!=null && selected)
-            tab.addView(style.iconAction("close","Close "+name,color,48,14,close));
-        else {
-            tab.addView(style.icon(icon,color),new LinearLayout.LayoutParams(dp(14),dp(14)));
-        }
-        TextView text=style.text(name,13,color,500);
-        text.setPadding(dp(close!=null && selected ? 0 : 8),0,0,0);
-        text.setSingleLine(true);
-        text.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        text.setMaxWidth(dp(close==null ? 96 : wide ? 170 : 104));
-        tab.addView(text,new LinearLayout.LayoutParams(-2,-2));
-        tab.setSelected(selected);
-        tab.setOnClickListener(v -> activate.run());
-        if(close!=null) tab.setOnLongClickListener(v -> {
-            new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Close tab"},(d,w) -> close.run()).show();
-            return true;
-        });
-        style.action(tab,background,6);
-        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-2,dp(48));
-        lp.rightMargin=dp(4);
-        tabsBar.addView(tab,lp);
-        return tab;
+    private void moreTerminalKeys(View anchor) {
+        PopupMenu menu=new PopupMenu(this,anchor);
+        for(String[] item : new String[][] {{"↑","up"},{"↓","down"},{"←","left"},{"→","right"},{"Enter","enter"}})
+            menu.getMenu().add(item[0]).setOnMenuItemClickListener(v -> { key(item[1],null,false,false,false); return true; });
+        menu.getMenu().add("Paste").setOnMenuItemClickListener(v -> { paste(); return true; });
+        menu.show();
     }
 
     JSONArray terminalTabs() { return tabs; }
@@ -493,6 +550,7 @@ public final class MainActivity extends Activity {
 
     private void back() {
         if (locked) return;
+        if(drawer!=null) { closeDrawer(); return; }
         if (opened && page.equals("vault") && hostEditor!=null) confirmDiscard(this::closeHostEditor);
         else if (opened && !page.equals("vault")) page("vault");
         else if (opened && vault.back()) return;
@@ -545,7 +603,8 @@ public final class MainActivity extends Activity {
                 if (now != null && !tabs.toString().equals(now.toString())) {
                     tabs = now;
                     if (page.equals("terminal")) updateTerminalTab();
-                    redrawTabs();
+                    redrawNavigation();
+                    drawerMenu();
                 }
                 JSONArray fileEvents = info.optJSONArray("files");
                 if (fileEvents != null) files.events(fileEvents);
@@ -557,7 +616,7 @@ public final class MainActivity extends Activity {
                     int bg=0xff000000 | frame.optInt("bg",TermianStyle.BAR);
                     if(bg!=terminalBackground) {
                         terminalBackground=bg;
-                        if(page.equals("terminal")) redrawTabs();
+                        if(page.equals("terminal")) redrawNavigation();
                     }
                 }
                 JSONObject companion = info.optJSONObject("secondaryFrame");
@@ -936,7 +995,7 @@ public final class MainActivity extends Activity {
             JSONObject r = call("unlock","password",value(password));
             if (r.has("error")) { toast(r.optString("error")); return; }
             locked = false;
-            setContentView(root);
+            setContentView(appFrame);
             if (!tabId.isEmpty()) useTab(call("selectTab","id",tabId));
             redrawHosts();
         }));

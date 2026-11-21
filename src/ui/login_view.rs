@@ -140,15 +140,15 @@ pub fn edit<V: 'static>(state: &mut LoginState, event: &KeyDownEvent, cx: &mut C
 /// fill following it; the arc spins until a question or error stops it. A
 /// failure paints the whole bar red.
 fn progress_bar(state: &LoginState) -> Div {
+    if state.error.is_some() {
+        return div().h(px(STEP)).flex().items_center()
+            .child(step("connect", FAILED, false))
+            .child(div().flex_1().min_w_0().h(px(3.)).bg(rgb(FAILED)))
+            .child(step("terminal", FAILED, false));
+    }
     let track = WIDTH - STEP;
     let place = |d: Div, x: f32| d.absolute().top_0().left(px(x));
     let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
-    if state.error.is_some() {
-        return div().relative().w_full().h(px(STEP))
-            .child(line().right(px(STEP / 2.)).bg(rgb(FAILED)))
-            .child(place(step("connect", FAILED, false), 0.))
-            .child(step("terminal", FAILED, false).absolute().top_0().right_0());
-    }
     let bar = div().relative().w(px(WIDTH)).h(px(STEP));
     let progress = state.progress();
     let spinning = state.question.is_none();
@@ -253,7 +253,7 @@ pub fn render<V: 'static>(
         )
         .when(!state.asks_username(), |d| d.child(header_button));
 
-    let bar = div().w_full().pt_5().child(progress_bar(state));
+    let bar = progress_bar(state).mt_5();
 
     let log_box = |extra: Option<&String>| {
         div()

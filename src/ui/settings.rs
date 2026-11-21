@@ -13,7 +13,7 @@ use gpui::{
 use termian_native::self_cloud::{self, Status};
 use termian_native::session_log::{self, PERIODS};
 use termian_native::theme;
-use termian_native::updater::{Channel, State};
+use termian_native::updater::{Channel, Interval, Mode as UpdateMode, Schedule, State};
 
 use super::cloud::Operation;
 use super::dialog::{checkbox, Key};
@@ -786,12 +786,44 @@ impl SettingsWindow {
         let shell = self.shell.read(cx);
         let status = shell.update.status.clone();
         let selected_channel = shell.vault.update_channel;
-        let channel_error = shell.update.channel_error.clone();
+        let schedule = shell.vault.update_schedule;
+        let settings_error = shell.update.settings_error.clone();
         let text = status.text(|ms| {
             use chrono::TimeZone;
             chrono::Local.timestamp_millis_opt(ms as i64).single().map(|t| t.format("%d.%m.%Y, %H:%M:%S").to_string()).unwrap_or_default()
         });
         let busy = matches!(status.state, State::Checking | State::Downloading);
+        let modes = [
+            (UpdateMode::Manual, "settings-update-manual", "Выключено"),
+            (UpdateMode::Check, "settings-update-check-only", "Только проверять"),
+            (UpdateMode::Download, "settings-update-auto-download", "Проверять и скачивать"),
+        ].map(|(mode, id, label)| {
+            let selected = schedule.mode == mode;
+            let disabled = busy || selected;
+            action_button(id, label, selected, disabled)
+                .when(selected, |d| d.opacity(1.))
+                .when(!disabled, |d| d.on_click(cx.listener(move |settings, _, _, cx| {
+                    settings.shell.update(cx, |shell, cx| {
+                        shell.set_update_settings(shell.vault.update_channel, Schedule { mode, ..shell.vault.update_schedule }, cx);
+                    });
+                })))
+        });
+        let intervals = [
+            (Interval::Hour, "settings-update-1h", "1 ч"),
+            (Interval::SixHours, "settings-update-6h", "6 ч"),
+            (Interval::TwelveHours, "settings-update-12h", "12 ч"),
+            (Interval::Day, "settings-update-24h", "24 ч"),
+        ].map(|(interval, id, label)| {
+            let selected = schedule.interval == interval;
+            let disabled = busy || schedule.mode == UpdateMode::Manual || selected;
+            action_button(id, label, selected, disabled)
+                .when(selected && schedule.mode != UpdateMode::Manual, |d| d.opacity(1.))
+                .when(!disabled, |d| d.on_click(cx.listener(move |settings, _, _, cx| {
+                    settings.shell.update(cx, |shell, cx| {
+                        shell.set_update_settings(shell.vault.update_channel, Schedule { interval, ..shell.vault.update_schedule }, cx);
+                    });
+                })))
+        });
         let channels = [
             (Channel::Latest, "settings-update-latest", "Latest"),
             (Channel::PreRelease, "settings-update-pre-release", "Pre-release"),
@@ -801,7 +833,7 @@ impl SettingsWindow {
             action_button(id, label, selected, disabled)
                 .when(selected, |d| d.opacity(1.))
                 .when(!disabled, |d| d.on_click(cx.listener(move |settings, _, _, cx| {
-                    settings.shell.update(cx, |shell, cx| shell.set_update_channel(channel, cx));
+                    settings.shell.update(cx, |shell, cx| shell.set_update_settings(channel, shell.vault.update_schedule, cx));
                 })))
         });
         let button = if status.state == State::Installed {
@@ -833,12 +865,16 @@ impl SettingsWindow {
                     .gap(px(8.))
                     .child(div().text_size(px(20.)).font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child("Обновления"))
                     .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Канал обновлений"))
-                    .child(div().flex().gap_2().children(channels))
+                    .child(div().flex().flex_wrap().gap_2().children(channels))
                     .child(div().text_size(px(13.)).text_color(rgb(MUTED)).child(match selected_channel {
                         Channel::Latest => "Стабильные выпуски.",
                         Channel::PreRelease => "Предварительные выпуски для тестирования.",
                     }))
-                    .when_some(channel_error, |d, error| d.child(div().text_size(px(13.)).text_color(rgb(ERROR_TONE)).child(error)))
+                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Автообновление"))
+                    .child(div().flex().flex_wrap().gap_2().children(modes))
+                    .child(div().mt(px(4.)).text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Интервал проверки"))
+                    .child(div().flex().flex_wrap().gap_2().children(intervals))
+                    .when_some(settings_error, |d, error| d.child(div().text_size(px(13.)).text_color(rgb(ERROR_TONE)).child(error)))
                     .child(div().mt(px(8.)).text_size(px(14.)).text_color(rgb(MUTED)).child(text))
                     .when(status.state == State::Downloading, |d| {
                         d.child(
@@ -851,7 +887,9 @@ impl SettingsWindow {
                         )
                     })
                     .when_some(status.error.clone().filter(|_| status.state == State::Error), |d, error| d.child(div().text_size(px(13.)).text_color(rgb(ERROR_TONE)).child(error)))
-                    .child(div().mt(px(4.)).flex().gap(px(8.)).child(button)),
+                    .child(div().mt(px(4.)).flex().flex_wrap().gap(px(8.)).child(button)
+                        .when(status.state == State::Available, |d| d.child(action_button("settings-update-download", "Скачать обновление", true, false)
+                            .on_click(cx.listener(|settings, _, _, cx| settings.shell.update(cx, |shell, cx| shell.download_update(cx))))))),
             )
             .into_any_element()]
     }

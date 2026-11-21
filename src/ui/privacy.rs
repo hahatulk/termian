@@ -464,6 +464,7 @@ impl Shell {
             let input = div()
                 .id(id)
                 .w(px(290.))
+                .max_w_full()
                 .h(px(38.))
                 .px_3()
                 .flex()
@@ -502,15 +503,13 @@ impl Shell {
                 )
             }
         };
-        let mut overlay = div()
-            .absolute()
-            .inset_0()
-            .occlude()
-            .bg(rgb(theme::BACKGROUND))
+        let mut content = div()
+            .w_full()
+            .flex_none()
+            .p_4()
             .flex()
             .flex_col()
             .items_center()
-            .justify_center()
             .gap_3()
             .child(
                 svg()
@@ -524,7 +523,7 @@ impl Shell {
                 "Termian is locked"
             }));
         if setup {
-            overlay = overlay
+            content = content
                 .child(
                     div()
                         .text_sm()
@@ -534,7 +533,7 @@ impl Shell {
                 .child(field(false, "Lock password", cx))
                 .child(field(true, "Repeat password", cx));
         } else if has_password {
-            overlay = overlay.child(field(
+            content = content.child(field(
                 false,
                 if has_local {
                     "Lock password"
@@ -544,9 +543,9 @@ impl Shell {
                 cx,
             ));
         } else if let Some(focus) = &self.privacy.focus {
-            overlay = overlay.track_focus(focus);
+            content = content.track_focus(focus);
         }
-        let mut actions = div().flex().items_center().gap_2();
+        let mut actions = div().flex().flex_wrap().justify_center().items_center().gap_2();
         if setup || has_password {
             actions =
                 actions.child(
@@ -599,9 +598,21 @@ impl Shell {
                 }),
             );
         }
-        overlay = overlay
+        let content = content
             .child(actions)
-            .child(div().h(px(24.)).text_sm().child(self.privacy.hint));
+            .child(div().min_h(px(24.)).text_sm().child(self.privacy.hint));
+        let overlay = div()
+            .id(("privacy-scroll", version))
+            .absolute()
+            .inset_0()
+            .occlude()
+            .overflow_y_scroll()
+            .bg(rgb(theme::BACKGROUND))
+            .flex()
+            .flex_col()
+            .child(div().flex_1())
+            .child(content)
+            .child(div().flex_1());
         div()
             .relative()
             .size_full()

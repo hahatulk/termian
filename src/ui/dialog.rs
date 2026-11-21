@@ -73,14 +73,10 @@ pub fn collapse_button(id: &str) -> Stateful<Div> {
 /// Dialog card. `error` paints the header red, as `titleColor: "error"` does.
 pub fn card(title: &str, error: bool, close: Stateful<Div>, body: Div, buttons: Vec<AnyElement>) -> Div {
     div()
-        .w(px(520.))
-        .max_w_full()
+        .w_full()
+        .flex_none()
         .flex()
         .flex_col()
-        .rounded_lg()
-        .overflow_hidden()
-        .bg(rgb(theme::BACKGROUND))
-        .shadow_lg()
         .child(
             div()
                 .h(px(76.))
@@ -99,7 +95,7 @@ pub fn card(title: &str, error: bool, close: Stateful<Div>, body: Div, buttons: 
                 .flex_col()
                 .text_color(rgb(theme::TEXT))
                 .child(body)
-                .when(!buttons.is_empty(), |d| d.child(div().mt(px(20.)).flex().gap(px(10.)).justify_end().children(buttons))),
+                .when(!buttons.is_empty(), |d| d.child(div().mt(px(20.)).flex().flex_wrap().gap(px(10.)).justify_end().children(buttons))),
         )
 }
 
@@ -110,11 +106,24 @@ pub fn backdrop(card: Div) -> Stateful<Div> {
         .absolute()
         .inset_0()
         .occlude()
+        .p_4()
         .flex()
         .items_center()
         .justify_center()
         .child(motion::scrim(0x00000099))
-        .child(motion::modal(card))
+        .child(motion::modal(
+            div()
+                .id("dialog-scroll")
+                .w(px(520.))
+                .max_w_full()
+                .max_h_full()
+                .min_h_0()
+                .overflow_y_scroll()
+                .rounded_lg()
+                .bg(rgb(theme::BACKGROUND))
+                .shadow_lg()
+                .child(card),
+        ))
 }
 
 /// Slides a right-hand editor panel in from the window edge, like the legacy

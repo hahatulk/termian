@@ -11,7 +11,6 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -174,16 +173,7 @@ final class MobileVault {
         sort=app.getPreferences(android.content.Context.MODE_PRIVATE).getInt("sort:"+section,0);
         LinearLayout page=app.column();
         page.setFocusableInTouchMode(true);
-        View sections=sections(app.wide());
-        if(app.wide()) {
-            LinearLayout layout=new LinearLayout(app);
-            layout.addView(sections,new LinearLayout.LayoutParams(app.dp(185),-1));
-            layout.addView(page,new LinearLayout.LayoutParams(0,-1,1));
-            container.addView(layout,new LinearLayout.LayoutParams(-1,-1));
-        } else {
-            page.addView(sections,new LinearLayout.LayoutParams(-1,app.dp(48)));
-            container.addView(page,new LinearLayout.LayoutParams(-1,-1));
-        }
+        container.addView(page,new LinearLayout.LayoutParams(-1,-1));
 
         LinearLayout searchRow=new LinearLayout(app);
         searchRow.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -205,41 +195,18 @@ final class MobileVault {
         fill();
     }
 
-    private View sections(boolean sidebar) {
-        LinearLayout items=sidebar ? app.column() : new LinearLayout(app);
-        items.setPadding(app.dp(6),sidebar ? app.dp(8) : 0,app.dp(6),0);
-        items.setBackgroundColor(TermianStyle.SIDEBAR);
-        View active=null;
+    String sectionTitle() { return section; }
+
+    void addSections(LinearLayout items, boolean current) {
         for(int i=0;i<SECTIONS.length;i++) {
             String name=SECTIONS[i];
-            boolean selected=section.equals(name);
-            View item=app.style.section(ICONS[i],name,selected,sidebar,() -> {
-                if(!section.equals(name)) {section=name;filter="";refresh();}
-            });
-            LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(sidebar ? -1 : -2,app.dp(48));
-            if(sidebar) lp.bottomMargin=app.dp(4);
-            else lp.rightMargin=app.dp(4);
-            items.addView(item,lp);
-            if(selected) active=item;
+            app.drawerEntry(items,ICONS[i],name,current && section.equals(name),() -> app.showVaultSection(() -> {
+                if(!section.equals(name)) {
+                    section=name;
+                    filter="";
+                }
+            }),null);
         }
-        if(sidebar) {
-            ScrollView scroll=new ScrollView(app);
-            scroll.setBackgroundColor(TermianStyle.SIDEBAR);
-            scroll.setFillViewport(true);
-            scroll.addView(items);
-            View focus=active;
-            if(focus!=null) scroll.post(() -> {
-                if(focus.getBottom()>scroll.getHeight()) scroll.scrollTo(0,focus.getBottom()-scroll.getHeight());
-            });
-            return scroll;
-        }
-        HorizontalScrollView scroll=new HorizontalScrollView(app);
-        scroll.setBackgroundColor(TermianStyle.SIDEBAR);
-        scroll.setHorizontalScrollBarEnabled(false);
-        scroll.addView(items);
-        View focus=active;
-        if(focus!=null) scroll.post(() -> scroll.scrollTo(Math.max(0,focus.getLeft()-(scroll.getWidth()-focus.getWidth())/2),0));
-        return scroll;
     }
 
     private void toolbar(LinearLayout page) {
@@ -247,28 +214,15 @@ final class MobileVault {
         toolbar.setGravity(android.view.Gravity.CENTER_VERTICAL);
         toolbar.setPadding(app.dp(12),app.dp(4),app.dp(8),app.dp(4));
         boolean hosts=section.equals("Hosts");
-        HorizontalScrollView tools=new HorizontalScrollView(app);
-        tools.setHorizontalScrollBarEnabled(false);
         LinearLayout left=new LinearLayout(app);
-        tools.addView(left);
         if(hosts) {
-            left.addView(app.style.tool("new_host","NEW HOST",TermianStyle.SURFACE,() -> app.edit(null)));
-            left.addView(app.style.iconAction("caret_down","New Hosts",TermianStyle.MUTED,48,11,this::addRecord));
-            View terminal=app.style.tool("terminal","TERMINAL",TermianStyle.SURFACE,app::localTerminal);
-            View compact=app.style.iconAction("terminal","TERMINAL",app::localTerminal);
-            compact.setVisibility(View.GONE);
-            left.addView(terminal);
-            left.addView(compact);
-            tools.addOnLayoutChangeListener((v,l,t,r,b,oldL,oldT,oldR,oldB) -> {
-                boolean iconOnly=r-l<app.dp(270);
-                terminal.setVisibility(iconOnly ? View.GONE : View.VISIBLE);
-                compact.setVisibility(iconOnly ? View.VISIBLE : View.GONE);
-            });
+            left.addView(app.style.iconAction("new_host","New Host",() -> app.edit(null)));
+            left.addView(app.style.iconAction("caret_down","New host or group",TermianStyle.MUTED,48,11,this::addRecord));
         } else if(!section.equals("Known Hosts") && !section.equals("Logs")) {
             int at=java.util.Arrays.asList(SECTIONS).indexOf(section);
-            left.addView(app.style.tool(ICONS[at],"NEW",TermianStyle.SURFACE,this::addRecord));
-        } else left.addView(app.label(section,15,TermianStyle.TEXT));
-        toolbar.addView(tools,new LinearLayout.LayoutParams(0,-2,1));
+            left.addView(app.style.iconAction(ICONS[at],"New",this::addRecord));
+        }
+        toolbar.addView(left,new LinearLayout.LayoutParams(0,-2,1));
         if(!section.equals("Logs")) toolbar.addView(app.style.iconAction(grid ? "grid" : "list",grid ? "Grid view" : "List view",() -> {
             grid=!grid;
             app.getPreferences(android.content.Context.MODE_PRIVATE).edit().putBoolean("grid:"+section,grid).apply();
@@ -295,14 +249,23 @@ final class MobileVault {
         for(JSONObject item=g;item!=null && path.size()<32;item=find("groups",value(item,"parent"))) path.add(0,item);
         LinearLayout line=new LinearLayout(app);
         line.setGravity(android.view.Gravity.CENTER_VERTICAL);
-        line.addView(app.style.tool("arrow_left","Personal",TermianStyle.BG,() -> {group="";refresh();}));
-        for(JSONObject item:path)
-            line.addView(app.style.tool("arrow_right",item.optString("label"),TermianStyle.BG,() -> {group=item.optString("id");refresh();}));
-        HorizontalScrollView strip=new HorizontalScrollView(app);
-        strip.setHorizontalScrollBarEnabled(false);
-        strip.addView(line);
-        page.addView(strip);
-        strip.post(() -> strip.fullScroll(View.FOCUS_RIGHT));
+        line.addView(app.style.iconAction("arrow_left","Parent group",() -> back()));
+        TextView current=app.label(g.optString("label"),14,TermianStyle.TEXT);
+        current.setSingleLine(true);
+        current.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        current.setOnClickListener(view -> {
+            String[] labels=new String[path.size()+1];
+            labels[0]="Personal";
+            for(int i=0;i<path.size();i++) labels[i+1]=path.get(i).optString("label");
+            new AlertDialog.Builder(app).setTitle("Go to group").setItems(labels,(dialog,i) -> {
+                group=i==0 ? "" : path.get(i-1).optString("id");
+                refresh();
+            }).show();
+        });
+        app.style.action(current,TermianStyle.BG);
+        line.addView(current,new LinearLayout.LayoutParams(0,-2,1));
+        line.addView(app.style.iconAction("caret_down","Group path",() -> current.performClick()));
+        page.addView(line);
     }
 
     private void content(LinearLayout container) {

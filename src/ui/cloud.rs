@@ -261,8 +261,12 @@ fn configured(vault: &Vault) -> bool {
 /// on it; then the old merge base stays and the next sync carries both the
 /// edit and what came from the cloud.
 fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
-    let edited = Vault { history: Vec::new(), update_channel: started.update_channel, ..live.clone() }
-        != Vault { history: Vec::new(), ..started.clone() };
+    let edited = Vault {
+        history: Vec::new(),
+        update_channel: started.update_channel,
+        update_schedule: started.update_schedule,
+        ..live.clone()
+    } != Vault { history: Vec::new(), ..started.clone() };
     if edited || !live.history.iter().filter(|entry| entry.log.is_some())
         .eq(started.history.iter().filter(|entry| entry.log.is_some())) {
         return false;
@@ -279,6 +283,7 @@ fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
     }
     synced.history.sort_by_key(|entry| std::cmp::Reverse((entry.connected_at, entry.id)));
     synced.update_channel = live.update_channel;
+    synced.update_schedule = live.update_schedule;
     *live = synced;
     true
 }
@@ -961,13 +966,18 @@ impl Shell {
             };
             div().text_xs().text_color(rgb(tone)).child(text)
         });
-        let card_height = (window.viewport_size().height - px(48.)).clamp(px(120.), px(760.));
+        let height = window.viewport_size().height;
+        let padding = px(24.).min(height / 8.);
+        let card_height = (height - padding * 2.).min(px(760.));
         let card = div()
             .id("cloud-dialog")
             .w(px(520.))
             .max_w_full()
             .max_h(card_height)
+            .min_h_0()
             .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .rounded(px(12.))
             .border_1()
             .border_color(rgb(BORDER))
@@ -980,6 +990,7 @@ impl Shell {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
+                    .flex_none()
                     .px(px(24.))
                     .pt(px(24.))
                     .pb(px(18.))
@@ -1009,12 +1020,14 @@ impl Shell {
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     ),
             )
-            .child(div().px(px(24.)).pb(px(20.)).flex().flex_col().gap(px(16.)).children(fields).children(out))
+            .child(div().flex_none().px(px(24.)).pb(px(20.)).flex().flex_col().gap(px(16.)).children(fields).children(out))
             .child(
                 div()
+                    .flex_none()
                     .px(px(24.))
                     .py(px(16.))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
@@ -1036,7 +1049,7 @@ impl Shell {
                             .child("Закрыть")
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     )
-                    .child(div().flex().gap(px(8.)).children(actions)),
+                    .child(div().flex().flex_wrap().gap(px(8.)).children(actions)),
             );
         Some(
             div()
@@ -1044,7 +1057,7 @@ impl Shell {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .p(px(24.))
+                .p(padding)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1115,11 +1128,19 @@ mod tests {
 
     #[test]
     fn adopting_a_synced_copy_keeps_live_history_and_edits() {
+        use termian_native::updater::{Interval, Mode, Schedule};
+
         let started = Vault::default();
-        let mut live = Vault { history: vec![termian_native::vault::HistoryEntry { id: 7, ..Default::default() }], ..Vault::default() };
+        let schedule = Schedule { mode: Mode::Manual, interval: Interval::TwelveHours };
+        let mut live = Vault {
+            history: vec![termian_native::vault::HistoryEntry { id: 7, ..Default::default() }],
+            update_schedule: schedule,
+            ..Vault::default()
+        };
         let synced = Vault { hosts: termian_native::vault::demo().hosts, ..Vault::default() };
         assert!(adopt(&mut live, &started, synced.clone()));
         assert_eq!(live.history[0].id, 7);
+        assert_eq!(live.update_schedule, schedule);
         assert!(!live.hosts.is_empty());
         let mut edited = Vault { groups: termian_native::vault::demo().groups, ..Vault::default() };
         assert!(!adopt(&mut edited, &started, synced), "an edit made meanwhile is never overwritten");

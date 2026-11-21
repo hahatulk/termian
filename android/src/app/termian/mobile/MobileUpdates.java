@@ -14,11 +14,14 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.provider.Settings;
 import android.view.View;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
+import android.widget.Spinner;
 import android.widget.TextView;
 import java.io.File;
 import java.io.IOException;
@@ -26,23 +29,40 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.IntConsumer;
 import org.json.JSONObject;
 
 final class MobileUpdates {
-    private static final long CHECK_INTERVAL=6*60*60*1000L;
+    private static final long FIRST_CHECK=20_000L;
+    private static final int[] INTERVAL_HOURS={1,6,12,24};
+    private static final int DEFAULT_INTERVAL=1;
+
+    private enum Mode {
+        MANUAL("Off"),
+        CHECK("Check only"),
+        DOWNLOAD("Check and download");
+
+        final String label;
+
+        Mode(String label) { this.label=label; }
+    }
+
     private final MainActivity app;
     private final SharedPreferences preferences;
     private final Handler handler=new Handler(Looper.getMainLooper());
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
-    private final Runnable scheduled=this::check;
+    private final Runnable scheduled=this::automaticCheck;
     private final boolean enabled=nativeEnabled();
-    private long nextCheck=SystemClock.elapsedRealtime()+20000L;
+    private long nextCheck=SystemClock.elapsedRealtime()+FIRST_CHECK;
     private boolean visible, closed, busy, prerelease;
+    private Mode mode;
+    private int interval;
     private File readyApk;
-    private String message;
+    private String availableVersion, notifiedVersion, message;
     private TextView status;
     private ProgressBar progress;
     private RadioGroup channels;
+    private Spinner modes, intervals;
     private AlertDialog dialog;
     private int percent=-1;
 
@@ -50,7 +70,11 @@ final class MobileUpdates {
         this.app=app;
         preferences=app.getPreferences(Context.MODE_PRIVATE);
         prerelease=preferences.getBoolean("updates:preRelease",false);
-        message=enabled ? "Checks run automatically while Termian is open." : "Updates are disabled in this build.";
+        try { mode=Mode.valueOf(preferences.getString("updates:mode",Mode.DOWNLOAD.name())); }
+        catch(IllegalArgumentException ignored) { mode=Mode.DOWNLOAD; }
+        int intervalIndex=Arrays.binarySearch(INTERVAL_HOURS,preferences.getInt("updates:intervalHours",6));
+        interval=intervalIndex<0 ? DEFAULT_INTERVAL : intervalIndex;
+        message=enabled ? "Updates have not been checked yet." : "Updates are disabled in this build.";
     }
 
     private static native boolean nativeEnabled();
@@ -79,8 +103,29 @@ final class MobileUpdates {
 
     private void schedule() {
         handler.removeCallbacks(scheduled);
-        if(enabled && visible && !closed && !busy && readyApk==null)
+        if(enabled && visible && !closed && !busy && readyApk==null && mode!=Mode.MANUAL)
             handler.postDelayed(scheduled,Math.max(0,nextCheck-SystemClock.elapsedRealtime()));
+    }
+
+    private long intervalMillis() {
+        return INTERVAL_HOURS[interval]*3_600_000L;
+    }
+
+    private void automaticCheck() {
+        if(visible && mode!=Mode.MANUAL) check(mode==Mode.DOWNLOAD);
+    }
+
+    private Spinner choices(String[] labels,int selected,IntConsumer select) {
+        Spinner spinner=new Spinner(app);
+        ArrayAdapter<String> adapter=new ArrayAdapter<>(app,android.R.layout.simple_spinner_item,labels);
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(selected);
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent,View view,int position,long id) { select.accept(position); }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        return spinner;
     }
 
     void show() {
@@ -103,6 +148,14 @@ final class MobileUpdates {
         channels.check(prerelease ? preview.getId() : latest.getId());
         channels.setOnCheckedChangeListener((group,id) -> selectChannel(id==preview.getId()));
         form.addView(channels);
+        form.addView(app.label("Automatic updates",14,TermianStyle.TEXT));
+        String[] modeLabels=Arrays.stream(Mode.values()).map(value -> value.label).toArray(String[]::new);
+        modes=choices(modeLabels,mode.ordinal(),value -> selectMode(Mode.values()[value]));
+        form.addView(modes);
+        form.addView(app.label("Check interval",14,TermianStyle.TEXT));
+        String[] intervalLabels=Arrays.stream(INTERVAL_HOURS).mapToObj(hours -> hours+(hours==1 ? " hour" : " hours")).toArray(String[]::new);
+        intervals=choices(intervalLabels,interval,this::selectInterval);
+        form.addView(intervals);
         status=app.label("",14,TermianStyle.MUTED);
         form.addView(status);
         progress=new ProgressBar(app,null,android.R.attr.progressBarStyleHorizontal);
@@ -113,10 +166,29 @@ final class MobileUpdates {
             .setNegativeButton("Close",null).setPositiveButton("Check for updates",null).show();
         dialog.setOnDismissListener(d -> dialog=null);
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            if(readyApk==null) check();
-            else install();
+            if(readyApk!=null) install();
+            else check(availableVersion!=null);
         });
         render();
+    }
+
+    private void selectMode(Mode next) {
+        if(busy || mode==next) return;
+        boolean wasManual=mode==Mode.MANUAL;
+        mode=next;
+        preferences.edit().putString("updates:mode",mode.name()).apply();
+        nextCheck=SystemClock.elapsedRealtime()+(wasManual ? FIRST_CHECK : intervalMillis());
+        render();
+        schedule();
+    }
+
+    private void selectInterval(int next) {
+        if(busy || mode==Mode.MANUAL || interval==next) return;
+        interval=next;
+        preferences.edit().putInt("updates:intervalHours",INTERVAL_HOURS[interval]).apply();
+        nextCheck=SystemClock.elapsedRealtime()+intervalMillis();
+        render();
+        schedule();
     }
 
     private void selectChannel(boolean preview) {
@@ -128,41 +200,52 @@ final class MobileUpdates {
             readyApk.delete();
             readyApk=null;
         }
+        availableVersion=null;
         message=enabled ? "Update channel changed. Check for updates." : "Updates are disabled in this build.";
-        nextCheck=SystemClock.elapsedRealtime()+CHECK_INTERVAL;
+        nextCheck=SystemClock.elapsedRealtime()+intervalMillis();
         render();
         schedule();
     }
 
-    private void check() {
+    private void check(boolean download) {
         if(!enabled || closed || busy || readyApk!=null) return;
         handler.removeCallbacks(scheduled);
         busy=true;
+        availableVersion=null;
         message="Checking for updates…";
         percent=-1;
         render();
         boolean preview=prerelease;
         worker.execute(() -> {
-            File apk=UpdateApkProvider.newApk(app);
+            File apk=download ? UpdateApkProvider.newApk(app) : null;
             boolean verified=false;
+            String candidate=null;
             String result;
             try {
-                File parent=apk.getParentFile();
-                if(!parent.isDirectory() && !parent.mkdirs()) throw new IOException("Cannot create the update cache.");
-                JSONObject reply=new JSONObject(nativeUpdate(preview,apk.getPath()));
+                if(apk!=null) {
+                    File parent=apk.getParentFile();
+                    if(!parent.isDirectory() && !parent.mkdirs()) throw new IOException("Cannot create the update cache.");
+                }
+                JSONObject reply=new JSONObject(nativeUpdate(preview,apk==null ? null : apk.getPath()));
                 if(reply.has("error")) throw new IOException(reply.getString("error"));
                 if(reply.has("version")) {
-                    String candidate=reply.getString("version");
-                    verifyApk(apk,candidate);
-                    verified=true;
-                    result="Termian "+candidate+" is ready to install. Installation closes open sessions.";
+                    String version=reply.getString("version");
+                    if(apk==null) {
+                        candidate=version;
+                        result="Termian "+version+" is available.";
+                    } else {
+                        verifyApk(apk,version);
+                        verified=true;
+                        result="Termian "+version+" is ready to install. Installation closes open sessions.";
+                    }
                 } else result="No newer version in this channel.";
             } catch(Exception error) {
                 result=error.getMessage()==null ? "Update failed." : error.getMessage();
             }
             final String done=result;
             final File downloaded=verified ? apk : null;
-            if(!verified) apk.delete();
+            final String found=candidate;
+            if(!verified && apk!=null) apk.delete();
             handler.post(() -> {
                 if(closed) {
                     if(downloaded!=null) downloaded.delete();
@@ -170,10 +253,14 @@ final class MobileUpdates {
                 }
                 busy=false;
                 readyApk=downloaded;
+                availableVersion=found;
                 message=done;
-                if(downloaded!=null && visible && dialog==null && !app.privacyLocked())
+                if(visible && dialog==null && !app.privacyLocked()
+                    && (downloaded!=null || (found!=null && !found.equals(notifiedVersion)))) {
+                    notifiedVersion=found;
                     app.toast(done+" Open Settings > Version.");
-                nextCheck=SystemClock.elapsedRealtime()+CHECK_INTERVAL;
+                }
+                nextCheck=SystemClock.elapsedRealtime()+intervalMillis();
                 render();
                 schedule();
             });
@@ -214,7 +301,7 @@ final class MobileUpdates {
         if(readyApk==null) return;
         if(!readyApk.isFile()) {
             readyApk=null;
-            check();
+            check(true);
             return;
         }
         try {
@@ -238,12 +325,15 @@ final class MobileUpdates {
     private void render() {
         if(dialog==null) return;
         status.setText(message);
-        for(int i=0;i<channels.getChildCount();i++) channels.getChildAt(i).setEnabled(!busy);
+        boolean configurable=!busy;
+        for(int i=0;i<channels.getChildCount();i++) channels.getChildAt(i).setEnabled(configurable);
+        modes.setEnabled(configurable);
+        intervals.setEnabled(configurable && mode!=Mode.MANUAL);
         progress.setVisibility(busy ? View.VISIBLE : View.GONE);
         progress.setIndeterminate(percent<0);
         if(percent>=0) progress.setProgress(percent);
         Button action=dialog.getButton(AlertDialog.BUTTON_POSITIVE);
         action.setEnabled(enabled && !busy);
-        action.setText(readyApk==null ? "Check for updates" : "Install");
+        action.setText(readyApk!=null ? "Install" : availableVersion!=null ? "Download update" : "Check for updates");
     }
 }

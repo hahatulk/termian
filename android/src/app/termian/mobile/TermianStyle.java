@@ -105,7 +105,7 @@ final class TermianStyle {
         return row;
     }
 
-    View section(String name, String title, boolean selected, boolean sidebar, Runnable click) {
+    View section(String name, String title, boolean selected, Runnable click) {
         android.widget.FrameLayout frame = new android.widget.FrameLayout(context);
         LinearLayout row=new LinearLayout(context);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -115,14 +115,14 @@ final class TermianStyle {
         TextView label=text(title,14,TEXT,selected ? 500 : 400);
         label.setSingleLine(true);
         label.setPadding(context.dp(10),0,0,0);
-        row.addView(label);
+        label.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        row.addView(label,new LinearLayout.LayoutParams(0,-2,1));
         frame.addView(row,new android.widget.FrameLayout.LayoutParams(-1,-1));
         if (selected) {
             View marker=new View(context);
             marker.setBackground(shape(GREEN,2));
-            android.widget.FrameLayout.LayoutParams lp = sidebar
-                ? new android.widget.FrameLayout.LayoutParams(context.dp(3),context.dp(22),Gravity.START|Gravity.CENTER_VERTICAL)
-                : new android.widget.FrameLayout.LayoutParams(context.dp(18),context.dp(2),Gravity.BOTTOM|Gravity.CENTER_HORIZONTAL);
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                context.dp(3),context.dp(22),Gravity.LEFT|Gravity.CENTER_VERTICAL);
             frame.addView(marker,lp);
         }
         frame.setContentDescription(title);

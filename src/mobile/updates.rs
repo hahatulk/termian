@@ -31,7 +31,6 @@ pub extern "system" fn Java_app_termian_mobile_MobileUpdates_nativeUpdate(
         if !updater::enabled() {
             return Err("Автообновление отключено в этой сборке.".to_owned());
         }
-        let path = String::from(env.get_string(&destination).map_err(|e| e.to_string())?);
         let channel = if prerelease == JNI_TRUE {
             Channel::PreRelease
         } else {
@@ -40,6 +39,10 @@ pub extern "system" fn Java_app_termian_mobile_MobileUpdates_nativeUpdate(
         let Some(package) = updater::check(&updater::current_version(), channel)? else {
             return Ok(json!({}));
         };
+        if destination.is_null() {
+            return Ok(json!({"version":package.version}));
+        }
+        let path = String::from(env.get_string(&destination).map_err(|e| e.to_string())?);
         let version = JObject::from(
             env.new_string(&package.version)
                 .map_err(|e| e.to_string())?,

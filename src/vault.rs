@@ -378,6 +378,8 @@ pub struct Vault {
     pub logs_disabled: bool,
     #[serde(default)]
     pub update_channel: crate::updater::Channel,
+    #[serde(default)]
+    pub update_schedule: crate::updater::Schedule,
     /// Settings → Terminal; device-local like legacy, except the keepalive
     /// interval, which is in `foreign.settings`.
     #[serde(default)]
