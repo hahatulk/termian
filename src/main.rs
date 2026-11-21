@@ -2,6 +2,7 @@
 
 mod ui;
 
+use termian_native::language::text as tr;
 use gpui::{
     div, prelude::*, px, rgb, size, svg, App, Application, Bounds, Context, Div, FocusHandle, SharedString, Stateful,
     TitlebarOptions, Window, WindowBounds, WindowOptions,
@@ -32,10 +33,14 @@ const WINDOW_CONTROLS_INSET: f32 = 80.;
 #[cfg(not(target_os = "macos"))]
 const WINDOW_CONTROLS_INSET: f32 = 12.;
 
+use termian_native::vault_set::VaultSet;
+
 pub struct Shell {
     tabs: Tabs,
     vault: Vault,
     store: Store,
+    vaults: VaultSet,
+    vault_picker: Option<ui::vault_picker::VaultPicker>,
     /// Encrypted session logs (`session-logs-v2`).
     logs_dir: std::path::PathBuf,
     vault_error: Option<String>,
@@ -201,27 +206,31 @@ fn import_legacy_templates(vault: &mut Vault) {
 
 /// The native vault (ADR 0002), imported from the legacy profile on first run.
 /// `TERMIAN_DEMO` uses a throwaway demo vault and never touches the keychain.
-fn open_vault() -> Result<(Store, Vault), String> {
-    if std::env::var_os("TERMIAN_DEMO").is_some() {
+fn open_vault() -> Result<(VaultSet, Store, Vault), String> {
+    let (base, personal) = if std::env::var_os("TERMIAN_DEMO").is_some() {
         let store = Store::demo();
         let vault = store.load_or_import(|| Ok(termian_native::vault::demo()))?;
-        return Ok((store, vault));
-    }
-    Store::load_default(|| match load_legacy_vault() {
-        Err(error) if error == "legacy profile not found" => Ok(Vault::default()),
-        result => result,
-    })
+        (store, vault)
+    } else {
+        Store::load_default(|| match load_legacy_vault() {
+            Err(error) if error == "legacy profile not found" => Ok(Vault::default()),
+            result => result,
+        })?
+    };
+    VaultSet::load(base, personal)
 }
 
 impl Shell {
-    fn new(store: Store, mut vault: Vault, cx: &mut Context<Self>) -> Self {
+    fn new(vaults: VaultSet, store: Store, mut vault: Vault, cx: &mut Context<Self>) -> Self {
+        termian_native::language::set(vault.language);
         let demo = std::env::var_os("TERMIAN_DEMO").is_some();
-        let logs_dir = if demo { std::env::temp_dir().join("termian-native-demo").join("session-logs-v2") } else { session_log::default_dir() };
-        if !demo && !vault.legacy_shell_history_imported {
+        let logs_dir = store.logs_dir();
+        let migrate = !demo && vaults.selected().is_nil();
+        if migrate && !vault.legacy_shell_history_imported {
             import_legacy_shell_history(&mut vault);
             let _ = store.save(&vault);
         }
-        if !demo && vault.secrets_missing {
+        if migrate && vault.secrets_missing {
             // Imported before legacy passwords and keys were read; a locked
             // keychain is tried again at the next start.
             match load_legacy_vault() {
@@ -230,7 +239,7 @@ impl Shell {
             }
             let _ = store.save(&vault);
         }
-        if !demo && !vault.legacy_hidden_identities_folded {
+        if migrate && !vault.legacy_hidden_identities_folded {
             // Hosts' own credentials imported as Keychain identities; a
             // locked keychain is tried again at the next start.
             match load_legacy_vault() {
@@ -241,7 +250,7 @@ impl Shell {
             }
             let _ = store.save(&vault);
         }
-        if !demo && vault.legacy_hidden_identities_folded && !vault.legacy_unused_hidden_identities_dropped {
+        if migrate && vault.legacy_hidden_identities_folded && !vault.legacy_unused_hidden_identities_dropped {
             // Hosts' own legacy credentials left in the Keychain with no host using them.
             match load_legacy_vault() {
                 Ok(legacy) => {
@@ -254,21 +263,21 @@ impl Shell {
             }
             let _ = store.save(&vault);
         }
-        if !demo && !vault.legacy_templates_imported {
+        if migrate && !vault.legacy_templates_imported {
             import_legacy_templates(&mut vault);
             let _ = store.save(&vault);
         }
-        if !demo && !vault.legacy_history_imported {
+        if migrate && !vault.legacy_history_imported {
             import_legacy_history(&mut vault, &logs_dir);
             let _ = store.save(&vault);
         }
-        if !demo && vault.legacy_history_imported && !vault.legacy_bookmarks_imported {
+        if migrate && vault.legacy_history_imported && !vault.legacy_bookmarks_imported {
             import_legacy_bookmarks(&mut vault);
             let _ = store.save(&vault);
         }
         // Logs older than 60 days are deleted at start (FR-L5).
         session_log::prune(&logs_dir, std::time::SystemTime::now(), session_log::RETENTION);
-        Self { tabs: Tabs::default(), vault, store, logs_dir, vault_error: None, log_read_pending: false, section: Section::Hosts,
+        Self { tabs: Tabs::default(), vault, store, logs_dir, vaults, vault_picker: None, vault_error: None, log_read_pending: false, section: Section::Hosts,
             editor_motion: ui::motion::Tween::at(0.),
             editor_reveal: 0.,
             host_editor: None,
@@ -406,7 +415,7 @@ impl Shell {
             .when(self.is_broadcasting(id), |d| d.child(div().size(px(8.)).rounded_full().bg(rgb(theme::ERROR))))
             // Legacy workspace save dot on the selected tab: «Save template» / «Update template».
             .when_some(active.then(|| self.template_changes(id)).flatten(), |d, new| {
-                let title: SharedString = if new { "Save template" } else { "Update template" }.into();
+                let title: SharedString = if new { tr("Save template") } else { tr("Update template") }.into();
                 d.child(
                     div()
                         .id(SharedString::from(format!("save-template-{id:?}")))
@@ -485,6 +494,7 @@ impl Shell {
     #[allow(clippy::too_many_arguments)]
     fn open_ssh_for(&mut self, host: Option<HostId>, label: String, os: Option<String>, mut target: SshTarget, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         // Terminal settings, keeping what the host itself asks for.
+        target.known_hosts = self.store.known_hosts_path();
         let host_options = std::mem::take(&mut target.options);
         target.options = session::SshOptions { env: host_options.env, agent_forwarding: host_options.agent_forwarding, charset: host_options.charset, ..session::SshOptions::from_vault(&self.vault) };
         // Legacy runs the detection only for saved hosts whose system is unknown.
@@ -594,7 +604,7 @@ impl Shell {
     pub fn open_local_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let terminal = &self.vault.terminal;
         match session::local_shell(terminal.local_shell.as_deref(), terminal.emulation(), 80, 24, terminal.shell_history_import) {
-            Ok(session) => self.open_terminal("Local Terminal".into(), session, window, cx),
+            Ok(session) => self.open_terminal(tr("Local Terminal").into(), session, window, cx),
             Err(error) => self.vault_error = Some(format!("Could not start a local shell: {error}")),
         }
     }
@@ -677,6 +687,7 @@ impl Render for Shell {
             .children(self.render_update_notice(cx))
             .children(self.render_app_menu(cx))
             .children(self.render_cloud(window, cx))
+            .children(self.render_vault_picker(window, cx))
             .on_action(cx.listener(|shell, _: &ui::palette::OpenPalette, window, cx| shell.open_palette(String::new(), window, cx)))
             .map(|root| self.on_shortcut_actions(root, cx))
             .into_any_element()
@@ -701,11 +712,15 @@ fn main() {
                 is_resizable: false,
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| {
-                let mut startup = VaultStartup::default();
-                startup.open(window, cx);
-                startup
-            }),
+            |window, cx| {
+                #[cfg(windows)]
+                ui::assets::set_window_icon(window);
+                cx.new(|cx| {
+                    let mut startup = VaultStartup::default();
+                    startup.open(window, cx);
+                    startup
+                })
+            },
         ).expect("failed to open the vault window");
         cx.activate(true);
     });
@@ -728,8 +743,8 @@ impl VaultStartup {
         cx.spawn_in(window, async move |this, cx| {
             let result = task.await;
             let _ = cx.update(|window, cx| match result {
-                Ok((store, vault)) => {
-                    open_main_window(store, vault, cx);
+                Ok((vaults, store, vault)) => {
+                    open_main_window(vaults, store, vault, cx);
                     window.remove_window();
                 }
                 Err(error) => {
@@ -749,17 +764,33 @@ impl Render for VaultStartup {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().flex().flex_col().justify_center().items_center().gap_3().px_6()
             .bg(rgb(0x202228)).text_color(rgb(0xf0f0f0))
-            .child(div().text_lg().child(if self.opening { "Opening vault…" } else { "Vault locked" }))
+            .child(div().text_lg().child(if self.opening { tr("Opening vault…") } else { tr("Vault locked") }))
             .children(self.error.as_ref().map(|error| div().text_sm().child(error.clone())))
             .when(!self.opening, |view| view.child(
                 div().id("retry-vault").px_4().py_2().rounded_md().bg(rgb(0x3c454a)).surface_feedback(0x3c454a)
                     .on_click(cx.listener(|startup, _, window, cx| startup.open(window, cx)))
-                    .child("Try Again"),
+                    .child(tr("Try Again")),
             ))
     }
 }
 
-fn open_main_window(store: Store, vault: Vault, cx: &mut App) {
+fn init_main(shell: &gpui::Entity<Shell>, window: &mut Window, cx: &mut App) {
+    let focus = shell.update(cx, |shell, cx| {
+        shell.main_window = window.window_handle().downcast();
+        cx.on_app_quit(|shell, _| {
+            shell.sftp.actions.edits.discard_all();
+            async {}
+        }).detach();
+        shell.install_privacy(window, cx);
+        shell.start_cloud(cx);
+        shell.start_updates(cx);
+        shell.load_terminal_font(cx);
+        shell.root_focus.clone()
+    });
+    window.focus(&focus);
+}
+
+fn open_main_window(vaults: VaultSet, store: Store, vault: Vault, cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1440.), px(860.)), cx);
     let main = cx.open_window(
         WindowOptions {
@@ -773,19 +804,10 @@ fn open_main_window(store: Store, vault: Vault, cx: &mut App) {
             ..Default::default()
         },
         |window, cx| {
-            let shell = cx.new(|cx| Shell::new(store, vault, cx));
-            shell.update(cx, |shell, cx| {
-                cx.on_app_quit(|shell, _| {
-                    shell.sftp.actions.edits.discard_all();
-                    async {}
-                }).detach();
-                shell.install_privacy(window, cx);
-                shell.start_cloud(cx);
-                shell.start_updates(cx);
-                shell.load_terminal_font(cx);
-            });
-            let focus = shell.read(cx).root_focus.clone();
-            window.focus(&focus);
+            #[cfg(windows)]
+            ui::assets::set_window_icon(window);
+            let shell = cx.new(|cx| Shell::new(vaults, store, vault, cx));
+            init_main(&shell, window, cx);
             shell
         },
     )

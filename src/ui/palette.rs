@@ -1,6 +1,7 @@
 //! Command palette (⌘K): one search field over the window with Hosts, Tabs
 //! and Quick connect results; arrows choose, Enter runs, Escape closes.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, Context, FontWeight, KeyDownEvent, SharedString, Window};
 use termian_native::palette::{flatten, sections, Item};
 use termian_native::session::parse_destination;
@@ -114,6 +115,7 @@ impl Shell {
         let found = sections(&self.vault, self.tabs.all(), &palette.query);
         let field = div().id("palette-input")
             .h(px(36.))
+            .flex_none()
             .px(px(10.))
             .flex()
             .items_center()
@@ -121,13 +123,13 @@ impl Shell {
             .rounded(px(10.))
             .bg(rgb(theme::INPUT))
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT)))
-            .child(div().flex_1().child(text_input::text("palette", &palette.query, "Search hosts or tabs", focused, Mode::Line, cx)))
+            .child(div().flex_1().child(text_input::text("palette", &palette.query, tr("Search hosts or tabs"), focused, Mode::Line, cx)))
             .child(div().text_color(rgb(theme::TEXT_MUTED)).child(super::launcher::PALETTE_SHORTCUT));
 
         let field = text_input::field(field, "palette", Mode::Line, |shell, window, _| window.focus(&shell.palette_focus), cx);
 
         let mut index = 0;
-        let mut list = div().id("palette-results").max_h(px(420.)).overflow_y_scroll().flex().flex_col();
+        let mut list = div().id("palette-results").max_h(px(420.)).min_h_0().overflow_y_scroll().flex().flex_col();
         for (n, section) in found.iter().enumerate() {
             if n > 0 {
                 list = list.child(div().h(px(1.)).w_full().my(px(10.)).bg(rgb(theme::SURFACE_ACTIVE)));
@@ -180,7 +182,9 @@ impl Shell {
                 .flex()
                 .justify_center()
                 .items_start()
-                .pt(px(80.))
+                .px_4()
+                .pb_4()
+                .pt(px(80.).min(window.viewport_size().height / 8. + px(8.)))
                 .child(super::motion::scrim(0x00000066))
                 .on_mouse_down(gpui::MouseButton::Left, cx.listener(|shell, _, window, cx| shell.close_palette(window, cx)))
                 .child(super::motion::modal(
@@ -191,7 +195,9 @@ impl Shell {
                         .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .w(px(640.))
                         .max_w_full()
-                        .h_auto()
+                        .max_h_full()
+                        .min_h_0()
+                        .overflow_hidden()
                         .p(px(10.))
                         .flex()
                         .flex_col()

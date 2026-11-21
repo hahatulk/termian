@@ -3,6 +3,7 @@
 //! their menus and the «Environment Variables» and «Select Color Theme»
 //! panels.
 
+use termian_native::language::text as tr;
 use gpui::{
     canvas, div, point, prelude::*, px, rgb, size, svg, AnyElement, AvailableSpace, Bounds, Context, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Stateful, Window,
 };
@@ -112,7 +113,7 @@ fn credentials_picker(anchor: impl IntoElement, menu: Option<Stateful<Div>>, dis
 }
 
 fn key_type(key: &SshKey) -> String {
-    if key.certificate.is_some() { "Certificate".to_owned() } else { key.kind.clone() }
+    if key.certificate.is_some() { tr("Certificate").to_owned() } else { key.kind.clone() }
 }
 
 fn credential_check() -> impl IntoElement {
@@ -205,13 +206,13 @@ impl Shell {
         let mut menu = list("credentials-keys");
         let mut keys = self.vault.keys.iter().filter(|key| !certificates_only || key.certificate.is_some()).peekable();
         if keys.peek().is_none() {
-            let message = if certificates_only { "No saved certificates" } else { "No saved keys" };
+            let message = if certificates_only { tr("No saved certificates") } else { tr("No saved keys") };
             return menu.child(menu_row("credentials-keys-empty".into(), message, false, true));
         }
         for key in keys {
             let id = key.id;
             let usable = key.private_key.is_some();
-            let detail = if usable { key_type(key) } else { "Unavailable".to_owned() };
+            let detail = if usable { key_type(key) } else { tr("Unavailable").to_owned() };
             menu = menu.child(
                 menu_row(format!("credentials-key-{id}"), "", false, !usable)
                     .gap_2()
@@ -272,7 +273,7 @@ impl Shell {
                 CredentialsMenu::Keys
             };
             let label = key.map(|key| key.label.clone()).unwrap_or_else(|| {
-                if mode == CredentialsMenu::Certificates { "Certificate".to_owned() } else { "Key".to_owned() }
+                if mode == CredentialsMenu::Certificates { tr("Certificate").to_owned() } else { tr("Key").to_owned() }
             });
             let value = self.credential_value("credentials-key-field", "keychain", label, key.map(key_type), mode, cx);
             let clear = clear_credential(if key.is_some() { "credentials-key-clear" } else { "credentials-key-cancel" })
@@ -300,15 +301,15 @@ impl Shell {
                 .text_color(rgb(theme::TEXT))
                 .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
                 .child(svg().path(icon("plus")).size(px(12.)).text_color(rgb(theme::TEXT)))
-                .child("SSH.id, Key, Certificate, FIDO2")
+                .child(tr("SSH.id, Key, Certificate, FIDO2"))
                 .on_click(cx.listener(|shell, _, _, cx| shell.toggle_credentials_menu(CredentialsMenu::Add, cx)));
             let menu = (open == Some(CredentialsMenu::Add)).then(|| {
                 list("credentials-add-menu")
-                    .child(menu_row("credentials-add-sshid".into(), "SSH.id — Passkeys for SSH", false, true))
-                    .child(menu_row("credentials-add-key".into(), "Key", false, false).on_click(cx.listener(|shell, _, _, cx| {
+                    .child(menu_row("credentials-add-sshid".into(), tr("SSH.id — Passkeys for SSH"), false, true))
+                    .child(menu_row("credentials-add-key".into(), tr("Key"), false, false).on_click(cx.listener(|shell, _, _, cx| {
                         shell.toggle_credentials_menu(CredentialsMenu::Keys, cx);
                     })))
-                    .child(menu_row("credentials-add-certificate".into(), "Certificate", false, false).on_click(cx.listener(|shell, _, _, cx| {
+                    .child(menu_row("credentials-add-certificate".into(), tr("Certificate"), false, false).on_click(cx.listener(|shell, _, _, cx| {
                         shell.toggle_credentials_menu(CredentialsMenu::Certificates, cx);
                     })))
                     .child(menu_row("credentials-add-fido2".into(), "FIDO2", false, true))
@@ -317,8 +318,8 @@ impl Shell {
         };
 
         vec![
-            credentials_picker(self.input(Field::Username, "Username", username, false, window, cx), suggestions, false, cx),
-            self.input(Field::Password, "Password", host.password.as_deref().unwrap_or(""), true, window, cx).into_any_element(),
+            credentials_picker(self.input(Field::Username, tr("Username"), username, false, window, cx), suggestions, false, cx),
+            self.input(Field::Password, tr("Password"), host.password.as_deref().unwrap_or(""), true, window, cx).into_any_element(),
             key_field,
         ]
     }
@@ -351,11 +352,11 @@ impl Shell {
     pub(super) fn render_backspace_row(&self, cx: &mut Context<Self>) -> Div {
         let Some(editor) = &self.host_editor else { return div() };
         let ctrl_h = editor.host.settings.ctrl_h_backspace;
-        let row = row("editor-backspace", "backspace", "Backspace".into(), Some(if ctrl_h { "Ctrl+H" } else { "Default" }), ctrl_h);
+        let row = row("editor-backspace", "backspace", tr("Backspace").into(), Some(if ctrl_h { "Ctrl+H" } else { tr("Default") }), ctrl_h);
         let menu = |cx: &mut Context<Self>| {
             list("editor-backspace-list")
-                .child(choice("backspace-ctrl-h".into(), "Backspace", Some("Ctrl+H"), ctrl_h).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.ctrl_h_backspace = true, cx))))
-                .child(choice("backspace-default".into(), "Backspace", Some("Default"), !ctrl_h).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.ctrl_h_backspace = false, cx))))
+                .child(choice("backspace-ctrl-h".into(), tr("Backspace"), Some("Ctrl+H"), ctrl_h).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.ctrl_h_backspace = true, cx))))
+                .child(choice("backspace-default".into(), tr("Backspace"), Some(tr("Default")), !ctrl_h).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.ctrl_h_backspace = false, cx))))
         };
         self.with_picker(Picker::Backspace, row, menu, cx)
     }
@@ -367,11 +368,11 @@ impl Shell {
         let mut rows = Vec::new();
 
         let agent = settings.agent_forwarding;
-        let agent_row = row("editor-agent", "agent", "Agent Forwarding".into(), Some(if agent { "Enabled" } else { "Disabled" }), agent);
+        let agent_row = row("editor-agent", "agent", tr("Agent Forwarding").into(), Some(if agent { tr("Enabled") } else { tr("Disabled") }), agent);
         let agent_menu = |cx: &mut Context<Self>| {
             list("editor-agent-list")
-                .child(choice("agent-on".into(), "Enabled", None, agent).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.agent_forwarding = true, cx))))
-                .child(choice("agent-off".into(), "Disabled", None, !agent).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.agent_forwarding = false, cx))))
+                .child(choice("agent-on".into(), tr("Enabled"), None, agent).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.agent_forwarding = true, cx))))
+                .child(choice("agent-off".into(), tr("Disabled"), None, !agent).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.agent_forwarding = false, cx))))
         };
         rows.push(self.with_picker(Picker::Agent, agent_row, agent_menu, cx).into_any_element());
 
@@ -380,7 +381,7 @@ impl Shell {
         let startup_row = row("editor-startup", "snippets", title, None, snippet.is_some());
         let chosen = settings.startup_snippet;
         let startup_menu = |cx: &mut Context<Self>| {
-            let mut menu = list("editor-startup-list").child(choice("startup-none".into(), "No startup command", None, chosen.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.startup_snippet = None, cx))));
+            let mut menu = list("editor-startup-list").child(choice("startup-none".into(), tr("No startup command"), None, chosen.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.startup_snippet = None, cx))));
             for snippet in &self.vault.snippets {
                 let id = snippet.id;
                 let label = if snippet.label.is_empty() { snippet.script.as_str() } else { snippet.label.as_str() };
@@ -392,7 +393,7 @@ impl Shell {
 
         // Legacy shows the variables as `NAME=value, …`.
         let env_text = settings.env.iter().map(|v| format!("{}={}", v.name, v.value)).collect::<Vec<_>>().join(", ");
-        let env_row = row("editor-env", "env", if env_text.is_empty() { "Environment Variable".into() } else { env_text }, None, !settings.env.is_empty()).on_click(cx.listener(|shell, _, window, cx| {
+        let env_row = row("editor-env", "env", if env_text.is_empty() { tr("Environment Variable").into() } else { env_text }, None, !settings.env.is_empty()).on_click(cx.listener(|shell, _, window, cx| {
             if let Some(editor) = &mut shell.host_editor {
                 if editor.host.settings.env.is_empty() {
                     editor.host.settings.env.push(EnvVar::default());
@@ -468,8 +469,8 @@ impl Shell {
                 cx.notify();
             }));
         let title = match panel {
-            Panel::Env => "Environment Variables",
-            Panel::Theme => "Select Color Theme",
+            Panel::Env => tr("Environment Variables"),
+            Panel::Theme => tr("Select Color Theme"),
         };
         let header = div().h(px(56.)).flex_none().px(px(15.)).flex().items_center().gap_2().border_b_1().border_color(rgb(theme::TITLE_BAR)).child(back).child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title));
         let body = match panel {
@@ -482,7 +483,7 @@ impl Shell {
     fn env_panel(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         let Some(editor) = &self.host_editor else { return div() };
         let host = [&editor.host.label, &editor.host.address].into_iter().find(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| "this host".into());
-        let mut panel = card("Variables").child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(format!("Set an environment variable for {host}")));
+        let mut panel = card("Variables").child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(termian_native::ui_format!("Set an environment variable for {host}", "Задайте переменную окружения для {host}")));
         for (i, var) in editor.host.settings.env.iter().enumerate() {
             let remove = div()
                 .id(SharedString::from(format!("env-remove-{i}")))
@@ -510,7 +511,7 @@ impl Shell {
                     .items_center()
                     .gap_2()
                     .child(self.input(Field::EnvName(i), "Variable", &var.name, false, window, cx).flex_1())
-                    .child(self.input(Field::EnvValue(i), "Value", &var.value, false, window, cx).flex_1())
+                    .child(self.input(Field::EnvValue(i), tr("Value"), &var.value, false, window, cx).flex_1())
                     .child(remove),
             );
         }
@@ -524,7 +525,7 @@ impl Shell {
                 .gap_2()
                 .text_color(rgb(theme::TEXT))
                 .child(svg().path(icon("plus")).size(px(12.)).text_color(rgb(theme::TEXT)))
-                .child("Add variable")
+                .child(tr("Add variable"))
                 .on_click(cx.listener(|shell, _, window, cx| {
                     if let Some(editor) = &mut shell.host_editor {
                         editor.host.settings.env.push(EnvVar::default());
@@ -560,7 +561,7 @@ impl Shell {
                     }
                 }))
         };
-        let mut list = div().flex().flex_col().gap_1().child(option("theme-global".into(), &global, format!("Default ({global})"), chosen.is_none(), None, cx));
+        let mut list = div().flex().flex_col().gap_1().child(option("theme-global".into(), &global, termian_native::ui_format!("Default ({global})", "По умолчанию ({global})"), chosen.is_none(), None, cx));
         for theme in themes() {
             list = list.child(option(format!("theme-{}", theme.name), &theme.name, theme.name.clone(), chosen.as_deref() == Some(theme.name.as_str()), Some(theme.name.clone()), cx));
         }

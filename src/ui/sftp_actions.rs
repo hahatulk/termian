@@ -3,6 +3,7 @@
 //! copying to the other panel (menu or drag and drop) with the "File already
 //! exists" question, and the transfer bar with its Transfers dialog.
 
+use termian_native::language::text as tr;
 use std::collections::VecDeque;
 
 use gpui::{
@@ -229,7 +230,7 @@ impl SftpState {
                 }
                 match event {
                     TransferEvent::CommitFailed { error } => self.actions.dialog = Some(Dialog::Error(error)),
-                    TransferEvent::Incomplete => self.actions.dialog = Some(Dialog::Error("Transfer was incomplete".into())),
+                    TransferEvent::Incomplete => self.actions.dialog = Some(Dialog::Error(tr("Transfer was incomplete").into())),
                     _ => {}
                 }
                 // Uploads land on their host; downloads on the disk panel.
@@ -321,19 +322,19 @@ impl Shell {
         let Some(panel) = self.sftp.panel(side) else { return Vec::new() };
         let selected = panel.selected.len();
         let can_copy = selected > 0 && self.can_copy_between();
-        let hidden = if panel.show_hidden { "Hide Hidden Files" } else { "Show Hidden Files" };
+        let hidden = if panel.show_hidden { tr("Hide Hidden Files") } else { tr("Show Hidden Files") };
         // (action, title, red, disabled) in the legacy order.
         let mut items = vec![
-            (Action::Open, "Open", false, selected == 0),
-            (Action::OpenWith, "Open with...", false, selected == 0),
-            (Action::CopyToTarget, "Copy to target directory", false, !can_copy),
-            (Action::Rename, "Rename", false, selected != 1),
-            (Action::Delete, "Delete", true, selected == 0),
-            (Action::Refresh, "Refresh", false, false),
-            (Action::NewFolder, "New Folder", false, false),
+            (Action::Open, tr("Open"), false, selected == 0),
+            (Action::OpenWith, tr("Open with..."), false, selected == 0),
+            (Action::CopyToTarget, tr("Copy to target directory"), false, !can_copy),
+            (Action::Rename, tr("Rename"), false, selected != 1),
+            (Action::Delete, tr("Delete"), true, selected == 0),
+            (Action::Refresh, tr("Refresh"), false, false),
+            (Action::NewFolder, tr("New Folder"), false, false),
             (Action::ToggleHidden, hidden, false, false),
-            (Action::EditPermissions, "Edit Permissions", false, selected != 1),
-            (Action::SelectAll, "Select All", false, false),
+            (Action::EditPermissions, tr("Edit Permissions"), false, selected != 1),
+            (Action::SelectAll, tr("Select All"), false, false),
         ];
         // Open works on one file: with folders or several rows it is not offered.
         if selected > 1 || panel.selected_entries().iter().any(|e| e.is_dir) {
@@ -344,7 +345,7 @@ impl Shell {
             items.retain(|(action, ..)| *action != Action::EditPermissions);
         }
         if self.sftp.is_host(side) {
-            items.push((Action::Close, "Close", true, false));
+            items.push((Action::Close, tr("Close"), true, false));
         }
         if kind == MenuKind::Context {
             items.retain(|(action, ..)| {
@@ -472,7 +473,7 @@ impl Shell {
             files: true,
             directories: false,
             multiple: false,
-            prompt: Some("Choose application".into()),
+            prompt: Some(tr("Choose application").into()),
         });
         cx.spawn_in(window, async move |this, cx| {
             let Ok(Ok(Some(paths))) = answer.await else { return };
@@ -851,7 +852,7 @@ impl Shell {
             .text_sm()
             .text_color(rgb(if open { theme::ACCENT } else { theme::TEXT }))
             .icon_feedback()
-            .child("Actions")
+            .child(tr("Actions"))
             .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
             .on_click(cx.listener(move |shell, event: &gpui::ClickEvent, _, cx| {
                 let at = event.position();
@@ -948,21 +949,21 @@ impl Shell {
             Dialog::Rename { side, from, input } => {
                 let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
                 let error = name_error(input, &taken, Some(from));
-                dialog::card("Rename", false, close, dialog::field("New filename *", input, error, &self.sftp_dialog_focus, focused, cx), vec![
-                    confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
+                dialog::card(tr("Rename"), false, close, dialog::field(tr("New filename *"), input, error, &self.sftp_dialog_focus, focused, cx), vec![
+                    confirm("dialog-confirm", tr("Confirm"), Kind::Accent, error.is_some()).into_any_element(),
                 ])
             }
             Dialog::NewFolder { side, input } => {
                 let taken = self.sftp.panel(*side).map(|p| p.names()).unwrap_or_default();
                 let error = name_error(input, &taken, None);
-                dialog::card("New folder", false, close, dialog::field("Foldername *", input, error, &self.sftp_dialog_focus, focused, cx), vec![
-                    confirm("dialog-confirm", "Confirm", Kind::Accent, error.is_some()).into_any_element(),
+                dialog::card(tr("New folder"), false, close, dialog::field(tr("Foldername *"), input, error, &self.sftp_dialog_focus, focused, cx), vec![
+                    confirm("dialog-confirm", tr("Confirm"), Kind::Accent, error.is_some()).into_any_element(),
                 ])
             }
             Dialog::Delete { items, .. } => {
                 let names = items.iter().map(|e| e.name.as_str()).collect::<Vec<_>>().join("\n");
                 dialog::card(&delete_title(items), false, close, dialog::text(&names), vec![
-                    confirm("dialog-confirm", "Delete", Kind::Error, false).into_any_element(),
+                    confirm("dialog-confirm", tr("Delete"), Kind::Error, false).into_any_element(),
                 ])
             }
             Dialog::Permissions { side, entry, mode } => self.render_permissions(*side, entry, *mode, close, cx),
@@ -974,19 +975,19 @@ impl Shell {
                     shell.control_transfer(conn, id, control);
                     cx.notify();
                 });
-                dialog::card("Error during transfer", true, close, dialog::text(&format!("{error} What do you want to do?")), vec![
-                    dialog::button("transfer-cancel", "Cancel transfer", Kind::Error, false).on_click(send(Control::Cancel)).into_any_element(),
+                dialog::card(tr("Error during transfer"), true, close, dialog::text(&format!("{error} What do you want to do?")), vec![
+                    dialog::button("transfer-cancel", tr("Cancel transfer"), Kind::Error, false).on_click(send(Control::Cancel)).into_any_element(),
                     div().flex_1().into_any_element(),
-                    dialog::button("transfer-skip-all", "Skip all", Kind::Text, false).on_click(send(Control::SkipAll)).into_any_element(),
-                    dialog::button("transfer-skip", "Skip", Kind::Text, false).on_click(send(Control::Skip)).into_any_element(),
-                    dialog::button("transfer-retry", "Retry", Kind::Accent, false).on_click(send(Control::Retry)).into_any_element(),
+                    dialog::button("transfer-skip-all", tr("Skip all"), Kind::Text, false).on_click(send(Control::SkipAll)).into_any_element(),
+                    dialog::button("transfer-skip", tr("Skip"), Kind::Text, false).on_click(send(Control::Skip)).into_any_element(),
+                    dialog::button("transfer-retry", tr("Retry"), Kind::Accent, false).on_click(send(Control::Retry)).into_any_element(),
                 ])
             }
             Dialog::Transfers => {
                 let rows = self.sftp.actions.transfers.iter().rev().map(|row| self.render_transfer(row, true, cx));
                 let body = div().id("transfer-list").max_h(window.viewport_size().height * 0.5).overflow_y_scroll().flex().flex_col().gap(px(6.)).children(rows);
-                dialog::card("Transfers", false, close, div().child(body), vec![
-                    dialog::button("transfers-discard", "Discard all", Kind::Error, false)
+                dialog::card(tr("Transfers"), false, close, div().child(body), vec![
+                    dialog::button("transfers-discard", tr("Discard all"), Kind::Error, false)
                         .on_click(cx.listener(|shell, _, _, cx| {
                             let ids: Vec<_> = shell.sftp.actions.transfers.iter().map(|r| (r.conn, r.id)).collect();
                             for (conn, id) in ids {
@@ -997,10 +998,10 @@ impl Shell {
                         }))
                         .into_any_element(),
                     div().flex_1().into_any_element(),
-                    dialog::button("transfers-close", "Close", Kind::Accent, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
+                    dialog::button("transfers-close", tr("Close"), Kind::Accent, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
                 ])
             }
-            Dialog::Error(error) => dialog::card("Error", false, close, dialog::text(error), Vec::new()),
+            Dialog::Error(error) => dialog::card(tr("Error"), false, close, dialog::text(error), Vec::new()),
             Dialog::EditingInProgress(side) => {
                 let count = self.sftp.actions.edits_of(*side).len();
                 let files = if count == 1 { "1 file".to_owned() } else { format!("{count} files") };
@@ -1010,7 +1011,7 @@ impl Shell {
                     if count == 1 { "is" } else { "are" },
                     if count == 1 { "the file" } else { "all files" },
                 );
-                dialog::card("File editing is in progress", false, close, dialog::text(&text), vec![
+                dialog::card(tr("File editing is in progress"), false, close, dialog::text(&text), vec![
                     confirm("dialog-confirm", &format!("Discard {files}"), Kind::Error, false).into_any_element(),
                 ])
             }
@@ -1032,10 +1033,10 @@ impl Shell {
         let mut grid = div().mb(px(20.)).flex().flex_col().child(
             row()
                 .pt_0()
-                .child(name("File Access", true))
-                .children(["Read", "Write", "Execute"].map(|title| column().font_weight(FontWeight::BOLD).child(title))),
+                .child(name(tr("File Access"), true))
+                .children([tr("Read"), tr("Write"), tr("Execute")].map(|title| column().font_weight(FontWeight::BOLD).child(title))),
         );
-        for (who, bits) in ["Owner", "Groups", "Others"].into_iter().zip(PERMISSION_BITS) {
+        for (who, bits) in [tr("Owner"), tr("Groups"), tr("Others")].into_iter().zip(PERMISSION_BITS) {
             grid = grid.child(row().when(who == "Others", |d| d.border_b_0()).child(name(who, false)).children(bits.map(|bit| {
                 column().child(dialog::checkbox(&format!("perm-{bit:o}"), "", mode & bit != 0).on_click(cx.listener(move |shell, _, _, cx| {
                     if let Some(Dialog::Permissions { mode, .. }) = &mut shell.sftp.actions.dialog {
@@ -1049,12 +1050,12 @@ impl Shell {
         let ownership = div()
             .flex()
             .flex_col()
-            .child(row().pt_0().font_weight(FontWeight::BOLD).child("Ownership"))
-            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child("User").child(user))
-            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child("Group").child(group));
+            .child(row().pt_0().font_weight(FontWeight::BOLD).child(tr("Ownership")))
+            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child(tr("User")).child(user))
+            .child(row().justify_between().text_color(rgb(theme::TEXT_MUTED)).child(tr("Group")).child(group));
         let body = div().flex().flex_col().child(div().mb(px(20.)).child(path)).child(grid).child(ownership);
-        dialog::card("Edit permissions", false, close, body, vec![
-            dialog::button("dialog-confirm", "Save", Kind::Accent, false)
+        dialog::card(tr("Edit permissions"), false, close, body, vec![
+            dialog::button("dialog-confirm", tr("Save"), Kind::Accent, false)
                 .on_click(cx.listener(|shell, _, window, cx| shell.confirm_dialog(window, cx)))
                 .into_any_element(),
         ])
@@ -1062,7 +1063,7 @@ impl Shell {
 
     fn render_conflict(&self, close: Stateful<Div>, cx: &mut Context<Self>) -> Div {
         let Some(Resolving { question: Some(question), apply_all, .. }) = self.sftp.actions.resolving.front() else {
-            return dialog::card("File already exists", false, close, div(), Vec::new());
+            return dialog::card(tr("File already exists"), false, close, div(), Vec::new());
         };
         let answer = |conflict: Conflict| cx.listener(move |shell: &mut Shell, _, window, cx| shell.answer_conflict(conflict, window, cx));
         let mut body = dialog::text(&format!(
@@ -1070,7 +1071,7 @@ impl Shell {
             question.name
         ));
         if !question.single {
-            body = div().child(body).child(div().mt(px(25.)).child(dialog::checkbox("apply-all", "Apply to All", *apply_all).on_click(
+            body = div().child(body).child(div().mt(px(25.)).child(dialog::checkbox("apply-all", tr("Apply to All"), *apply_all).on_click(
                 cx.listener(|shell, _, _, cx| {
                     if let Some(front) = shell.sftp.actions.resolving.front_mut() {
                         front.apply_all = !front.apply_all;
@@ -1080,16 +1081,16 @@ impl Shell {
             )));
         }
         let mut buttons = vec![
-            dialog::button("conflict-stop", "Stop", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
+            dialog::button("conflict-stop", tr("Stop"), Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| shell.close_dialog(cx))).into_any_element(),
             div().flex_1().into_any_element(),
-            dialog::button("conflict-skip", "Skip", Kind::Text, false).on_click(answer(Conflict::Skip)).into_any_element(),
-            dialog::button("conflict-replace", "Replace", Kind::Regular, false).on_click(answer(Conflict::Replace)).into_any_element(),
-            dialog::button("conflict-duplicate", "Duplicate", Kind::Accent, false).on_click(answer(Conflict::Duplicate)).into_any_element(),
+            dialog::button("conflict-skip", tr("Skip"), Kind::Text, false).on_click(answer(Conflict::Skip)).into_any_element(),
+            dialog::button("conflict-replace", tr("Replace"), Kind::Regular, false).on_click(answer(Conflict::Replace)).into_any_element(),
+            dialog::button("conflict-duplicate", tr("Duplicate"), Kind::Accent, false).on_click(answer(Conflict::Duplicate)).into_any_element(),
         ];
         if question.is_dir {
-            buttons.push(dialog::button("conflict-merge", "Merge", Kind::Regular, false).on_click(answer(Conflict::Merge)).into_any_element());
+            buttons.push(dialog::button("conflict-merge", tr("Merge"), Kind::Regular, false).on_click(answer(Conflict::Merge)).into_any_element());
         }
-        dialog::card("File already exists", false, close, body, buttons)
+        dialog::card(tr("File already exists"), false, close, body, buttons)
     }
 
     /// One transfer: icon, path and numbers, then the bar or the failure, Retry and Discard.
@@ -1122,7 +1123,7 @@ impl Shell {
                         .gap_1()
                         .text_color(rgb(theme::ERROR))
                         .child(svg().path(icon("alert")).size(px(14.)).text_color(rgb(theme::ERROR)))
-                        .child(if row.direction == Direction::Upload { "Upload failed" } else { "Download failed" })
+                        .child(if row.direction == Direction::Upload { tr("Upload failed") } else { tr("Download failed") })
                         .tooltip({
                             let error = error.clone();
                             move |_, cx| cx.new(|_| DragPreview(error.clone())).into()
@@ -1132,7 +1133,7 @@ impl Shell {
                             cx.notify();
                         })),
                 )
-                .child(link("retry", "Retry").on_click(cx.listener(move |shell, _, _, cx| {
+                .child(link("retry", tr("Retry")).on_click(cx.listener(move |shell, _, _, cx| {
                     shell.control_transfer(conn, id, Control::Retry);
                     cx.notify();
                 }))),
@@ -1168,7 +1169,7 @@ impl Shell {
                     }),
             )
             .child(end)
-            .child(link("discard", "Discard").on_click(cx.listener(move |shell, _, _, cx| {
+            .child(link("discard", tr("Discard")).on_click(cx.listener(move |shell, _, _, cx| {
                 shell.control_transfer(conn, id, Control::Cancel);
                 cx.notify();
             })))
@@ -1207,11 +1208,11 @@ impl Shell {
                 .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(file.name()))
                 .child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(format_size(file.size())))
                 .child(div().flex_none().text_color(rgb(theme::TEXT_MUTED)).child(file.modified().map(format_time).unwrap_or_default()))
-                .child(link(format!("edit-upload-{id}"), "UPLOAD", true).on_click(cx.listener(move |shell, _, _, cx| {
+                .child(link(format!("edit-upload-{id}"), tr("UPLOAD"), true).on_click(cx.listener(move |shell, _, _, cx| {
                     shell.upload_edit(id);
                     cx.notify();
                 })))
-                .child(link(format!("edit-discard-{id}"), "Discard", false).on_click(cx.listener(move |shell, _, _, cx| {
+                .child(link(format!("edit-discard-{id}"), tr("Discard"), false).on_click(cx.listener(move |shell, _, _, cx| {
                     shell.sftp.actions.edits.discard(id);
                     cx.notify();
                 })))
@@ -1228,13 +1229,13 @@ impl Shell {
             .text_xs()
             .text_color(rgb(theme::TEXT))
             .child(div().flex_1().child(format!("{} opened files were changed", changed.len())))
-            .child(link("edits-upload-all".into(), "UPLOAD ALL", true).on_click(cx.listener(move |shell, _, _, cx| {
+            .child(link("edits-upload-all".into(), tr("UPLOAD ALL"), true).on_click(cx.listener(move |shell, _, _, cx| {
                 for id in &ids {
                     shell.upload_edit(*id);
                 }
                 cx.notify();
             })))
-            .child(link("edits-discard-all".into(), "DISCARD ALL", false).on_click(cx.listener(|shell, _, _, cx| {
+            .child(link("edits-discard-all".into(), tr("DISCARD ALL"), false).on_click(cx.listener(|shell, _, _, cx| {
                 for id in shell.sftp.actions.edits.changed().iter().map(|f| f.id).collect::<Vec<_>>() {
                     shell.sftp.actions.edits.discard(id);
                 }
@@ -1262,7 +1263,7 @@ impl Shell {
     pub fn render_transfer_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
         let newest = self.sftp.actions.transfers.last()?;
         let count = self.sftp.actions.transfers.len();
-        let details = if count > 1 { format!("All transfers ({count})") } else { "Details".to_owned() };
+        let details = if count > 1 { format!("All transfers ({count})") } else { tr("Details").to_owned() };
         Some(
             div()
                 .flex_none()

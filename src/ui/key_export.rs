@@ -4,6 +4,7 @@
 //! needs), runs the script and, on success, shows "Exported" and makes the
 //! key the host's key.
 
+use termian_native::language::text as tr;
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -73,6 +74,7 @@ impl Shell {
         let Ok(public_key) = key_export::public_key(key) else { return };
         let script = key_export::prepare(&form.script, &form.location, &form.filename, &key.label, &public_key);
         let mut target = SshTarget::for_host(host, &self.vault);
+        target.known_hosts = self.store.known_hosts_path();
         target.options = SshOptions::from_vault(&self.vault);
         let mut export = KeyExport::start(target, script);
         form.generation += 1;
@@ -220,7 +222,7 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Key Export"))
+            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Key Export")))
             .child(dialog::collapse_button("export-close").on_click(cx.listener(move |shell, _, _, cx| close(shell, cx))));
         let key_row = div()
             .p(px(12.))
@@ -230,7 +232,7 @@ impl Shell {
             .rounded_lg()
             .bg(rgb(theme::SURFACE))
             .child(svg().path(icon("keychain")).size(px(20.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(div().flex().flex_col().child(div().text_sm().text_color(rgb(theme::TEXT)).child(key.label.clone())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(format!("Type {}", key.kind))));
+            .child(div().flex().flex_col().child(div().text_sm().text_color(rgb(theme::TEXT)).child(key.label.clone())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(termian_native::ui_format!("Type {}", "Тип {}", key.kind))));
 
         let body = match &public_key {
             Err(error) => div().flex().flex_col().gap(px(10.)).p(px(15.)).rounded_lg().border_1().border_color(rgb(theme::ERROR)).child(div().text_sm().text_color(rgb(theme::ERROR)).child(error.clone())).child(key_row),
@@ -240,7 +242,7 @@ impl Shell {
                     .surface_feedback(theme::INPUT)
                     .border_dashed()
                     .child(div().flex_1().text_color(rgb(if host.is_some() { theme::TEXT } else { theme::TEXT_MUTED })).child(host.map(|h| h.display_label().to_owned()).unwrap_or_default()))
-                    .child(div().text_xs().text_color(rgb(theme::ACCENT)).child("Select Host"))
+                    .child(div().text_xs().text_color(rgb(theme::ACCENT)).child(tr("Select Host")))
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(form) = &mut shell.key_export {
                             form.hosts_open = !form.hosts_open;
@@ -268,9 +270,9 @@ impl Shell {
                     .gap(px(10.))
                     .rounded_lg()
                     .bg(rgb(theme::SURFACE))
-                    .child(div().flex().flex_col().gap_1().child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Export to *")).child(picker).children(hosts))
-                    .child(self.export_input(Field::Location, "Location – $1 *", window, cx))
-                    .child(self.export_input(Field::Filename, "Filename – $2 *", window, cx))
+                    .child(div().flex().flex_col().gap_1().child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Export to *"))).child(picker).children(hosts))
+                    .child(self.export_input(Field::Location, tr("Location – $1 *"), window, cx))
+                    .child(self.export_input(Field::Filename, tr("Filename – $2 *"), window, cx))
                     .child(
                         div()
                             .mt(px(5.))
@@ -280,7 +282,7 @@ impl Shell {
                             .bg(rgb(theme::INPUT))
                             .text_xs()
                             .text_color(rgb(theme::TEXT))
-                            .child("Key export currently supports only UNIX systems. Use Advanced section to customize the export script."),
+                            .child(tr("Key export currently supports only UNIX systems. Use Advanced section to customize the export script.")),
                     );
                 let advanced = div()
                     .id("export-advanced")
@@ -292,7 +294,7 @@ impl Shell {
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
                     .child(svg().path(icon("caret_down")).size(px(10.)).when(!form.advanced, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(-0.25)))).text_color(rgb(theme::TEXT_MUTED)))
-                    .child("Advanced")
+                    .child(tr("Advanced"))
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(form) = &mut shell.key_export {
                             form.advanced = !form.advanced;
@@ -306,12 +308,12 @@ impl Shell {
                     .child(key_row)
                     .child(fields)
                     .child(advanced)
-                    .when(form.advanced, |d| d.child(self.export_input(Field::Script, "Script *", window, cx)))
+                    .when(form.advanced, |d| d.child(self.export_input(Field::Script, tr("Script *"), window, cx)))
             }
         };
         let valid = public_key.is_ok() && host.is_some() && !form.location.trim().is_empty() && !form.filename.trim().is_empty() && !form.script.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).flex().justify_end().child(
-            dialog::button("export-start", "Export and Attach", Kind::Accent, !valid).when(valid, |b| b.on_click(cx.listener(|shell, _, window, cx| shell.start_key_export(window, cx)))),
+            dialog::button("export-start", tr("Export and Attach"), Kind::Accent, !valid).when(valid, |b| b.on_click(cx.listener(|shell, _, window, cx| shell.start_key_export(window, cx)))),
         );
 
         let content: AnyElement = match &form.running {

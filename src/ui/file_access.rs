@@ -2,6 +2,7 @@
 //! folders the SFTP Local panel may need and their access, refreshed every
 //! two seconds while open, with a link to System Settings for a denied one.
 
+use termian_native::language::text as tr;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
@@ -43,10 +44,12 @@ pub fn open(slot: &Rc<RefCell<Option<WindowHandle<FileAccessWindow>>>>, cx: &mut
     let bounds = Bounds::centered(None, size(px(560.), px(520.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions { title: Some("Доступ к файлам".into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
+        titlebar: Some(TitlebarOptions { title: Some(tr("Доступ к файлам").into()), appears_transparent: cfg!(target_os = "macos"), ..Default::default() }),
         ..Default::default()
     };
     let opened = cx.open_window(options, |window, cx| {
+        #[cfg(windows)]
+        super::assets::set_window_icon(window);
         cx.new(|cx| {
             let focus = cx.focus_handle();
             window.focus(&focus);
@@ -77,13 +80,13 @@ impl Render for FileAccessWindow {
             };
             let url = folder.settings_url;
             let side = if folder.status == Status::Denied {
-                action_button(format!("file-access-open-{index}"), "Открыть настройки", false, false)
+                action_button(format!("file-access-open-{index}"), tr("Открыть настройки"), false, false)
                     .on_click(move |_, _, cx| cx.open_url(url))
                     .into_any_element()
             } else {
                 div().text_size(px(12.)).text_color(rgb(tone)).child(folder.status.label()).into_any_element()
             };
-            let name = if folder.required { folder.title.to_owned() } else { format!("{} (необязательно)", folder.title) };
+            let name = if folder.required { folder.title.to_owned() } else { termian_native::ui_format!("{} (optional)", "{} (необязательно)", folder.title) };
             div()
                 .flex()
                 .items_center()
@@ -119,7 +122,7 @@ impl Render for FileAccessWindow {
             .px(px(24.))
             .pt(px(if cfg!(target_os = "macos") { 40. } else { 22. }))
             .pb(px(22.))
-            .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child("Доступ к файлам"))
+            .child(div().text_size(px(17.)).font_weight(FontWeight::SEMIBOLD).child(tr("Доступ к файлам")))
             .child(div().mt(px(6.)).mb(px(14.)).text_size(px(12.)).line_height(px(18.)).text_color(rgb(MUTED)).child(
                 "Панель Local в SFTP работает с файлами этого Mac. macOS один раз спрашивает разрешение на Рабочий стол, Документы и Загрузки. Если доступ был отклонён, включите termian в Системные настройки → Конфиденциальность и безопасность → Файлы и папки. Статус ниже обновляется автоматически.",
             ))
@@ -130,8 +133,8 @@ impl Render for FileAccessWindow {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(format!("Обновлено: {}", self.updated)))
-                    .child(action_button("file-access-close", "Закрыть", false, false).on_click(|_, window, _| window.remove_window())),
+                    .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(termian_native::ui_format!("Updated: {}", "Обновлено: {}", self.updated)))
+                    .child(action_button("file-access-close", tr("Закрыть"), false, false).on_click(|_, window, _| window.remove_window())),
             )
     }
 }

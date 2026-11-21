@@ -1,13 +1,17 @@
 //! A terminal tab: draws the emulator grid and forwards keys to the session.
 
+use termian_native::language::text as tr;
+use alacritty_terminal::index::Side;
 use futures::StreamExt;
 use gpui::{
-    div, font, prelude::*, px, rgb, App, ClipboardItem, Context, FocusHandle, Focusable, KeyDownEvent, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, Window,
+    canvas, div, fill, font, outline, point, prelude::*, px, rgb, size, App, BorderStyle, Bounds, ClipboardItem,
+    Context, DispatchPhase, FocusHandle, Focusable, Font, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, TextRun, Window,
 };
+use std::{cell::Cell, rc::Rc};
 use termian_native::login::{Answer, LoginEvent, LoginState, Stage};
 use termian_native::session::{self, Session, SessionEvent, SshTarget};
-use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Terminal};
+use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Run, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::pointer::PointerFeedback;
@@ -68,6 +72,69 @@ struct Integration {
 
 impl gpui::EventEmitter<TerminalEvent> for TerminalView {}
 
+#[derive(Clone, Copy)]
+struct CellGrid {
+    origin: Point<Pixels>,
+    cell_width: Pixels,
+    line_height: Pixels,
+}
+
+impl CellGrid {
+    fn span(self, row: usize, column: usize, columns: usize) -> Bounds<Pixels> {
+        Bounds::new(
+            self.origin + point(self.cell_width * column, self.line_height * row),
+            size(self.cell_width * columns, self.line_height),
+        )
+    }
+
+    fn hit(self, position: Point<Pixels>, rows: usize, columns: usize) -> (usize, usize, Side) {
+        let local = position - self.origin;
+        let row = ((local.y / self.line_height).floor() as usize).min(rows - 1);
+        let x = local.x / self.cell_width;
+        let column = (x.floor() as usize).min(columns - 1);
+        let side = if x - column as f32 >= 0.5 { Side::Right } else { Side::Left };
+        (row, column, side)
+    }
+}
+
+fn paint_run(run: &Run, origin: Point<Pixels>, grid: CellGrid, size: Pixels, face: &Font, window: &mut Window) {
+    let text = run.text.trim_end_matches(' ');
+    if text.is_empty() {
+        return;
+    }
+    let color = rgb(run.fg).into();
+    let layout = window.text_system().shape_line(
+        SharedString::from(text.to_owned()), size,
+        &[TextRun { len: text.len(), font: face.clone(), color, background_color: None, underline: None, strikethrough: None }],
+        None,
+    );
+    let baseline = origin.y + (grid.line_height + layout.ascent - layout.descent) / 2.;
+    let offsets = (!text.is_ascii()).then(|| text.char_indices().map(|(offset, _)| offset).collect::<Vec<_>>());
+    let mut cluster = None;
+    for shaped in &layout.runs {
+        for glyph in &shaped.glyphs {
+            let (offset, cluster_x) = *cluster.get_or_insert((glyph.index, glyph.position.x));
+            let cluster_x = if offset == glyph.index {
+                cluster_x
+            } else {
+                cluster = Some((glyph.index, glyph.position.x));
+                glyph.position.x
+            };
+            let column = offsets.as_ref().map_or(Some(glyph.index), |offsets| offsets.binary_search(&glyph.index).ok());
+            let Some(column) = column else { continue };
+            let origin = point(
+                origin.x + grid.cell_width * (column * run.cell_columns) + (glyph.position.x - cluster_x),
+                baseline,
+            );
+            if glyph.is_emoji {
+                let _ = window.paint_emoji(origin, shaped.font_id, glyph.id, size);
+            } else {
+                let _ = window.paint_glyph(origin, shaped.font_id, glyph.id, size, color);
+            }
+        }
+    }
+}
+
 const PADDING: f32 = 10.;
 /// Line height per pixel of font size (18 px at the old fixed 13 px).
 const LINE_SPACING: f32 = 1.38;
@@ -78,7 +145,9 @@ pub struct TerminalView {
     focus: FocusHandle,
     closed: bool,
     cell_width: Option<f32>,
+    grid_origin: Rc<Cell<Point<Pixels>>>,
     selecting: bool,
+    copied: Option<gpui::Task<()>>,
     /// SSH tabs show the connection screen until the shell is ready.
     connection: Option<Connection>,
     login: Option<LoginState>,
@@ -108,9 +177,7 @@ pub struct TerminalView {
     search: Option<String>,
     search_found: bool,
     search_focus: FocusHandle,
-    /// The pane's place in the window (x, y, width, height); the whole area
-    /// under the tab bar until the window sets it.
-    area: Option<(f32, f32, f32, f32)>,
+    area: Option<(f32, f32)>,
     /// The Serial tab's form, until it connects.
     serial_form: Option<serial_form::SerialForm>,
     integration: Integration,
@@ -170,7 +237,9 @@ impl TerminalView {
             focus,
             closed: false,
             cell_width: None,
+            grid_origin: Rc::default(),
             selecting: false,
+            copied: None,
             login: connection.as_ref().map(|_| LoginState::default()),
             connected: None,
             ctrl_h_backspace: false,
@@ -567,7 +636,7 @@ impl TerminalView {
                 .font_family(".SystemUIFont")
                 .text_xs()
                 .child(gpui::svg().path(icon("search")).size(px(12.)).text_color(rgb(if focused || !empty { termian_native::theme::TEXT } else { termian_native::theme::TEXT_MUTED })))
-                .child(div().flex_1().min_w_0().child(text_input::text("terminal-search", query, "Search terminal", focused, Mode::Line, cx)))
+                .child(div().flex_1().min_w_0().child(text_input::text("terminal-search", query, tr("Search terminal"), focused, Mode::Line, cx)))
                 .child(arrow("terminal-search-prev", true).on_click(cx.listener(|view, _, _, cx| view.step_search(true, cx))))
                 .child(arrow("terminal-search-next", false).on_click(cx.listener(|view, _, _, cx| view.step_search(false, cx))));
         Some(text_input::field(field, "terminal-search", Mode::Line, |view, window, _| window.focus(&view.search_focus), cx))
@@ -618,40 +687,53 @@ impl TerminalView {
         }
     }
 
-    /// Grid cell under a window position.
-    fn cell_at(&self, position: Point<Pixels>) -> (usize, usize) {
-        let (left, top) = self.area.map_or((0., TOP_INSET), |(x, y, _, _)| (x, y));
-        let x = (f32::from(position.x) - left - PADDING).max(0.);
-        let y = (f32::from(position.y) - top - PADDING).max(0.);
-        ((y / self.line_height()) as usize, (x / self.cell_width.unwrap_or(8.)).round() as usize)
+    fn selection_cell(&self, position: Point<Pixels>) -> (usize, usize, Side) {
+        let (columns, rows) = self.terminal.size();
+        CellGrid {
+            origin: self.grid_origin.get(),
+            cell_width: px(self.cell_width.unwrap_or(8.)),
+            line_height: px(self.line_height()),
+        }.hit(position, rows, columns)
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         window.focus(&self.focus);
-        let (row, column) = self.cell_at(event.position);
-        self.terminal.start_selection(row, column, event.click_count == 2);
-        if event.click_count == 2 {
-            self.terminal.extend_selection(row, column);
-        }
+        let (row, column, side) = self.selection_cell(event.position);
+        self.terminal.start_selection(row, column, side, event.click_count == 2);
         self.selecting = true;
         cx.notify();
     }
 
+    fn extend_selection_at(&mut self, position: Point<Pixels>) {
+        let (row, column, side) = self.selection_cell(position);
+        self.terminal.extend_selection(row, column, side);
+    }
+
     fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         if self.selecting && event.pressed_button == Some(MouseButton::Left) {
-            let (row, column) = self.cell_at(event.position);
-            self.terminal.extend_selection(row, column);
+            self.extend_selection_at(event.position);
             cx.notify();
         }
     }
 
-    fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.selecting = false;
-        match self.terminal.selection_text() {
-            None => self.terminal.clear_selection(),
-            // «Select text to copy & Right click to paste».
-            Some(text) if self.settings.copy_on_select => cx.write_to_clipboard(ClipboardItem::new_string(text)),
-            Some(_) => {}
+    fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.button != MouseButton::Left || !std::mem::take(&mut self.selecting) {
+            return;
+        }
+        self.extend_selection_at(event.position);
+        if let Some(text) = self.terminal.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.copied = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(std::time::Duration::from_millis(1100)).await;
+                let _ = this.update(cx, |view, cx| {
+                    if let Some(task) = view.copied.take() {
+                        task.detach();
+                    }
+                    cx.notify();
+                });
+            }));
+        } else {
+            self.terminal.clear_selection();
         }
         cx.notify();
     }
@@ -670,9 +752,8 @@ impl TerminalView {
         cx.stop_propagation();
     }
 
-    /// The pane's place in the window; the grid refits when it renders.
-    pub fn set_area(&mut self, x: f32, y: f32, width: f32, height: f32) {
-        self.area = Some((x, y, width, height));
+    pub fn set_area(&mut self, width: f32, height: f32) {
+        self.area = Some((width, height));
     }
 
     /// Input from another pane while broadcasting, as if typed here.
@@ -1066,7 +1147,7 @@ impl Render for TerminalView {
             return form.into_any_element();
         }
         let viewport = window.viewport_size();
-        let (width, height) = self.area.map_or((viewport.width, viewport.height - px(TOP_INSET)), |(_, _, w, h)| (px(w), px(h)));
+        let (width, height) = self.area.map_or((viewport.width, viewport.height - px(TOP_INSET)), |(w, h)| (px(w), px(h)));
         self.fit(width, height, window);
         let snapshot = self.frozen.clone().unwrap_or_else(|| self.terminal.snapshot());
         let focused = self.focus.is_focused(window);
@@ -1075,30 +1156,49 @@ impl Render for TerminalView {
         let ((family, weight), (bold_family, bold_weight)) = self.faces();
         let look = self.terminal.look().clone();
 
-        let lines = snapshot.lines.iter().map(|runs| {
-            let mut line = div().h(px(line_height)).flex().whitespace_nowrap();
-            for run in runs {
-                line = line.child(
-                    div()
-                        .text_color(rgb(run.fg))
-                        .when(run.bg != look.background, |d| d.bg(rgb(run.bg)))
-                        .when(run.bold, |d| d.font_family(bold_family.clone()).font_weight(gpui::FontWeight(bold_weight)))
-                        .child(SharedString::from(run.text.clone())),
-                );
-            }
-            line
-        });
-
-        let cursor = snapshot.cursor.filter(|_| !self.closed).map(|(row, column)| {
-            div()
-                .absolute()
-                .left(px(PADDING + column as f32 * cell_width))
-                .top(px(PADDING + row as f32 * line_height))
-                .w(px(cell_width))
-                .h(px(line_height))
-                .when(focused, |d| d.bg(rgb(look.cursor)).opacity(0.7))
-                .when(!focused, |d| d.border_1().border_color(rgb(look.cursor)))
-        });
+        let terminal_cursor = snapshot.cursor.filter(|_| !self.closed);
+        let font_size = px(self.font_size());
+        let regular = Font { weight: gpui::FontWeight(weight), ..font(family.clone()) };
+        let bold = Font { weight: gpui::FontWeight(bold_weight), ..font(bold_family) };
+        let grid_origin = self.grid_origin.clone();
+        let drag = cx.listener(Self::on_mouse_move);
+        let background = look.background;
+        let cursor_color: gpui::Hsla = rgb(look.cursor).into();
+        let grid = canvas(
+            move |bounds, _, _| grid_origin.set(bounds.origin),
+            move |bounds, (), window, _| {
+                let grid = CellGrid { origin: bounds.origin, cell_width: px(cell_width), line_height: px(line_height) };
+                for (row, runs) in snapshot.lines.iter().enumerate() {
+                    let mut column = 0;
+                    for run in runs {
+                        let span = grid.span(row, column, run.columns);
+                        if run.bg != background {
+                            window.paint_quad(fill(span, rgb(run.bg)));
+                        }
+                        column += run.columns;
+                    }
+                    let mut column = 0;
+                    for run in runs {
+                        let face = if run.bold { &bold } else { &regular };
+                        paint_run(run, grid.span(row, column, run.columns).origin, grid, font_size, face, window);
+                        column += run.columns;
+                    }
+                }
+                if let Some((row, column)) = terminal_cursor {
+                    let bounds = grid.span(row, column, 1);
+                    window.paint_quad(if focused {
+                        fill(bounds, cursor_color.opacity(0.7))
+                    } else {
+                        outline(bounds, cursor_color, BorderStyle::default())
+                    });
+                }
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture && event.pressed_button == Some(MouseButton::Left) {
+                        drag(event, window, cx);
+                    }
+                });
+            },
+        ).size_full();
 
         div()
             .id("terminal")
@@ -1129,8 +1229,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(|view, _: &OpenTerminalSearch, window, cx| view.open_search(window, cx)))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+            .capture_any_mouse_up(cx.listener(Self::on_mouse_up))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
             .relative()
             .size_full()
@@ -1141,15 +1240,37 @@ impl Render for TerminalView {
             .font_weight(gpui::FontWeight(weight))
             .text_size(px(self.font_size()))
             .line_height(px(line_height))
-            .children(lines)
-            .children(cursor)
-            .children(self.render_autocomplete(snapshot.cursor.filter(|_| !self.closed && focused), cell_width, line_height, cx))
+            .child(grid)
+            .children(self.render_autocomplete(terminal_cursor.filter(|_| focused), cell_width, line_height, cx))
             .children(self.render_search(window, cx))
+            .when(self.copied.is_some(), |d| d.child(super::motion::toast(
+                div().absolute().right(px(12.)).bottom(px(12.)).px_3().py_1()
+                    .rounded_md().bg(rgb(termian_native::theme::SURFACE))
+                    .text_size(px(12.)).text_color(rgb(termian_native::theme::TEXT))
+                    .child(tr("Copied!")),
+            )))
             .children(self.connected.and_then(|(_, key)| {
                 let connection = self.connection.as_ref()?;
                 Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), key))
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_uses_painted_rows_and_cell_halves() {
+        let grid = CellGrid { origin: point(px(317.5), px(82.25)), cell_width: px(8.4), line_height: px(19.) };
+        let span = grid.span(2, 41, 2);
+        assert_eq!(span.size, size(px(16.8), px(19.)));
+        assert_eq!(grid.hit(span.origin + point(px(3.), px(1.)), 8, 80), (2, 41, Side::Left));
+        assert_eq!(grid.hit(span.origin + point(px(6.), px(18.)), 8, 80), (2, 41, Side::Right));
+        assert_eq!(grid.hit(span.origin + point(px(10.), px(1.)), 8, 80), (2, 42, Side::Left));
+        assert_eq!(grid.hit(point(px(200.), px(10.)), 8, 80), (0, 0, Side::Left));
+        assert_eq!(grid.hit(point(px(1200.), px(500.)), 8, 80), (7, 79, Side::Right));
     }
 }
 

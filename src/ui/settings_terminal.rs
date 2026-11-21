@@ -3,6 +3,7 @@
 //! local terminal path, keepalive, scrollback and post-quantum key exchange.
 //! Changes reach open terminals at once; new connections pick up the rest.
 
+use termian_native::language::text as tr;
 use std::borrow::Cow;
 
 use gpui::{div, prelude::*, px, rgb, rgba, svg, AnyElement, App, Bounds, Context, Div, Element, ElementId, FontWeight, GlobalElementId, InspectorElementId, LayoutId, Pixels, SharedString, Stateful, Window};
@@ -316,7 +317,7 @@ impl SettingsWindow {
 
         // Terminal settings
         let mut general = vec![
-            heading("Terminal settings").into_any_element(),
+            heading(tr("Terminal settings")).into_any_element(),
             div()
                 .mt(px(15.))
                 .flex()
@@ -327,11 +328,11 @@ impl SettingsWindow {
                         .flex()
                         .items_center()
                         .gap(px(5.))
-                        .child(label("Autocomplete"))
+                        .child(label(tr("Autocomplete")))
                         .child(div().px(px(5.)).rounded(px(4.)).border_1().border_color(rgb(MUTED)).text_size(px(10.)).font_weight(FontWeight::BOLD).text_color(rgb(MUTED)).child("BETA")),
                 )
                 .child(
-                    picker("term-autocomplete", if t.autocomplete { "Enabled" } else { "Disabled" }, self.menu == Some(Menu::Autocomplete))
+                    picker("term-autocomplete", if t.autocomplete { tr("Enabled") } else { tr("Disabled") }, self.menu == Some(Menu::Autocomplete))
                         .on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Autocomplete, cx))),
                 )
                 .into_any_element(),
@@ -339,7 +340,7 @@ impl SettingsWindow {
         if self.menu == Some(Menu::Autocomplete) {
             general.push(
                 menu_list(
-                    [("Enabled", true), ("Disabled", false)]
+                    [(tr("Enabled"), true), (tr("Disabled"), false)]
                         .into_iter()
                         .map(|(text, on)| {
                             menu_item(SharedString::from(format!("term-autocomplete-{text}")), text, on == t.autocomplete)
@@ -355,16 +356,16 @@ impl SettingsWindow {
             );
         }
         general.extend([
-            self.switch_row("term-autoreconnect", "Autoreconnect", t.autoreconnect, |t, v| t.autoreconnect = v, cx),
-            self.switch_row("term-history", "Import shell history", t.shell_history_import, |t, v| t.shell_history_import = v, cx),
+            self.switch_row("term-autoreconnect", tr("Autoreconnect"), t.autoreconnect, |t, v| t.autoreconnect = v, cx),
+            self.switch_row("term-history", tr("Import shell history"), t.shell_history_import, |t, v| t.shell_history_import = v, cx),
             self.switch_row("term-integration", "Shell integration (record commands)", t.shell_integration, |t, v| t.shell_integration = v, cx),
-            self.switch_row("term-copy", "Select text to copy & Right click to paste", t.copy_on_select, |t, v| t.copy_on_select = v, cx),
-            self.switch_row("term-bell", "Bell sound", t.bell_sound, |t, v| t.bell_sound = v, cx),
+            self.switch_row("term-copy", tr("Right click to paste"), t.copy_on_select, |t, v| t.copy_on_select = v, cx),
+            self.switch_row("term-bell", tr("Bell sound"), t.bell_sound, |t, v| t.bell_sound = v, cx),
         ]);
         if cfg!(target_os = "macos") {
-            general.push(self.switch_row("term-meta", "Use Option as Meta key", t.option_is_meta, |t, v| t.option_is_meta = v, cx));
+            general.push(self.switch_row("term-meta", tr("Use Option as Meta key"), t.option_is_meta, |t, v| t.option_is_meta = v, cx));
         }
-        general.push(self.switch_row("term-bold", "Use bright colours for bold text", t.brighten_bold, |t, v| t.brighten_bold = v, cx));
+        general.push(self.switch_row("term-bold", tr("Use bright colours for bold text"), t.brighten_bold, |t, v| t.brighten_bold = v, cx));
         let emulation_open = self.menu == Some(Menu::Emulation);
         general.push(
             div()
@@ -372,7 +373,7 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(label("Terminal emulation type"))
+                .child(label(tr("Terminal emulation type")))
                 .child(picker("term-emulation", t.emulation(), emulation_open).on_click(cx.listener(|settings, _, _, cx| settings.toggle_menu(Menu::Emulation, cx))))
                 .into_any_element(),
         );
@@ -419,7 +420,7 @@ impl SettingsWindow {
             .into_any_element()];
         if font_open {
             let mut items: Vec<AnyElement> = vec![self.text_field(Field::Font, "term-font-custom", String::new(), None, None, cx).into_any_element()];
-            items.push(div().mt(px(4.)).px(px(10.)).text_size(px(11.)).text_color(rgb(MUTED)).child("Введите имя шрифта и нажмите Enter, или выберите из списка").into_any_element());
+            items.push(div().mt(px(4.)).px(px(10.)).text_size(px(11.)).text_color(rgb(MUTED)).child(tr("Введите имя шрифта и нажмите Enter, или выберите из списка")).into_any_element());
             items.extend(FONT_FAMILIES.iter().map(|family| {
                 let family = *family;
                 menu_item(SharedString::from(format!("term-font-{family}")), family, family == t.font_family)
@@ -455,7 +456,7 @@ impl SettingsWindow {
                 .flex()
                 .items_center()
                 .justify_between()
-                .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child("Text Size"))
+                .child(div().text_size(px(14.)).text_color(rgb(theme::TEXT)).child(tr("Text Size")))
                 .child(
                     div()
                         .flex()
@@ -510,7 +511,7 @@ impl SettingsWindow {
                 }))
         });
         let theme_section = vec![
-            heading("Terminal theme").into_any_element(),
+            heading(tr("Terminal theme")).into_any_element(),
             div().mt(px(10.)).grid().grid_cols(3).gap(px(6.)).children(themes).into_any_element(),
         ];
 
@@ -522,7 +523,7 @@ impl SettingsWindow {
             .items_center()
             .justify_between()
             .rounded_md().icon_feedback()
-            .child(heading("Keyword highlighting"))
+            .child(heading(tr("Keyword highlighting")))
             .child(toggle(t.keyword_highlighting))
             .on_click({
                 let on = t.keyword_highlighting;
@@ -552,10 +553,10 @@ impl SettingsWindow {
 
         // Detect Host Operating System
         let detect = vec![
-            heading("Detect Host Operating System").into_any_element(),
+            heading(tr("Detect Host Operating System")).into_any_element(),
             body_text("This option will execute a script when connecting to a host for the first time to detect its operating system. This will allow Termius to show a corresponding OS icon in the list of hosts.").into_any_element(),
             body_text("The script will be executed only if server didn't return anything about its OS.").into_any_element(),
-            self.switch_row("term-detect", "Detect OS", t.detect_os, |t, v| t.detect_os = v, cx),
+            self.switch_row("term-detect", tr("Detect OS"), t.detect_os, |t, v| t.detect_os = v, cx),
             div()
                 .mt(px(15.))
                 .px(px(10.))
@@ -568,7 +569,7 @@ impl SettingsWindow {
                         .py(px(10.))
                         .flex()
                         .justify_between()
-                        .child(heading("Detect OS Script"))
+                        .child(heading(tr("Detect OS Script")))
                         .child(div().text_color(rgb(MUTED)).child(if self.script_open { "▼" } else { "▶" }))
                         .on_click(cx.listener(|settings, _, _, cx| {
                             settings.script_open = !settings.script_open;
@@ -585,7 +586,7 @@ impl SettingsWindow {
         let shell_open = self.menu == Some(Menu::Shell);
         let selected_shell = t.local_shell.clone().unwrap_or_else(ts::default_shell);
         let mut shells = vec![
-            heading("Local Terminal Path").into_any_element(),
+            heading(tr("Local Terminal Path")).into_any_element(),
             div()
                 .id("term-shell")
                 .icon_feedback()
@@ -634,14 +635,14 @@ impl SettingsWindow {
                 })
                 .collect();
             items.push(div().mt(px(6.)).child(self.text_field(Field::Shell, "term-shell-custom", String::new(), None, None, cx)).into_any_element());
-            items.push(div().mt(px(4.)).px(px(10.)).text_size(px(11.)).text_color(rgb(MUTED)).child("Введите путь к оболочке и нажмите Enter, чтобы добавить его").into_any_element());
+            items.push(div().mt(px(4.)).px(px(10.)).text_size(px(11.)).text_color(rgb(MUTED)).child(tr("Введите путь к оболочке и нажмите Enter, чтобы добавить его")).into_any_element());
             shells.push(menu_list(items).max_h(px(1000.)).into_any_element());
         }
 
         // Keepalive Interval
         let keepalive = vec![
-            heading("Keepalive Interval").into_any_element(),
-            body_text("How often (in seconds) to send SSH-level keepalive packets to the server. Set to 0 to disable.").into_any_element(),
+            heading(tr("Keepalive Interval")).into_any_element(),
+            body_text(tr("How often (in seconds) to send SSH-level keepalive packets to the server. Set to 0 to disable.")).into_any_element(),
             div().mt(px(10.)).child(label("Interval")).into_any_element(),
             div()
                 .mt(px(6.))
@@ -652,8 +653,8 @@ impl SettingsWindow {
         // Scrollback
         let scrollback = vec![
             heading("Scrollback").into_any_element(),
-            body_text("Limit number of terminal rows. Set to 0 to maximum limit size.").into_any_element(),
-            div().mt(px(10.)).child(label("Number of rows")).into_any_element(),
+            body_text(tr("Limit number of terminal rows. Set to 0 to maximum limit size.")).into_any_element(),
+            div().mt(px(10.)).child(label(tr("Number of rows"))).into_any_element(),
             div().mt(px(6.)).child(self.text_field(Field::Scrollback, "term-scrollback", t.scrollback_field().to_string(), None, None, cx)).into_any_element(),
         ];
 
@@ -665,14 +666,14 @@ impl SettingsWindow {
                 .items_center()
                 .justify_between()
                 .rounded_md().icon_feedback()
-                .child(label("Post-Quantum Key Exchange"))
+                .child(label(tr("Post-Quantum Key Exchange")))
                 .child(toggle(t.pqc_kex))
                 .on_click({
                     let on = t.pqc_kex;
                     cx.listener(move |settings, _, _, cx| settings.change(cx, move |t| t.pqc_kex = !on))
                 })
                 .into_any_element(),
-            body_text("Turn off if you're experiencing issues with legacy devices").into_any_element(),
+            body_text(tr("Turn off if you're experiencing issues with legacy devices")).into_any_element(),
         ];
 
         [section(general), section(font), section(theme_section), section(keywords), section(detect), section(shells), section(keepalive), section(scrollback), section(pqc).mb(px(60.))]

@@ -1,5 +1,7 @@
 package app.termian.mobile;
 
+import static app.termian.mobile.MainActivity.text;
+
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.AtomicFile;
@@ -28,13 +30,13 @@ final class VaultKey {
         try {
             record = wrapped.readFully();
         } catch (java.io.FileNotFoundException e) {
-            if (wrapped.getBaseFile().exists() || new File(root, "vault.bin").exists()) {
-                throw new IOException("Отсутствует ключ существующего Vault.", e);
+            if (wrapped.getBaseFile().exists() || new File(root, "vault.bin").exists() || new File(root, "vaults.bin").exists()) {
+                throw new IOException(text("Отсутствует ключ существующего Vault."), e);
             }
             return create(wrapped, keys, cipher);
         }
         if (record.length != FILE_SIZE || record[0] != 1 || !keys.containsAlias(ALIAS)) {
-            throw new IOException("Не удалось прочитать ключ Vault.");
+            throw new IOException(text("Не удалось прочитать ключ Vault."));
         }
         cipher.init(Cipher.DECRYPT_MODE, keys.getKey(ALIAS, null), new GCMParameterSpec(128, record, 1, IV_SIZE));
         return cipher.doFinal(record, 1 + IV_SIZE, record.length - 1 - IV_SIZE);
@@ -54,7 +56,7 @@ final class VaultKey {
         new SecureRandom().nextBytes(raw);
         try {
             byte[] iv = cipher.getIV();
-            if (iv.length != IV_SIZE) throw new IOException("Неверный формат ключа Vault.");
+            if (iv.length != IV_SIZE) throw new IOException(text("Неверный формат ключа Vault."));
             byte[] payload = cipher.doFinal(raw);
             FileOutputStream out = wrapped.startWrite();
             try {

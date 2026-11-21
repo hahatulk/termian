@@ -4,6 +4,7 @@
 //! Enter keeps it, Backspace disables the action, Escape cancels; the tab and
 //! pane rows take modifiers only. Editing a preset makes «<name> copy».
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Context, Div, FontWeight, KeyDownEvent, ModifiersChangedEvent, SharedString, Window};
 use termian_native::shortcuts::{self, ShortcutSettings, ACTIONS};
 use termian_native::theme;
@@ -131,8 +132,8 @@ impl SettingsWindow {
         let kind_owned = kind.to_owned();
         let keys_cell = match (&shown, editing) {
             (Some(keys), _) => caps(keys).into_any_element(),
-            (None, true) => div().text_size(px(13.)).text_color(rgb(MUTED)).child("Press keys…").into_any_element(),
-            (None, false) => div().text_size(px(13.)).text_color(rgb(MUTED)).child("Disabled").into_any_element(),
+            (None, true) => div().text_size(px(13.)).text_color(rgb(MUTED)).child(tr("Press keys…")).into_any_element(),
+            (None, false) => div().text_size(px(13.)).text_color(rgb(MUTED)).child(tr("Disabled")).into_any_element(),
         };
         div()
             .id(SharedString::from(format!("shortcut-{kind}")))
@@ -183,7 +184,7 @@ impl SettingsWindow {
             .text_size(px(16.))
             .font_weight(FontWeight::MEDIUM)
             .text_color(rgb(theme::TEXT))
-            .child(text_input::text(("settings", Field::SchemeName), typing.as_deref().unwrap_or(&name), "", typing.is_some(), Mode::Line, cx));
+            .child(text_input::text(("settings", Field::SchemeName), typing.as_deref().unwrap_or(if current.is_none() { tr("Disabled") } else { &name }), "", typing.is_some(), Mode::Line, cx));
         let name_field = if editable {
             let name = name.clone();
             text_input::field(name_field.cursor_text(), ("settings", Field::SchemeName), Mode::Line, move |settings, window, cx| {
@@ -234,7 +235,7 @@ impl SettingsWindow {
                     .text_color(rgb(theme::TEXT))
                     .cursor_pointer()
                     .hover(|s| s.bg(rgba(0xffffff14)))
-                    .child(choice.clone())
+                    .child(if choice == "Disabled" { tr("Disabled").to_owned() } else { choice.clone() })
                     .child(
                         div()
                             .flex()
@@ -275,19 +276,19 @@ impl SettingsWindow {
                     .bg(rgb(0x2f3348))
                     .text_size(px(14.))
                     .text_color(rgb(theme::TEXT))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Remove shortcuts scheme"))
-                    .child(div().mt(px(8.)).text_color(rgb(MUTED)).child("Are you sure you want to delete shortcuts scheme?"))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("Remove shortcuts scheme")))
+                    .child(div().mt(px(8.)).text_color(rgb(MUTED)).child(tr("Are you sure you want to delete shortcuts scheme?")))
                     .child(
                         div()
                             .mt(px(14.))
                             .flex()
                             .justify_end()
                             .gap(px(10.))
-                            .child(action_button("shortcut-remove-cancel", "Cancel", false, false).on_click(cx.listener(|settings, _, _, cx| {
+                            .child(action_button("shortcut-remove-cancel", tr("Cancel"), false, false).on_click(cx.listener(|settings, _, _, cx| {
                                 settings.remove_scheme = None;
                                 cx.notify();
                             })))
-                            .child(action_button("shortcut-remove-confirm", "Remove", false, false).bg(rgb(0xec706f)).border_color(rgb(0xec706f)).on_click(cx.listener(
+                            .child(action_button("shortcut-remove-confirm", tr("Remove"), false, false).bg(rgb(0xec706f)).border_color(rgb(0xec706f)).on_click(cx.listener(
                                 move |settings, _, _, cx| {
                                     settings.remove_scheme = None;
                                     let scheme = scheme.clone();
@@ -312,12 +313,12 @@ impl SettingsWindow {
                 .text_size(px(16.))
                 .font_weight(FontWeight::MEDIUM)
                 .text_color(rgb(theme::TEXT))
-                .child(div().w(px(210.)).child("Shortcut"))
-                .child("Action")
+                .child(div().w(px(210.)).child(tr("Shortcut")))
+                .child(tr("Action"))
                 .into_any_element(),
         );
         out.push(self.shortcut_row(TAB_MOD, Some(scheme.tab_mod.clone()), Some("[1…9]"), "Switch to specific Tab [1…9]", None, cx));
-        out.push(self.shortcut_row(PANE_MOD, Some(scheme.pane_mod.clone()), Some("arrows"), "Move focus between Split View panes", None, cx));
+        out.push(self.shortcut_row(PANE_MOD, Some(scheme.pane_mod.clone()), Some("arrows"), tr("Move focus between Split View panes"), None, cx));
         let recording_new = self.recording.as_ref().and_then(|r| r.new.clone());
         for (kind, action) in ACTIONS {
             let keys = scheme.shortcut(kind).map(str::to_owned);

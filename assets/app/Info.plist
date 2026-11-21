@@ -24,6 +24,8 @@
   <string>Termian shows and transfers files in Downloads in the SFTP Local panel.</string>
   <key>NSRemovableVolumesUsageDescription</key>
   <string>Termian shows and transfers files on external drives in the SFTP Local panel.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Termian connects to hosts on your local network and checks whether they are reachable.</string>
   <key>NSNetworkVolumesUsageDescription</key>
   <string>Termian shows and transfers files on network volumes in the SFTP Local panel.</string>
 </dict>

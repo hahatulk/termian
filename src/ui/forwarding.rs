@@ -3,6 +3,7 @@
 //! Local / Remote / Dynamic diagram and fields, and the connection screen
 //! when a rule's login asks something.
 
+use termian_native::language::text as tr;
 use std::collections::HashMap;
 
 use futures::StreamExt;
@@ -63,11 +64,15 @@ pub struct Rules {
     generation: u64,
 }
 
+impl Rules {
+    pub(crate) fn is_running(&self) -> bool { !self.running.is_empty() }
+}
+
 fn kind_name(kind: RuleKind) -> &'static str {
     match kind {
-        RuleKind::Local => "Local",
-        RuleKind::Remote => "Remote",
-        RuleKind::Dynamic => "Dynamic",
+        RuleKind::Local => tr("Local"),
+        RuleKind::Remote => tr("Remote"),
+        RuleKind::Dynamic => tr("Dynamic"),
     }
 }
 
@@ -168,16 +173,17 @@ impl Shell {
         }
         let Some(rule) = self.vault.rule(id).cloned() else { return };
         let Some(host) = rule.host.and_then(|h| self.vault.host(h)) else {
-            self.rules.status.insert(id, RuleStatus::Failed("Choose a host for this rule.".into()));
+            self.rules.status.insert(id, RuleStatus::Failed(tr("Choose a host for this rule.").into()));
             cx.notify();
             return;
         };
         if !rule.is_valid() {
-            self.rules.status.insert(id, RuleStatus::Failed("Fill in the ports and the destination.".into()));
+            self.rules.status.insert(id, RuleStatus::Failed(tr("Fill in the ports and the destination.").into()));
             cx.notify();
             return;
         }
         let mut target = SshTarget::for_host(host, &self.vault);
+        target.known_hosts = self.store.known_hosts_path();
         target.options = termian_native::session::SshOptions::from_vault(&self.vault);
         let spec = Spec {
             kind: rule.kind,
@@ -381,26 +387,26 @@ impl Shell {
             dialog::button("wizard-continue", label, Kind::Accent, !enabled).w_full().when(enabled, |b| b.on_click(cx.listener(|shell, _, window, cx| shell.wizard_continue(window, cx))))
         };
         let question = match step {
-            Step::Kind => "Select the port forwarding type:",
-            Step::LocalPort => "Set the local port and binding address:",
-            Step::RemotePort => "Set the port and binding address:",
-            Step::Host if kind == RuleKind::Remote => "Select the remote host:",
-            Step::Host => "Select the intermediate host:",
-            Step::Destination => "Select the destination host:",
-            Step::Label => "Select the label:",
+            Step::Kind => tr("Select the port forwarding type:"),
+            Step::LocalPort => tr("Set the local port and binding address:"),
+            Step::RemotePort => tr("Set the port and binding address:"),
+            Step::Host if kind == RuleKind::Remote => tr("Select the remote host:"),
+            Step::Host => tr("Select the intermediate host:"),
+            Step::Destination => tr("Select the destination host:"),
+            Step::Label => tr("Select the label:"),
         };
         let explanation = match (step, kind) {
-            (Step::Kind, RuleKind::Local) => "Local forwarding lets you access a remote server's listening port as though it were local.",
-            (Step::Kind, RuleKind::Remote) => "Remote forwarding opens a port on the remote machine and forwards connections to the local (current) host.",
-            (Step::Kind, RuleKind::Dynamic) => "Dynamic port forwarding turns Termius into a SOCKS proxy server. SOCKS proxy server is a protocol to request any connection via a remote host.",
-            (Step::LocalPort, RuleKind::Dynamic) => "This port will be open on the local (current) device, and it will receive the traffic.",
-            (Step::LocalPort, _) => "This port will be open on the local (current) machine to forward traffic to the remote host.",
-            (Step::RemotePort, _) => "We will forward traffic from specified port and interface address of the selected host.",
-            (Step::Host, RuleKind::Local) => "This device is used as an intermediate host to access the remote host.",
-            (Step::Host, RuleKind::Remote) => "Select a host where the port will be open. The traffic from this port will be forwarded to the destination host.",
-            (Step::Host, RuleKind::Dynamic) => "The intermediate host will receive the traffic that will be forwarded to the local (current) host.",
-            (Step::Destination, RuleKind::Local) => "IP address/hostname and the port number of the remote host where the intermediate host will direct the traffic.",
-            (Step::Destination, _) => "The destination address and port where the traffic will be forwarded.",
+            (Step::Kind, RuleKind::Local) => tr("Local forwarding lets you access a remote server's listening port as though it were local."),
+            (Step::Kind, RuleKind::Remote) => tr("Remote forwarding opens a port on the remote machine and forwards connections to the local (current) host."),
+            (Step::Kind, RuleKind::Dynamic) => tr("Dynamic port forwarding turns Termius into a SOCKS proxy server. SOCKS proxy server is a protocol to request any connection via a remote host."),
+            (Step::LocalPort, RuleKind::Dynamic) => tr("This port will be open on the local (current) device, and it will receive the traffic."),
+            (Step::LocalPort, _) => tr("This port will be open on the local (current) machine to forward traffic to the remote host."),
+            (Step::RemotePort, _) => tr("We will forward traffic from specified port and interface address of the selected host."),
+            (Step::Host, RuleKind::Local) => tr("This device is used as an intermediate host to access the remote host."),
+            (Step::Host, RuleKind::Remote) => tr("Select a host where the port will be open. The traffic from this port will be forwarded to the destination host."),
+            (Step::Host, RuleKind::Dynamic) => tr("The intermediate host will receive the traffic that will be forwarded to the local (current) host."),
+            (Step::Destination, RuleKind::Local) => tr("IP address/hostname and the port number of the remote host where the intermediate host will direct the traffic."),
+            (Step::Destination, _) => tr("The destination address and port where the traffic will be forwarded."),
             (Step::Label, _) => "",
         };
         let mut header = div().flex().flex_col().gap(px(20.)).child(div().font_weight(FontWeight::SEMIBOLD).child(question));
@@ -428,7 +434,7 @@ impl Shell {
         };
         let mut content = div().flex().flex_col().gap(px(20.)).when(!explanation.is_empty(), |d| d.child(div().text_sm().child(explanation)));
         content = match step {
-            Step::Kind => content.child(continue_button("Continue", cx)).child(dialog::button("wizard-skip", "Skip wizard", Kind::Regular, false).w_full().on_click(cx.listener(|shell, _, window, cx| {
+            Step::Kind => content.child(continue_button(tr("Continue"), cx)).child(dialog::button("wizard-skip", tr("Skip wizard"), Kind::Regular, false).w_full().on_click(cx.listener(|shell, _, window, cx| {
                 if let Some(editor) = &mut shell.rules.editor {
                     editor.wizard = None;
                 }
@@ -437,14 +443,14 @@ impl Shell {
                 cx.notify();
             }))),
             Step::LocalPort | Step::RemotePort => {
-                let label = if step == Step::LocalPort { "Local port number *" } else { "Remote port number *" };
-                content.child(self.rule_input(Field::Port, label, port(rule.port), window, cx)).child(self.rule_input(Field::Bind, "Bind address", rule.bind_address.clone(), window, cx)).child(continue_button("Continue", cx))
+                let label = if step == Step::LocalPort { tr("Local port number *") } else { tr("Remote port number *") };
+                content.child(self.rule_input(Field::Port, label, port(rule.port), window, cx)).child(self.rule_input(Field::Bind, tr("Bind address"), rule.bind_address.clone(), window, cx)).child(continue_button(tr("Continue"), cx))
             }
             Step::Destination => content
-                .child(self.rule_input(Field::Destination, "Destination address *", rule.destination.clone(), window, cx))
-                .child(self.rule_input(Field::DestinationPort, "Destination port number *", port(rule.destination_port), window, cx))
-                .child(continue_button("Continue", cx)),
-            Step::Label => content.child(self.rule_input(Field::Label, "Label", rule.label.clone(), window, cx)).child(continue_button("Done", cx)),
+                .child(self.rule_input(Field::Destination, tr("Destination address *"), rule.destination.clone(), window, cx))
+                .child(self.rule_input(Field::DestinationPort, tr("Destination port number *"), port(rule.destination_port), window, cx))
+                .child(continue_button(tr("Continue"), cx)),
+            Step::Label => content.child(self.rule_input(Field::Label, tr("Label"), rule.label.clone(), window, cx)).child(continue_button(tr("Done"), cx)),
             Step::Host => {
                 let list = editor.hosts_open.then(|| {
                     let mut list = div().id("wizard-host-list").max_h(px(240.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT));
@@ -460,7 +466,7 @@ impl Shell {
                     list
                 });
                 content
-                    .child(dialog::button("wizard-select-host", "Select a host", Kind::Accent, false).w_full().on_click(cx.listener(|shell, _, _, cx| {
+                    .child(dialog::button("wizard-select-host", tr("Select a host"), Kind::Accent, false).w_full().on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(editor) = &mut shell.rules.editor {
                             editor.hosts_open = !editor.hosts_open;
                         }
@@ -507,8 +513,8 @@ impl Shell {
             .border_color(rgb(theme::TITLE_BAR))
             .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(match editor.wizard {
                 Some(step) => wizard::title(step, rule.kind),
-                None if editor.created_here => "New Port Forwarding",
-                None => "Edit Port Forwarding",
+                None if editor.created_here => tr("New Port Forwarding"),
+                None => tr("Edit Port Forwarding"),
             }))
             .child(dialog::collapse_button("rule-close").on_click(cx.listener(|shell, _, _, cx| {
                 shell.rules.editor = None;
@@ -543,30 +549,30 @@ impl Shell {
         let mut form = card(&format!("{} Port Forwarding", kind_name(rule.kind)))
             .children(kinds)
             .child(div().py(px(20.)).flex().justify_center().child(img(icon(diagram)).w(px(250.)).h(px(150.))))
-            .child(self.rule_input(Field::Label, "Label", rule.label.clone(), window, cx));
+            .child(self.rule_input(Field::Label, tr("Label"), rule.label.clone(), window, cx));
         let destination = |form: Div, cx: &mut Context<Self>| {
-            form.child(self.rule_input(Field::Destination, "Destination address *", rule.destination.clone(), window, cx))
-                .child(self.rule_input(Field::DestinationPort, "Destination port number *", port(rule.destination_port), window, cx))
+            form.child(self.rule_input(Field::Destination, tr("Destination address *"), rule.destination.clone(), window, cx))
+                .child(self.rule_input(Field::DestinationPort, tr("Destination port number *"), port(rule.destination_port), window, cx))
         };
         form = match rule.kind {
             RuleKind::Local => {
                 let form = form
-                    .child(self.rule_input(Field::Port, "Local port number *", port(rule.port), window, cx))
-                    .child(self.rule_input(Field::Bind, "Bind address", rule.bind_address.clone(), window, cx))
-                    .child(self.host_field("Intermediate host", cx));
+                    .child(self.rule_input(Field::Port, tr("Local port number *"), port(rule.port), window, cx))
+                    .child(self.rule_input(Field::Bind, tr("Bind address"), rule.bind_address.clone(), window, cx))
+                    .child(self.host_field(tr("Intermediate host"), cx));
                 destination(form, cx)
             }
             RuleKind::Remote => {
                 let form = form
-                    .child(self.host_field("Remote host", cx))
-                    .child(self.rule_input(Field::Port, "Remote port number *", port(rule.port), window, cx))
-                    .child(self.rule_input(Field::Bind, "Bind address", rule.bind_address.clone(), window, cx));
+                    .child(self.host_field(tr("Remote host"), cx))
+                    .child(self.rule_input(Field::Port, tr("Remote port number *"), port(rule.port), window, cx))
+                    .child(self.rule_input(Field::Bind, tr("Bind address"), rule.bind_address.clone(), window, cx));
                 destination(form, cx)
             }
             RuleKind::Dynamic => form
-                .child(self.rule_input(Field::Port, "Local port number *", port(rule.port), window, cx))
-                .child(self.rule_input(Field::Bind, "Bind address", rule.bind_address.clone(), window, cx))
-                .child(self.host_field("Intermediate host", cx)),
+                .child(self.rule_input(Field::Port, tr("Local port number *"), port(rule.port), window, cx))
+                .child(self.rule_input(Field::Bind, tr("Bind address"), rule.bind_address.clone(), window, cx))
+                .child(self.host_field(tr("Intermediate host"), cx)),
         };
 
         // "Need help…" while adding a rule, as in the legacy form.
@@ -579,8 +585,8 @@ impl Shell {
                     .items_center()
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .child("Need help configuring the port forwarding rule?")
-                    .child(div().id("rule-open-wizard").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("Open Port Forwarding Wizard").on_click(cx.listener(|shell, _, window, cx| {
+                    .child(tr("Need help configuring the port forwarding rule?"))
+                    .child(div().id("rule-open-wizard").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child(tr("Open Port Forwarding Wizard")).on_click(cx.listener(|shell, _, window, cx| {
                         if let Some(editor) = &mut shell.rules.editor {
                             editor.wizard = Some(Step::Kind);
                             editor.hosts_open = false;
@@ -595,7 +601,7 @@ impl Shell {
         let id = rule.id;
         let footer = (editor.wizard.is_none() && (!editor.created_here || self.vault.rule(id).is_some())).then(|| {
             div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).flex().justify_end().child(
-                dialog::button("rule-remove", "Remove", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
+                dialog::button("rule-remove", tr("Remove"), Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.rules.editor {
                         editor.confirm_remove = true;
                     }
@@ -638,8 +644,8 @@ impl Shell {
             shell.rules.menu = None;
             cx.notify();
         }));
-        dialog::backdrop(dialog::card("Remove Port Forwarding rule", false, close, dialog::text("Are you sure you want to delete this rule?"), vec![
-            dialog::button("rule-remove-confirm", "Remove", Kind::Error, false)
+        dialog::backdrop(dialog::card(tr("Remove Port Forwarding rule"), false, close, dialog::text("Are you sure you want to delete this rule?"), vec![
+            dialog::button("rule-remove-confirm", tr("Remove"), Kind::Error, false)
                 .on_click(cx.listener(move |shell, _, _, cx| shell.remove_rule(id, cx)))
                 .into_any_element(),
         ]))
@@ -684,7 +690,7 @@ impl Shell {
 
     pub fn render_port_forwarding(&self, window: &Window, cx: &mut Context<Self>) -> Div {
         // A split button, as legacy: the arrow chooses Local, Remote or Dynamic.
-        let main = tool_button("new-forwarding", "port_forwarding", "NEW FORWARDING")
+        let main = tool_button("new-forwarding", "port_forwarding", tr("NEW FORWARDING"))
             .rounded_r_none()
             .on_click(cx.listener(|shell, _, window, cx| shell.new_rule(window, cx)));
         let split = self.list_menu_button(
@@ -704,7 +710,7 @@ impl Shell {
             );
         }
         let body = div()
-            .child(super::hosts::section_title("Port Forwarding"))
+            .child(super::hosts::section_title(tr("Port Forwarding")))
             .child(self.cards("portForwarding").children(self.listed("portForwarding", &self.vault.rules, |r| r.label.as_str(), |r| r.id).into_iter().map(|rule| self.render_rule_card(rule, cx))));
         page("forwarding-scroll", toolbar, controls, body)
     }
@@ -778,12 +784,12 @@ impl Shell {
             }
             let running = self.rules.running.contains_key(&id);
             let items = menu_panel("rule-menu")
-                .child(menu_row("rule-menu-toggle".into(), if running { "Stop" } else { "Start" }, false, false).on_click(cx.listener(move |shell, _, window, cx| {
+                .child(menu_row("rule-menu-toggle".into(), if running { tr("Stop") } else { tr("Start") }, false, false).on_click(cx.listener(move |shell, _, window, cx| {
                     shell.rules.menu = None;
                     shell.toggle_rule(id, window, cx);
                 })))
-                .child(menu_row("rule-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_rule(id, window, cx))))
-                .child(menu_row("rule-menu-remove".into(), "Remove", true, false).on_click(cx.listener(|shell, _, _, cx| {
+                .child(menu_row("rule-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_rule(id, window, cx))))
+                .child(menu_row("rule-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(menu) = &mut shell.rules.menu {
                         menu.2 = true;
                     }

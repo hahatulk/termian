@@ -1,0 +1,730 @@
+0 = choose an available port	0: выбрать свободный порт
+1 h	1 ч
+1 hour	1 час
+12 h	12 ч
+12 hours	12 часов
+24 h	24 ч
+24 hours	24 часа
+6 h	6 ч
+6 hours	6 часов
+A Vault with this name already exists.	Vault с таким названием уже существует.
+A folder with this name already exists.	Папка с таким именем уже существует.
+A to Z	От А до Я
+Access token	Токен доступа
+Account	Учётная запись
+Action	Действие
+Action description	Описание действия
+Actions	Действия
+Add a Package	Добавить пакет
+Add a comment	Добавить комментарий
+Add a key	Добавить ключ
+Add and continue	Добавить и продолжить
+Add hosts on the Hosts screen to run snippets on them.	Добавьте хосты на странице "Хосты", чтобы запускать на них сниппеты.
+Add targets	Добавить цели
+Add variable	Добавить переменную
+Added	Добавлено
+Address	Адрес
+Address could not be resolved. Click to try again	Не удалось определить IP-адрес. Нажмите, чтобы повторить
+Advanced	Дополнительно
+Agent Forwarding	Проброс SSH-агента
+All	Все
+All hosts	Все хосты
+All snippets	Все сниппеты
+Allow installs from Termian in system settings, then return and tap Install.	Разрешите установку из Termian в настройках Android, затем вернитесь и нажмите "Установить".
+And these hosts:	И эти хосты:
+And this host:	И этот хост:
+Android could not open the package installer.	Android не смог открыть установщик.
+Application menu	Меню приложения
+Apply	Применить
+Apply to All	Применить ко всем
+Apps you choose using the “Open with…” option to open files via SFTP will appear here.	Здесь появятся приложения, выбранные через "Открыть с помощью" в SFTP.
+Are you sure you want to connect?	Продолжить подключение?
+Are you sure you want to delete shortcuts scheme?	Удалить схему горячих клавиш?
+Are you sure you want to delete this rule?	Удалить это правило?
+Are you sure you want to remove 1 known host?	Удалить один известный хост?
+Authentication did not complete.	Не удалось завершить аутентификацию.
+Authentication failed	Ошибка аутентификации
+Autocomplete	Автодополнение
+Automate work with snippets. Add target hosts and automatically run the snippet on them in one click!	Добавьте хосты к сниппету, чтобы запускать на них команды одним нажатием.
+Automatic checks are paused until settings change or you check manually.	Автоматическая проверка приостановлена до изменения настроек или ручной проверки.
+Automatic checks are paused. Check the token or password in your cloud settings.	Автоматическая проверка приостановлена, чтобы не продлевать блокировку. Исправьте токен или пароль в настройках своего облака.
+Automatic updates	Автообновление
+Autoreconnect	Автопереподключение
+Available: {version}.{checked}	Доступна новая версия: {version}.{checked}
+Back folder	Предыдущая папка
+Back up this device's Vault and replace its synced records with the cloud snapshot?	Сохранить резервную копию хранилища и заменить синхронизируемые записи снимком из облака?
+Backspace	Клавиша Backspace
+Basic auth password	Пароль Basic auth
+Basic auth username	Логин Basic auth
+Baud rate	Скорость передачи
+Bell sound	Звуковой сигнал
+Bind address	Адрес прослушивания
+Blank secret fields keep the saved values for this server.	Пустые поля секретов сохраняют прежние значения для этого сервера.
+Both sides	Обе стороны
+Both sides have changes. A conflict is possible.	На обеих сторонах есть изменения — возможен конфликт
+Broadcast	Общий ввод
+Broadcast input	Общий ввод
+Broadcast to both panes	Ввод в обе панели
+CONNECT	ПОДКЛЮЧИТЬСЯ
+Cancel	Отмена
+Cancel transfer	Отменить передачу
+Cannot create the update cache.	Не удалось создать кэш обновлений.
+Certificate	Сертификат
+Charset	Кодировка
+Check	Проверить
+Check again	Проверить снова
+Check and download	Проверять и скачивать
+Check and save	Проверить и сохранить
+Check changes	Проверить изменения
+Check encryption password?	Проверить пароль шифрования?
+Check for changes first.	Сначала проверьте изменения.
+Check for updates	Проверить обновления
+Check interval	Интервал проверки
+Check only	Только проверять
+Checked: {}	Проверено: {}
+Checked: {}.	Проверено: {}.
+Checking changes…	Проверка изменений…
+Checking cloud and device for changes…	Проверяю изменения в облаке и на устройстве…
+Checking for changes…	Проверяю изменения…
+Checking for updates…	Проверка обновлений…
+Checking…	Проверка…
+Choose Android files or folders to upload.	Выберите файлы или папки Android для загрузки.
+Choose a cloud address that is not used by another Vault.	Укажите адрес облака, который не используется другим Vault.
+Choose a host for this rule.	Выберите хост для правила.
+Choose application	Выбрать приложение
+Clear logs	Очистить журналы
+Clear selection	Снять выделение
+Close	Закрыть
+Close SFTP and finish file operations before switching Vaults.	Закройте SFTP и завершите операции с файлами перед сменой Vault.
+Close host editor	Закрыть редактор хоста
+Close navigation menu	Закрыть меню навигации
+Close sessions and SFTP, and stop port forwarding before switching Vaults.	Перед сменой Vault закройте сеансы и SFTP и остановите проброс портов.
+Close sessions and SFTP, finish file edits, and stop port forwarding before switching Vaults.	Перед сменой Vault закройте сеансы и SFTP, завершите правки файлов и остановите проброс портов.
+Cloud actions	Действия с облаком
+Cloud encryption password	Пароль шифрования облака
+Cloud is not configured	Облако не настроено
+Cloud not configured	Своё облако не настроено
+Cloud operation in progress.	Выполняется операция с облаком.
+Color theme	Цветовая тема
+Comment	Комментарий
+Configure self-hosted cloud	Настроить своё облако
+Confirm	Подтвердить
+Confirm disabling logs	Подтвердите отключение журналов
+Conflict	Конфликт
+Connect	Подключиться
+Connect for sync	Синхронизация
+Connect to a host via SSH to see your shell history here.	Подключитесь по SSH для просмотра истории команд.
+Connect to an SFTP host first.	Сначала подключитесь к SFTP-серверу.
+Connect to an SSH host first.	Сначала подключитесь к хосту по SSH.
+Connect to host	Подключение к хосту
+Connect to server	Подключить сервер
+Connect with SFTP	Подключиться по SFTP
+Connected	Подключено
+Connected to {host}	Подключено к {host}
+Connection failed with connection log:	Ошибка подключения:
+Connection settings	Настройки подключения
+Continue	Продолжить
+Continue & Save	Продолжить и сохранить
+Control how logs are stored in your vaults.	Настройте хранение журналов в хранилищах.
+Copied!	Скопировано!
+Copy	Копировать
+Copy logs	Копировать журнал
+Copy public key	Копировать открытый ключ
+Copy to target directory	Копировать в папку назначения
+Could not check for or download an update.{checked}	Не удалось проверить или загрузить обновление.{checked}
+Could not check sync status	Не удалось проверить состояние синхронизации
+Could not create a document.	Не удалось создать документ.
+Could not create the Vault directory.	Не удалось создать каталог Vault.
+Could not decrypt the snapshot: wrong encryption password	Не удалось расшифровать снимок: неверный пароль шифрования
+Could not get a response from Termian.	Не удалось получить ответ Termian.
+Could not list the selected folder.	Не удалось прочитать список файлов в папке.
+Could not open the Vault. No data was reset.	Не удалось открыть Vault. Данные не были сброшены.
+Could not open the document.	Не удалось открыть документ.
+Could not read the Vault key.	Не удалось прочитать ключ Vault.
+Could not read the selected item.	Не удалось прочитать выбранный объект.
+Could not save logs: {failed}. Recording is off.	Запись отключена. Не удалось удалить журналов: {failed}.
+Could not save the file.	Не удалось сохранить файл.
+Could not save the folder. Check the selected location for copied files.	Не удалось сохранить папку. Проверьте скопированные файлы в выбранном расположении.
+Could not save the lock password.	Не удалось сохранить пароль блокировки.
+Could not save the operation result to the Vault: {error}	Не удалось сохранить результат операции в Vault: {error}
+Could not save update settings: {error}	Не удалось сохранить настройки обновлений: {error}
+Create Vault	Создать Vault
+Create a new package by typing the name	Введите имя нового пакета
+Create a snippet	Создать сниппет
+Create a workspace	Создать рабочее пространство
+Create snippets from your commands	Создавайте сниппеты из команд
+Credentials	Учётные данные
+Current password	Текущий пароль
+Cut	Вырезать
+DISCARD ALL	ОТМЕНИТЬ ВСЁ
+DISCONNECT	ОТКЛЮЧИТЬСЯ
+Dark	Тёмная
+Data bits	Биты данных
+Date Modified	Дата изменения
+Default	По умолчанию
+Default ({global})	По умолчанию ({global})
+Delete	Удалить
+Delete All	Удалить всё
+Delete group and its hosts?	Удалить группу и её хосты?
+Delete host	Удалить хост
+Delete logs for {}? This cannot be undone.	Удалить логи {}? Это нельзя отменить.
+Delete session logs for this period?	Удалить журналы сеансов за этот период?
+Delete this record?	Удалить эту запись?
+Delete this saved host?	Удалить сохранённый хост?
+Delete workspace template?	Удалить шаблон рабочего пространства?
+Deleting…	Удаление…
+Destination	Назначение
+Destination address *	Адрес назначения *
+Destination port	Порт назначения
+Destination port number *	Номер порта назначения *
+Details	Подробности
+Detect Host Operating System	Определить ОС хоста
+Detect OS	Определить ОС
+Detect OS Script	Скрипт определения ОС
+Device	Устройство
+Device and server data match	Данные клиента и сервера совпадают
+Disable Logs	Отключить журналы
+Disabled	Отключено
+Discard	Отменить
+Discard all	Отменить всё
+Discard changes	Отменить изменения
+Discard host changes?	Отменить изменения хоста?
+Disconnect	Отключиться
+Do you want to add it to the list of known hosts?	Добавить его в список известных хостов?
+Do you want to discard changes?	Отменить изменения?
+Done	Готово
+Double Click	Двойной щелчок
+Download	Скачать
+Download failed	Не удалось скачать
+Download from Settings → Version.	Скачать обновление можно в Settings → Version.
+Download saved	Файл сохранён
+Download update	Скачать обновление
+Download {version}: {percent}% ({} of {} MB)	Загрузка {version}: {percent}% ({} из {} МБ)
+Download {version}: {} MB	Загрузка {version}: {} МБ
+Downloading log…	Загрузка журнала…
+Downloading…	Загрузка…
+Duplicate	Дублировать
+Dynamic	Динамический
+Dynamic Forwarding	Динамический проброс
+Dynamic port forwarding turns Termius into a SOCKS proxy server. SOCKS proxy server is a protocol to request any connection via a remote host.	Динамический проброс запускает SOCKS-прокси для подключений через удалённый хост.
+Edit	Редактировать
+Edit Package	Изменить пакет
+Edit Permissions	Изменить права
+Edit Port Forwarding	Изменить проброс портов
+Edit Snippet	Изменить сниппет
+Edit host	Редактировать хост
+Edit permissions	Изменить права
+Edit…	Изменить…
+Elliptic curve size (bits)	Размер эллиптической кривой (бит)
+Enabled	Разрешено
+Encryption password	Пароль шифрования
+Encryption uses OpenSSH defaults. Cipher and rounds controls are not available.	Используются настройки шифрования OpenSSH по умолчанию. Шифр и число раундов не настраиваются.
+Enter IP or Hostname...	Введите IP или имя хоста...
+Enter a Vault name between 1 and 64 characters.	Введите название Vault от 1 до 64 символов.
+Enter a destination address	Введите адрес назначения
+Enter a font name and press Enter, or choose from the list	Введите имя шрифта и нажмите Enter, или выберите из списка
+Enter a host address	Введите адрес хоста
+Enter a password.	Введите пароль.
+Enter a server address	Введите адрес сервера
+Enter a shell path and press Enter to add it	Введите путь к оболочке и нажмите Enter, чтобы добавить его
+Enter the Basic auth password	Введите пароль Basic auth
+Enter the Basic auth username	Введите логин Basic auth
+Enter the access token	Введите токен доступа
+Enter the passphrase of this key	Введите парольную фразу ключа
+Enter the server token	Введите токен сервера
+Environment Variable	Переменная окружения
+Environment Variables	Переменные окружения
+Error	Ошибка
+Error during transfer	Ошибка при передаче
+Execute	Выполнение
+Export and Attach	Экспортировать и прикрепить
+Export to	Экспортировать в
+Export to *	Экспортировать в *
+Export to host	Экспортировать на хост
+File	Файл
+File Access	Доступ к файлам
+File Type	Тип файла
+File access…	Доступ к файлам…
+File actions	Действия с файлом
+File already exists	Файл уже существует
+File editing is in progress	Файл редактируется
+File type associations	Привязки типов файлов
+Filename – $2 *	Имя файла ($2) *
+Fill in the ports and the destination.	Укажите порты и адрес назначения.
+Filter	Фильтр
+Find a host or ssh user@hostname...	Найти хост или ввести ssh пользователь@хост...
+Find in terminal	Найти в терминале
+Finish editing or close the editor before switching Vaults.	Перед сменой Vault завершите редактирование или закройте редактор.
+Finish the current file operation first.	Сначала завершите текущую операцию с файлами.
+Finish the file picker or save operation first.	Сначала завершите выбор или сохранение файла.
+Flow Control	Управление потоком
+Focus mode	Режим фокуса
+Folder	Папка
+Folder exceeds the transfer limit.	Размер папки превышает предел передачи.
+Folder is empty	Папка пуста
+Foldername *	Имя папки *
+Font	Шрифт
+Font size	Размер шрифта
+Force download	Принудительно получить
+Force upload	Принудительно отправить
+Forget	Забыть
+Forward folder	Следующая папка
+General	Общие
+Generate & save	Сгенерировать и сохранить
+Generate ED25519 key	Сгенерировать ключ ED25519
+Generate Key	Сгенерировать ключ
+Generating a key...	Генерация ключа...
+Get and replace	Получить и заменить
+Get changes	Получить изменения
+Get data from server	Получить данные с сервера
+Go to group	Перейти в группу
+Grid	Сетка
+Grid view	Вид сеткой
+Group	Группа
+Group Details	Свойства группы
+Group path	Путь группы
+Groups	Группы
+HTTP Basic auth	HTTP Basic auth
+HTTPS server address	HTTPS-адрес сервера
+Hide Hidden Files	Скрыть скрытые файлы
+Hide logs	Скрыть журнал
+Hide second pane	Скрыть вторую панель
+Host	Хост
+Host Details	Свойства хоста
+Host actions	Действия с хостом
+Host key has changed	Ключ хоста изменился
+Host keys you trust appear here after the first connection.	Доверенные ключи хостов появятся после первого подключения.
+Hosts	Хосты
+How often (in seconds) to send SSH-level keepalive packets to the server. Set to 0 to disable.	Интервал отправки keepalive по SSH в секундах. 0 отключает отправку.
+IMPORT	ИМПОРТ
+IP address/hostname and the port number of the remote host where the intermediate host will direct the traffic.	IP или имя хоста и порт, на которые промежуточный хост направит трафик.
+IP or Hostname	IP или имя хоста
+Identities	Учётные данные
+Identity	Профиль доступа
+If the server has a snapshot, Termian tries this password before saving it.	Если на сервере есть снимок, Termian попробует открыть его этим паролем перед сохранением.
+Import	Импорт
+Import from key file	Импортировать ключ из файла
+Import shell history	Импорт истории команд
+In the cloud	В облаке
+Incorrect format	Неверный формат
+Incorrect password.	Неверный пароль.
+Install	Установить
+Intermediate host	Промежуточный хост
+Invalid Vault key format.	Неверный формат ключа Vault.
+Invalid file name in folder.	Недопустимое имя файла в папке.
+Keep editing	Продолжить редактирование
+Keepalive Interval	Интервал keepalive
+Key	Ключ
+Key Export	Экспорт ключа
+Key export currently supports only UNIX systems. Use Advanced section to customize the export script.	Экспорт ключа поддерживается только на Unix. Скрипт экспорта можно изменить в разделе "Дополнительно".
+Key for the existing Vault is missing.	Отсутствует ключ существующего Vault.
+Key size (bits)	Размер ключа (бит)
+Key type	Тип ключа
+Keyboard	Клавиатура
+Keychain	Связка ключей
+Keys	Ключи
+Keys and identities you save appear here.	Здесь появятся сохранённые ключи и профили доступа.
+Keyword highlighting	Подсветка ключевых слов
+Kind	Тип
+Known Hosts	Известные хосты
+Label	Название
+Label *	Название *
+Language	Язык
+Last day	Последние сутки
+Last hour	Последний час
+Last week	Последняя неделя
+Later	Позже
+Latest	Стабильные
+Leave the field empty if the snapshot has no password.	Если снимок зашифрован пустым паролем, оставьте поле пустым.
+Light	Светлая
+Limit number of terminal rows. Set to 0 to maximum limit size.	Ограничение строк терминала. При 0 используется максимальный предел.
+List	Список
+List view	Вид списком
+Listening port	Порт прослушивания
+Local	Локально
+Local Forwarding	Локальный проброс
+Local Terminal	Локальный терминал
+Local Terminal Path	Путь к локальной оболочке
+Local account	Локальная учётная запись
+Local changes are ready to send	Есть новые локальные изменения → требуется отправка в облако
+Local forwarding lets you access a remote server's listening port as though it were local.	Локальный проброс открывает доступ к порту удалённого сервера с этого устройства.
+Local port number *	Локальный порт *
+Local user	Локальный пользователь
+Location	Расположение
+Location unavailable	Расположение недоступно
+Location – $1 *	Расположение ($1) *
+Lock	Заблокировать
+Lock Termian	Заблокировать Termian
+Lock password	Пароль блокировки
+Log in	Войти
+Login	Логин
+Logs	Журналы
+Logs retention policies	Срок хранения журналов
+Merge	Объединить
+Modified	Изменено
+More	Ещё
+More terminal keys	Дополнительные клавиши терминала
+Move focus between Split View panes	Перенести фокус между панелями
+NEW FORWARDING	НОВЫЙ ПРОБРОС
+NEW HOST	НОВЫЙ ХОСТ
+NEW SNIPPET	НОВЫЙ СНИППЕТ
+Name	Название
+Need help configuring the port forwarding rule?	Нужна помощь с пробросом портов?
+New	Создать
+New Folder	Новая папка
+New Group	Новая группа
+New Host	Новый хост
+New Identity	Новый профиль доступа
+New Key	Новый ключ
+New Package	Новый пакет
+New Port Forwarding	Новое правило проброса
+New Snippet	Новый сниппет
+New Tab	Новая вкладка
+New Vault	Новый Vault
+New Workspace	Новое рабочее пространство
+New cloud data is ready to download	В облаке появились новые данные → требуется получение на клиент
+New filename *	Новое имя файла *
+New folder	Новая папка
+New host or group	Новый хост или группа
+New password saved for subsequent uploads.	Новый пароль сохранён. Следующие отправки будут зашифрованы им.
+New snippet package	Новый пакет сниппетов
+New version	Новая версия
+Newest to oldest	Сначала новые
+No account	Нет учётной записи
+No file type associations yet	Нет привязок типов файлов
+No group	Без группы
+No hosts found	Хосты не найдены
+No hosts yet	Нет сохранённых хостов
+No key	Без ключа
+No known hosts	Нет известных хостов
+No newer version in this channel.	В выбранном канале нет более новой версии.
+No newer version in this channel.{checked}	В выбранном канале нет более новой версии.{checked}
+No ping reply. Click to try again	Нет ответа. Нажмите для повторной проверки
+No results	Ничего не найдено
+No saved certificates	Нет сохранённых сертификатов
+No saved keys	Нет сохранённых ключей
+No session logs	Нет журналов сеансов
+No startup command	Без команды запуска
+No token saved.	Токен ещё не сохранён.
+No verified revision is available for this operation.	Нет проверенной ревизии для этой операции.
+None	Нет
+Not all required fields are filled. Do you want to finish editing and discard all changes?	Не все обязательные поля заполнены. Отменить изменения?
+Number of rows	Число строк
+Octal mode	Права в восьмеричном виде
+Off	Выключено
+Oldest to newest	Сначала старые
+On	Включено
+On this device	На устройстве
+Once	Один раз
+Open	Открыть
+Open Port Forwarding Wizard	Открыть мастер проброса портов
+Open With	Открыть с помощью
+Open another terminal tab first.	Сначала откройте ещё одну вкладку терминала.
+Open log	Открыть журнал
+Open navigation menu	Открыть меню навигации
+Open settings	Открыть настройки
+Open terminal	Открыть терминал
+Open with...	Открыть с помощью...
+OpenSSH certificate	Сертификат OpenSSH
+Opening vault…	Открытие хранилища…
+Others	Остальные
+Owner	Владелец
+Ownership	Владелец и группа
+PASTE	ВСТАВИТЬ
+PING ALL	ПРОВЕРИТЬ ВСЕ
+Package	Пакет
+Packages	Пакеты
+Parent Group	Родительская группа
+Parent group	Родительская группа
+Parity	Чётность
+Passphrase	Парольная фраза
+Password	Пароль
+Password saved. Enter a new one to replace it.	Пароль сохранён. Поле — только для замены.
+Paste	Вставить
+Permissions	Права доступа
+Personal	Личное
+Personal vault	Личное хранилище
+Ping all saved hosts	Проверить все сохранённые хосты
+Ping host	Проверить хост
+Ping replied. Click to ping again	Хост ответил. Нажмите для повторной проверки
+Ping unavailable. Click to try again	Проверка недоступна. Нажмите, чтобы повторить
+Ping: {ms:.1} ms. Click to ping again	Пинг: {ms:.1} мс. Нажмите для повторной проверки
+Pinging host	Проверка хоста
+Pinging hosts ({})	Проверка хостов ({})
+Please wait…	Подождите…
+Port	Порт
+Port Forwarding	Проброс портов
+Port forwarding rule	Правило проброса портов
+Post-Quantum Key Exchange	Постквантовый обмен ключами
+Pre-release	Предварительные
+Press keys…	Нажмите клавиши…
+Previews for testing.	Предварительные выпуски для тестирования.
+Privacy lock	Блокировка приложения
+Privacy password	Пароль блокировки
+Private key	Закрытый ключ
+Public key	Открытый ключ
+Quick Connect	Быстрое подключение
+Quit Termian	Выйти из Termian
+Read	Чтение
+Ready to sync	Есть что синхронизировать
+Recent connections	Недавние подключения
+Recent connections appear here after you open a terminal.	Недавние подключения появятся после открытия терминала.
+Recent sessions	Недавние сеансы
+Record session logs	Записывать журналы сеансов
+Record upcoming sessions?	Записывать следующие сеансы?
+Redo	Повторить
+Refresh	Обновить
+Reject	Отклонить
+Remember	Запомнить
+Remote	Удалённо
+Remote Forwarding	Удалённый проброс
+Remote forwarding opens a port on the remote machine and forwards connections to the local (current) host.	Удалённый проброс открывает порт на удалённом сервере и направляет подключения на этот хост.
+Remote host	Удалённый хост
+Remote name	Имя на сервере
+Remote port number *	Удалённый порт *
+Remove	Удалить
+Remove Port Forwarding rule	Удалить правило проброса
+Remove a group	Удалить группу
+Remove a group and a host	Удалить группу и хост
+Remove a host	Удалить хост
+Remove bookmark	Удалить закладку
+Remove known host	Удалить известный хост
+Remove shortcuts scheme	Удалить схему горячих клавиш
+Removed	Удалено
+Rename	Переименовать
+Repeat password	Повторите пароль
+Replace	Заменить
+Replace existing item	Заменить существующий объект
+Replace the cloud snapshot with this device's Vault?	Заменить снимок в облаке хранилищем этого устройства?
+Request denied.	Подключение отклонено.
+Restart	Перезапустить
+Restart to update	Перезапустить и обновить
+Restore	Восстановить
+Retry	Повторить
+Retry with verbose logs	Повторить с подробным журналом
+Right click to paste	Вставка по правому щелчку
+Run	Запустить
+Run in all tabs	Запустить во всех вкладках
+Run in selected terminal	Запустить в выбранном терминале
+Run snippet?	Запустить сниппет?
+SAVE	СОХРАНИТЬ
+SELECT FILE	ВЫБРАТЬ ФАЙЛ
+SELECT FOLDER	ВЫБРАТЬ ПАПКУ
+SERIAL	ПОСЛ. ПОРТ
+SHELL HISTORY	ИСТОРИЯ КОМАНД
+SSH key	Ключ SSH
+SSH on	SSH на
+SSH password	Пароль SSH
+SSH port reached in {ms:.1} ms. No ICMP reply	Порт SSH доступен за {ms:.1} мс. Нет ответа ICMP
+SSH public key	Открытый ключ SSH
+SSH sign-in	Вход по SSH
+SSH terminal	Терминал SSH
+SSH.id — Passkeys for SSH	SSH.id: ключи доступа SSH
+SSH.id, Key, Certificate, FIDO2	SSH.id, ключ, сертификат, FIDO2
+Save	Сохранить
+Save commands you run often.	Сохраняйте часто используемые команды.
+Save comment	Сохранить комментарий
+Save comments	Сохранить комментарии
+Save passphrase	Сохранить парольную фразу
+Save settings	Сохранить настройки
+Save targets	Сохранить цели
+Save template	Сохранить шаблон
+Save the address, token and password in your cloud settings first.	Сначала сохраните адрес сервера, токен и пароль в настройках своего облака.
+Save workspace	Сохранить рабочее пространство
+Script *	Скрипт *
+Search	Поиск
+Search hosts or tabs	Поиск хостов или вкладок
+Search identities	Поиск профилей доступа
+Search tags	Поиск тегов
+Search terminal	Поиск в терминале
+Search terminal - {}	Поиск в терминале: {}
+Second pane	Вторая панель
+Secrets stay in this profile. Enter a new value to replace a saved secret or leave the field empty to keep it.	Токен и пароли сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.
+Select All	Выделить всё
+Select Color Theme	Выберите цветовую тему
+Select Host	Выберите хост
+Select a host	Выберите хост
+Select a host where the port will be open. The traffic from this port will be forwarded to the destination host.	Выберите хост для прослушивания порта. Трафик с этого порта будет направлен на хост назначения.
+Select a saved host to browse its files.	Выберите сохранённый хост для просмотра файлов.
+Select host	Выбрать хост
+Select targets	Выбрать цели
+Select the destination host:	Выберите хост назначения:
+Select the intermediate host:	Выберите промежуточный хост:
+Select the label:	Укажите название:
+Select the port forwarding type:	Выберите тип проброса:
+Select the remote host:	Выберите удалённый хост:
+Self-hosted cloud	Своё облако
+Send and replace	Отправить и заменить
+Send changes	Отправить изменения
+Send data to server	Отправить данные на сервер
+Serial Port	Последовательный порт
+Server address	Адрес сервера
+Server behind a proxy with Basic auth	Сервер за прокси с Basic auth
+Server key changed	Ключ сервера изменился
+Server not configured	Сервер не настроен
+Session logging	Запись сеансов
+Session logs	Логи сессий
+Set a label	Укажите название
+Set an environment variable for {host}	Задайте переменную окружения для {host}
+Set the local port and binding address:	Укажите локальный порт и адрес:
+Set the port and binding address:	Укажите порт и адрес:
+Settings	Настройки
+Settings changed during the operation. Check the changes and try again.	Конфигурация изменилась во время операции. Проверьте изменения и повторите.
+Settings saved	Настройки сохранены
+Shortcut	Горячая клавиша
+Shortcuts	Горячие клавиши
+Show Hidden Files	Показать скрытые файлы
+Show logs	Показать журнал
+Sign-out, account switching and account deletion are disabled. Sync uses your server.	Выход, смена аккаунта и удаление учётной записи отключены. Синхронизация работает через ваше облако.
+Size	Размер
+Skip	Пропустить
+Skip all	Пропустить всё
+Skip wizard	Пропустить мастер
+Snapshot password	Пароль снимка
+Snippet	Сниппет
+Snippet package	Пакет сниппетов
+Snippets	Сниппеты
+Snippets you add to it appear here.	Здесь появятся сниппеты, добавленные в пакет.
+Sort	Сортировка
+Split horizontally	Разделить по горизонтали
+Split view	Разделённый вид
+Split with a tab	Разделить с вкладкой
+Stable releases.	Стабильные выпуски.
+Start	Запустить
+Start by connecting to a saved host to manage your files with SFTP.	Подключитесь к сохранённому хосту для работы с файлами по SFTP.
+Start over	Начать заново
+Startup Command	Команда запуска
+Stop	Остановить
+Stop bits	Стоповые биты
+Stop broadcast	Отключить общий ввод
+Stop recording session logs?	Отключить запись сеансов?
+Store your most used commands to reuse them in one click.	Сохраняйте команды, чтобы запускать их одним нажатием.
+Switch	Переключить
+Switch SFTP host?	Сменить SFTP-хост?
+Switch Vault	Выбрать Vault
+Sync	Синхронизация
+Sync automatically every hour (merge device and cloud data)	Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)
+Sync complete	Синхронизировано
+Sync in progress…	Выполняется синхронизация…
+Sync merges new, changed and deleted records in both directions. Termian makes an encrypted backup before applying cloud changes.	Изменения устройства и облака будут объединены: новые, изменённые и удалённые записи переносятся в обе стороны. Перед применением изменений из облака создаётся зашифрованная резервная копия.
+Sync now	Синхронизировать
+Sync preview	Предпросмотр синхронизации
+Sync with your server. Sending or getting data replaces the snapshot after confirmation.	Личная синхронизация с вашим сервером. Кнопки отправки и получения заменяют снимок целиком после подтверждения.
+Sync: cloud is not configured	Синхронизация — облако не настроено
+Syncing…	Синхронизация…
+TERMINAL	ТЕРМИНАЛ
+Tab	Вкладка
+Tags	Теги
+Tags (comma-separated)	Теги через запятую
+Targets	Цели
+Targets for execution	Хосты для запуска
+Termian is locked	Termian заблокирован
+Termian keeps terminal logs for 60 days. Clearing removes session entries and their local and cloud log files for the selected period.	Логи всего вывода терминала хранятся 60 дней. Очистка удаляет записи на экране Logs, файлы логов на этом устройстве и их копии в своём облаке за выбранный период.
+Termian {version} is available	Доступен Termian {version}
+Termian {version} is ready	Termian {version} установлен
+Terminal	Терминал
+Terminal emulation type	Эмуляция терминала
+Terminal session logs	Журналы сеансов
+Terminal settings	Настройки терминала
+Terminal theme	Тема терминала
+Terminals	Терминалы
+Text Size	Размер текста
+The APK does not match the selected Termian release.	APK не соответствует выбранному выпуску Termian.
+The APK signing certificate does not match the installed app.	Сертификаты APK и установленного приложения не совпадают.
+The APK version code is not newer than the installed version.	Код версии APK не новее установленного.
+The Vault list is damaged.	Список Vault повреждён.
+The authenticity of {} can not be established.	Не удалось проверить подлинность {}.
+The cloud snapshot is empty	Снимок в облаке пуст
+The cloud snapshot replaces the app data. Termian makes an encrypted backup first.	Данные приложения будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия.
+The connection was closed.	Подключение закрыто.
+The connection was refused to protect you from a possible man-in-the-middle attack.	Подключение отклонено: ключ сервера не совпал с сохранённым.
+The current SFTP connection and its transfers will close.	Текущее SFTP-подключение и передачи будут прерваны.
+The destination address and port where the traffic will be forwarded.	Адрес и порт, на которые будет направлен трафик.
+The host key of {} is different from the one saved in known hosts.	Ключ {} отличается от сохранённого ключа.
+The intermediate host will receive the traffic that will be forwarded to the local (current) host.	Промежуточный хост получит трафик для локального устройства.
+The new version starts after a restart. Restarting closes open SSH sessions.	Новая версия запустится после перезапуска. Открытые SSH-сессии при перезапуске закроются.
+The password is too long.	Пароль слишком длинный.
+The passwords do not match.	Пароли не совпадают.
+The provider returned a repeated directory.	Поставщик файлов вернул папку повторно.
+The selected Vault file is missing.	Файл выбранного Vault отсутствует.
+Themes	Темы
+This deletes the folder and its contents.	Папка и её содержимое будут удалены.
+This deletes the remote entry.	Объект на сервере будет удалён.
+This device is used as an intermediate host to access the remote host.	Это устройство используется для доступа к удалённому хосту.
+This package is empty	Пакет пуст
+This password is for this device.	Этот пароль действует на данном устройстве.
+This port will be open on the local (current) device, and it will receive the traffic.	Этот порт на локальном устройстве будет принимать трафик.
+This port will be open on the local (current) machine to forward traffic to the remote host.	Этот порт на локальном устройстве будет направлять трафик на удалённый хост.
+This profile is always active. No Termius account is required.	Профиль постоянно активен. Вход в аккаунт Termius не требуется.
+This uploads a replacement snapshot. It overwrites changes from other devices.	Снимок в облаке будет полностью заменён текущими данными. Изменения других устройств будут затёрты.
+Time	Время
+Token	Токен
+Token saved. Enter a new one to replace it.	Токен сохранён. Поле — только для замены.
+Too many attempts. Try again in 10 seconds.	Слишком много попыток. Повторите через 10 секунд.
+Too many attempts. Try again in a few seconds.	Слишком много попыток. Повторите через несколько секунд.
+Transfer stopped	Передача остановлена
+Transfer was incomplete	Передача не завершена
+Transfers	Передачи
+Try Again	Попробовать снова
+Turn off if you're experiencing issues with legacy devices	Отключите, если не удаётся подключиться к старым устройствам
+Type	Тип
+Type {}	Тип {}
+UPLOAD	ЗАГРУЗИТЬ
+UPLOAD ALL	ЗАГРУЗИТЬ ВСЁ
+Unavailable	Недоступно
+Undo	Отменить
+Unknown certificate format	Неизвестный формат сертификата
+Unknown device	Неизвестное устройство
+Unlock	Разблокировать
+Update channel	Канал обновлений
+Update channel changed. Check for updates.	Канал изменён. Проверьте обновления.
+Update failed.	Не удалось обновить приложение.
+Update template	Обновить шаблон
+Updated: {}	Обновлено: {}
+Updates	Обновления
+Updates are disabled in this build.	В этой сборке обновления отключены.
+Updates are unavailable in local builds or when TERMIAN_DISABLE_UPDATES is set.	Автообновление отключено: это локальная сборка или задан TERMIAN_DISABLE_UPDATES.
+Updates have not been checked yet.	Обновления ещё не проверялись.
+Upload	Загрузить
+Upload failed	Не удалось загрузить
+Upload file	Загрузить файл
+Upload folder	Загрузить папку
+Use Option as Meta key	Использовать Option как Meta
+Use Touch ID or Mac password	Использовать Touch ID или пароль Mac
+Use an empty snapshot password	Использовать пустой пароль снимка
+Use bright colours for bold text	Яркие цвета для полужирного текста
+User	Пользователь
+Username	Имя пользователя
+Value	Значение
+Vault	Хранилище
+Vault locked	Хранилище заблокировано
+Vault name	Название Vault
+Vault not found.	Vault не найден.
+Vault: {error}	Хранилище: {error}
+Vaults	Хранилища
+Verify server key	Проверьте ключ сервера
+Version	Версия
+Wait for log upload to finish, then try again.	Дождитесь отправки логов и повторите.
+Wait for sync to finish, then clear the logs again.	Дождитесь завершения синхронизации и повторите очистку.
+Wait for sync to finish.	Дождитесь завершения синхронизации.
+Wait for the cloud operation to finish, then try again.	Дождитесь завершения операции с облаком и повторите.
+Wait for the current operation to finish before switching Vaults.	Дождитесь завершения операции перед сменой Vault.
+Waiting for macOS…	Ожидание ответа macOS…
+Waiting to ping	В очереди на проверку
+We will forward traffic from specified port and interface address of the selected host.	Трафик будет направлен с указанного порта и интерфейса выбранного хоста.
+When both devices change a record, the cloud version wins. When one side deletes a changed record, sync keeps the edited version.	Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия.
+Working…	Выполняется…
+Workspace	Рабочее пространство
+Workspace name	Название рабочего пространства
+Workspace templates	Шаблоны рабочих пространств
+Write	Запись
+You are going to remove this group:	Будет удалена эта группа:
+You are going to remove this host:	Будет удалён этот хост:
+You don't have shell history yet	История команд пуста
+Your recent sessions will be visible here. In the meantime, start connecting with {PALETTE_SHORTCUT}	Здесь появятся недавние сеансы. Для подключения нажмите {PALETTE_SHORTCUT}
+Z to A	От Я до А
+both sides have changes	изменения есть на обеих сторонах
+data matches	данные совпадают
+snapshot is empty	снимок пуст
+{version} is ready to install on restart. Restarting closes open SSH sessions.	{version} загружена и будет установлена при перезапуске. Открытые SSH-сессии при перезапуске закроются.
+{} (optional)	{} (необязательно)

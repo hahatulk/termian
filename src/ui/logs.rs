@@ -1,3 +1,4 @@
+use termian_native::language::text as tr;
 use std::{ops::Range, rc::Rc};
 
 use gpui::{canvas, div, fill, list, prelude::*, px, rgb, rgba, size, svg, Bounds, ClipboardItem, Context, Div, ElementInputHandler, EntityInputHandler, FocusHandle, FontWeight, HighlightStyle, InteractiveText, KeyDownEvent, ListAlignment, ListOffset, ListState, MouseButton, Pixels, Point, ScrollHandle, SharedString, StyledText, Subscription, TextLayout, UnderlineStyle, UTF16Selection, Window};
@@ -289,7 +290,7 @@ impl Shell {
         let Some(editor) = editing else {
             let links = termian_native::log_comment::links(&entry.comment);
             let ranges: Vec<_> = links.iter().map(|(range, _)| range.clone()).collect();
-            let text = StyledText::new(if entry.comment.is_empty() { "Add a comment".to_owned() } else { entry.comment.clone() })
+            let text = StyledText::new(if entry.comment.is_empty() { tr("Add a comment").to_owned() } else { entry.comment.clone() })
                 .with_highlights(ranges.iter().cloned().map(|range| (range, HighlightStyle { color: Some(rgb(theme::ACCENT).into()), ..Default::default() })));
             // Legacy shows «Add a comment» only while the row is hovered.
             return cell.child(div().flex_1().min_w_0().line_clamp(2).text_color(rgb(if entry.comment.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
@@ -366,7 +367,7 @@ impl Shell {
             }))
             .child(div().id("log-comment-scroll").min_h(px(24.)).max_h(px(96.)).overflow_y_scroll().track_scroll(&editor.scroll)
                 .child(div().relative().text_size(px(14.)).line_height(px(24.)).text_color(rgb(theme::TEXT)).child(text).child(paint)))
-            .when(editor.draft.text().is_empty(), |d| d.child(div().absolute().top_0().left_0().text_color(rgb(theme::TEXT_MUTED)).child("Add a comment")));
+            .when(editor.draft.text().is_empty(), |d| d.child(div().absolute().top_0().left_0().text_color(rgb(theme::TEXT_MUTED)).child(tr("Add a comment"))));
         let input = text_input::field(input, "log-comment", Mode::Multiline, |shell, window, _| window.focus(&shell.editor_focus), cx);
         cell.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)).child(input)
     }
@@ -376,14 +377,14 @@ impl Shell {
         let sort = (self.logs_view.oldest_first, self.logs_view.saved_first);
         self.logs_view.list.update(&self.vault.history, sort, editing, &self.editor_focus);
         if self.logs_view.list.items.is_empty() {
-            return bare_page("logs-scroll", empty_state("logs", "Session logs", "Sessions you open are recorded here, encrypted. Recordings are kept for 60 days.")).into_any_element();
+            return bare_page("logs-scroll", empty_state("logs", tr("Session logs"), "Sessions you open are recorded here, encrypted. Recordings are kept for 60 days.")).into_any_element();
         }
         let arrow = || svg().path(icon("sorting")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED))
             .when(self.logs_view.oldest_first, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))));
         let mut header = div().h(px(48.)).flex_none().flex().items_center().border_b_1().border_color(rgb(theme::SURFACE_ACTIVE));
         for (index, label, glyph) in [
-            (0, "User", "person"), (1, "Host", "hosts"), (2, "Time", "calendar"),
-            (3, "Device", "local"), (4, "Location", "navigate"),
+            (0, tr("User"), "person"), (1, tr("Host"), "hosts"), (2, tr("Time"), "calendar"),
+            (3, tr("Device"), "local"), (4, tr("Location"), "navigate"),
         ] {
             header = header.child(log_column(index)
                 .child(svg().path(icon(glyph)).size(px(12.)).flex_none().text_color(rgb(theme::TEXT_MUTED)))
@@ -438,7 +439,7 @@ impl Shell {
             os_tile_sized(os, 34., 17.).rounded(px(10.))
         };
         let duration = entry.disconnected_at.map(|end| duration_label(entry.connected_at, end));
-        let device = if entry.device.is_empty() { "Unknown device" } else { entry.device.as_str() };
+        let device = if entry.device.is_empty() { tr("Unknown device") } else { entry.device.as_str() };
         let background = if stripe { theme::SURFACE_ACTIVE } else { theme::SURFACE };
         div()
             .id(SharedString::from(format!("log-{id}")))
@@ -450,12 +451,12 @@ impl Shell {
             .items_center()
             .bg(rgb(background))
             .surface_feedback(background)
-            .child(log_column(0).child(log_tile("person", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value("No account", None)))
+            .child(log_column(0).child(log_tile("person", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value(tr("No account"), None)))
             .child(log_column(1).child(tile).child(log_value(&entry.label, Some(&entry.subtitle))))
             .child(log_column(2).child(log_value(&clock_label(entry.connected_at), duration.as_deref())))
             .child(log_column(3).child(log_tile("local", theme::TITLE_BAR, theme::TEXT_MUTED)).child(log_value(device, None)))
             .child(log_column(4).flex_col().items_start().gap_0()
-                .child(div().w_full().truncate().text_color(rgb(theme::TEXT_MUTED)).child("Location unavailable"))
+                .child(div().w_full().truncate().text_color(rgb(theme::TEXT_MUTED)).child(tr("Location unavailable")))
                 .child(self.render_log_saved_cell(entry, cx)))
             .on_click(cx.listener(move |shell, _, window, cx| shell.open_log(id, window, cx)))
     }

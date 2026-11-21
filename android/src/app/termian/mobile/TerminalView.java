@@ -1,5 +1,7 @@
 package app.termian.mobile;
 
+import static app.termian.mobile.MainActivity.text;
+
 import android.graphics.Canvas;
 import android.graphics.Paint;
 import android.graphics.Typeface;
@@ -31,7 +33,7 @@ final class TerminalView extends View {
         this.activity = activity;
         setFocusable(true);
         setFocusableInTouchMode(true);
-        setContentDescription("Терминал SSH");
+        setContentDescription(text("Терминал SSH"));
         padding = activity.dp(6);
         font(14);
     }
@@ -59,7 +61,7 @@ final class TerminalView extends View {
     void tag(String id, boolean secondary) {
         tabId = id;
         this.secondary = secondary;
-        setContentDescription(secondary ? "Second terminal pane" : "Терминал SSH");
+        setContentDescription(secondary ? "Second terminal pane" : text("Терминал SSH"));
     }
 
     void reportSize() {

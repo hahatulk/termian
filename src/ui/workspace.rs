@@ -3,6 +3,7 @@
 //! sending what is typed in one pane to all of them, and «Split
 //! horizontally» opening the same connection again beside a pane.
 
+use termian_native::language::text as tr;
 use std::collections::BTreeMap;
 
 use gpui::{div, prelude::*, px, rgb, AnyElement, Context, Entity, MouseButton, Window};
@@ -568,7 +569,7 @@ impl Shell {
             let candidates = self.candidates.entry(host).or_insert_with(|| std::sync::Arc::new(Candidates::for_host(&self.vault, host))).clone();
             let enabled = self.vault.terminal.autocomplete && !split;
             pane.view.update(cx, |view, _| {
-                view.set_area(list + left, TOP_INSET + top + header, w, h - header);
+                view.set_area(w, h - header);
                 view.set_autocomplete(enabled, candidates);
             });
             let focused = framed && id == workspace.focused;
@@ -630,7 +631,7 @@ impl Shell {
                                         .rounded_sm()
                                         .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
                                         .child(gpui::svg().path(super::assets::icon("expand")).size(px(10.)).text_color(rgb(theme::TEXT)))
-                                        .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Focus mode".into())).into())
+                                        .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip(tr("Focus mode").into())).into())
                                         .on_click(cx.listener(move |shell, _, _, cx| {
                                             cx.stop_propagation();
                                             shell.set_view_mode(tab, ViewMode::Focus, Some(id), cx);
@@ -736,7 +737,7 @@ impl Shell {
                     .gap(px(4.))
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .child("Terminals")
+                    .child(tr("Terminals"))
                     .child(div().text_xs().opacity(0.5).child("•"))
                     .child(div().opacity(0.5).child(workspace.panes.len().to_string())),
             )
@@ -744,8 +745,8 @@ impl Shell {
                 div()
                     .flex()
                     .gap(px(10.))
-                    .child(control("focus-split-view", "collapse", false).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Split view".into())).into()).on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Split, None, cx))))
-                    .child(control("focus-broadcast", "broadcast", workspace.broadcast).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip("Broadcast input".into())).into()).on_click(cx.listener(move |shell, _, _, cx| {
+                    .child(control("focus-split-view", "collapse", false).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip(tr("Split view").into())).into()).on_click(cx.listener(move |shell, _, _, cx| shell.set_view_mode(tab, ViewMode::Split, None, cx))))
+                    .child(control("focus-broadcast", "broadcast", workspace.broadcast).tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip(tr("Broadcast input").into())).into()).on_click(cx.listener(move |shell, _, _, cx| {
                         shell.tabs.activate(tab);
                         shell.toggle_broadcast(cx);
                     }))),
@@ -815,19 +816,19 @@ impl Shell {
         let (tab, at) = self.tab_menu?;
         let reopen = self.can_reopen(tab);
         let items = super::host_editor::menu_panel("tab-menu")
-            .child(super::host_editor::menu_row("tab-menu-duplicate".into(), "Duplicate", false, !reopen).when(reopen, |d| {
+            .child(super::host_editor::menu_row("tab-menu-duplicate".into(), tr("Duplicate"), false, !reopen).when(reopen, |d| {
                 d.on_click(cx.listener(move |shell, _, window, cx| {
                     shell.tab_menu = None;
                     shell.reopen(tab, false, window, cx);
                 }))
             }))
-            .child(super::host_editor::menu_row("tab-menu-split".into(), "Split horizontally", false, !reopen).when(reopen, |d| {
+            .child(super::host_editor::menu_row("tab-menu-split".into(), tr("Split horizontally"), false, !reopen).when(reopen, |d| {
                 d.on_click(cx.listener(move |shell, _, window, cx| {
                     shell.tab_menu = None;
                     shell.reopen(tab, true, window, cx);
                 }))
             }))
-            .child(super::host_editor::menu_row("tab-menu-close".into(), "Close", false, false).on_click(cx.listener(move |shell, _, _, cx| {
+            .child(super::host_editor::menu_row("tab-menu-close".into(), tr("Close"), false, false).on_click(cx.listener(move |shell, _, _, cx| {
                 shell.tab_menu = None;
                 shell.close_terminal_tab(tab);
                 cx.notify();
@@ -873,7 +874,7 @@ impl Shell {
                 .bg(rgb(if on { theme::ERROR } else { theme::SURFACE }))
                 .text_color(rgb(if on { 0xffffff } else { theme::TEXT }))
                 .surface_feedback(if on { theme::ERROR } else { theme::SURFACE })
-                .child("Broadcast")
+                .child(tr("Broadcast"))
                 .on_click(cx.listener(|shell, _, _, cx| shell.toggle_broadcast(cx)))
                 .into_any_element(),
         )

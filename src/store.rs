@@ -3,6 +3,7 @@
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crypto_secretbox::{aead::Aead, KeyInit, Nonce, XSalsa20Poly1305};
@@ -33,11 +34,12 @@ trait KeyProtection {
     fn unwrap(&self, wrapped: &[u8]) -> Result<Key, String>;
 }
 
+#[derive(Clone)]
 pub struct Store {
     path: PathBuf,
     cipher: XSalsa20Poly1305,
     header: Vec<u8>,
-    _lock: Option<std::fs::File>,
+    _lock: Option<Arc<std::fs::File>>,
 }
 
 pub struct CloudBackups {
@@ -131,7 +133,7 @@ impl Store {
         {
             let (mut store, vault, migrated) =
                 Self::load_protected(path, &macos::SecureEnclave, read_legacy_key, import)?;
-            store._lock = Some(lock);
+            store._lock = Some(Arc::new(lock));
             if migrated {
                 match legacy_entry().and_then(|entry| entry.delete_credential()) {
                     Ok(()) | Err(keyring::Error::NoEntry) => {}
@@ -159,7 +161,7 @@ impl Store {
                 Err(error) => return Err(format!("vault key unavailable: {error}")),
             };
             let mut store = Self::with_header(path, &key, MAGIC.to_vec());
-            store._lock = Some(lock);
+            store._lock = Some(Arc::new(lock));
             let vault = store.load_or_import(import)?;
             Ok((store, vault))
         }
@@ -224,6 +226,29 @@ impl Store {
         &self.path
     }
 
+    pub(crate) fn at(&self, path: PathBuf) -> Self {
+        Self { path, ..self.clone() }
+    }
+
+    pub fn logs_dir(&self) -> PathBuf {
+        self.path.with_file_name("session-logs-v2")
+    }
+
+    pub fn known_hosts_path(&self) -> PathBuf {
+        self.path.with_file_name("known_hosts")
+    }
+
+    pub(crate) fn read_data<T: serde::de::DeserializeOwned>(&self) -> Result<Option<T>, String> {
+        read_vault(&self.path)?.map(|raw| {
+            let bytes = self.decrypt(&raw)?;
+            serde_json::from_slice(&bytes).map_err(|e| format!("vault data is damaged: {e}"))
+        }).transpose()
+    }
+
+    pub(crate) fn save_data(&self, data: &impl serde::Serialize) -> Result<(), String> {
+        self.write_data(data, false)
+    }
+
     pub fn cloud_backups(&self) -> CloudBackups {
         CloudBackups {
             dir: self.path.with_file_name("self-cloud-backups"),
@@ -263,7 +288,11 @@ impl Store {
     }
 
     fn save_inner(&self, vault: &Vault, verify: bool) -> Result<(), String> {
-        let plain = Zeroizing::new(serde_json::to_vec(vault).map_err(|e| e.to_string())?);
+        self.write_data(vault, verify)
+    }
+
+    fn write_data(&self, data: &impl serde::Serialize, verify: bool) -> Result<(), String> {
+        let plain = Zeroizing::new(serde_json::to_vec(data).map_err(|e| e.to_string())?);
         let (nonce, sealed) = seal(&self.cipher, &plain)?;
         let dir = self.path.parent().ok_or("vault path has no folder")?;
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;

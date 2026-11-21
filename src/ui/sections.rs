@@ -1,6 +1,7 @@
 //! Vaults sections other than Hosts: Keychain, Port Forwarding, Snippets,
 //! Known Hosts, Logs.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, ClickEvent, Context, Div, SharedString, Stateful};
 use termian_native::theme;
 
@@ -70,21 +71,21 @@ impl Shell {
         let vault = &self.vault;
         let mut body = div();
         if !vault.keys.is_empty() {
-            body = body.child(section_title("Keys")).child(self.cards("keychain").children(self.listed("keychain", &vault.keys, |k| k.label.as_str(), |k| k.id).into_iter().map(|key| {
+            body = body.child(section_title(tr("Keys"))).child(self.cards("keychain").children(self.listed("keychain", &vault.keys, |k| k.label.as_str(), |k| k.id).into_iter().map(|key| {
                 let id = key.id;
                 super::keyboard::target(card(format!("key-{id}").into(), tile("keychain", theme::TILE_BLUE), key.label.clone(), key.subtitle()))
                     .on_click(cx.listener(move |shell, _, window, cx| shell.edit_key(id, window, cx)))
             })));
         }
         if !vault.identities.is_empty() {
-            body = body.child(section_title("Identities")).child(self.cards("keychain").children(self.listed("keychain", &vault.identities, |i| i.label.as_str(), |i| i.id).into_iter().map(|identity| {
+            body = body.child(section_title(tr("Identities"))).child(self.cards("keychain").children(self.listed("keychain", &vault.identities, |i| i.label.as_str(), |i| i.id).into_iter().map(|identity| {
                 let id = identity.id;
                 super::keyboard::target(card(format!("identity-{id}").into(), tile("identity", theme::TILE_BLUE), identity.label.clone(), identity.subtitle().to_owned()))
                     .on_click(cx.listener(move |shell, _, window, cx| shell.edit_identity(id, window, cx)))
             })));
         }
         if vault.keys.is_empty() && vault.identities.is_empty() {
-            body = body.child(empty_state("keychain", "Add a key", "Keys and identities you save appear here."));
+            body = body.child(empty_state("keychain", tr("Add a key"), tr("Keys and identities you save appear here.")));
         }
         let add_key = tool_button("new-key", "keychain", "KEY").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_key(window, cx)));
         // The split button's arrow, as in the legacy Keychain toolbar.

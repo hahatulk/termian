@@ -1,5 +1,7 @@
 package app.termian.mobile;
 
+import static app.termian.mobile.MainActivity.text;
+
 import android.content.ContentResolver;
 import android.database.Cursor;
 import android.net.Uri;
@@ -38,14 +40,14 @@ final class DocumentTree {
             label = cursor.getString(0);
         }
         readChildren(id,local,0);
-        return valid(label) ? label : "Folder";
+        return valid(label) ? label : text("Folder");
     }
 
     void exportFrom(Path local, String name) throws IOException {
         String id = DocumentsContract.getTreeDocumentId(tree);
         Cursor existing = children(id);
         try (Cursor cursor = existing) {
-            while(cursor.moveToNext()) if (name.equals(cursor.getString(1))) throw new IOException("A folder with this name already exists.");
+            while(cursor.moveToNext()) if (name.equals(cursor.getString(1))) throw new IOException(text("A folder with this name already exists."));
         }
         Uri target = create(document(id),DIR,name);
         writeChildren(local,target,0);
@@ -56,14 +58,14 @@ final class DocumentTree {
     private Cursor children(String id) throws IOException {
         Uri uri=DocumentsContract.buildChildDocumentsUriUsingTree(tree,id);
         Cursor result=resolver.query(uri,new String[]{ID,NAME,MIME},null,null,null);
-        if(result==null)throw new IOException("Could not list the selected folder.");
+        if(result==null)throw new IOException(text("Could not list the selected folder."));
         return result;
     }
 
     private Uri create(Uri parent,String mime,String name) throws IOException {
-        if(!valid(name))throw new IOException("Invalid file name in folder.");
+        if(!valid(name))throw new IOException(text("Invalid file name in folder."));
         Uri result=DocumentsContract.createDocument(resolver,parent,mime,name);
-        if(result==null)throw new IOException("Could not create a document.");
+        if(result==null)throw new IOException(text("Could not create a document."));
         return result;
     }
 
@@ -73,17 +75,17 @@ final class DocumentTree {
     }
 
     private void count(int depth) throws IOException {
-        if(depth>48||--remaining<0)throw new IOException("Folder exceeds the transfer limit.");
+        if(depth>48||--remaining<0)throw new IOException(text("Folder exceeds the transfer limit."));
     }
 
     private void readChildren(String id,Path local,int depth) throws IOException {
-        if(!visited.add(id))throw new IOException("The provider returned a repeated directory.");
-        if(depth>48)throw new IOException("Folder exceeds the transfer limit.");
+        if(!visited.add(id))throw new IOException(text("The provider returned a repeated directory."));
+        if(depth>48)throw new IOException(text("Folder exceeds the transfer limit."));
         try(Cursor cursor=children(id)) {
             while(cursor.moveToNext()) {
                 count(depth);
                 String child=cursor.getString(0), name=cursor.getString(1), mime=cursor.getString(2);
-                if(!valid(name))throw new IOException("Invalid file name in folder.");
+                if(!valid(name))throw new IOException(text("Invalid file name in folder."));
                 Path target=local.resolve(name);
                 if(DIR.equals(mime)) {
                     Files.createDirectory(target);
@@ -114,7 +116,7 @@ final class DocumentTree {
     }
 
     static void copy(InputStream in,OutputStream out) throws IOException {
-        if(in==null||out==null)throw new IOException("Could not open the document.");
+        if(in==null||out==null)throw new IOException(text("Could not open the document."));
         byte[] block=new byte[65536];
         for(int n;(n=in.read(block))!=-1;)out.write(block,0,n);
     }

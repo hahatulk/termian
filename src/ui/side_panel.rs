@@ -4,6 +4,7 @@
 //! Copy, View more) and a History tab (Shell History with PASTE and SAVE),
 //! after the Terminal tab (Search terminal and Autocomplete).
 
+use termian_native::language::text as tr;
 use std::collections::HashSet;
 
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, ClickEvent, ClipboardItem, Context, Div, FocusHandle, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Window};
@@ -241,7 +242,7 @@ impl Shell {
             .font_weight(FontWeight::BOLD)
             .text_color(rgb(theme::TEXT))
             .child(svg().path(icon("snippets")).size(px(14.)).text_color(rgb(theme::TEXT)))
-            .child("New Snippet")
+            .child(tr("New Snippet"))
             .on_click(cx.listener(|shell, _, window, cx| shell.panel_edit_snippet(None, window, cx)));
         let empty = panel.search.is_empty();
         let search = div()
@@ -257,7 +258,7 @@ impl Shell {
             .border_1()
             .border_color(rgb(if focused { theme::ACCENT } else { theme::INPUT }))
             .child(svg().path(icon("search")).size(px(12.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(text_input::text("panel-search", &panel.search, "Search", focused, Mode::Line, cx));
+            .child(text_input::text("panel-search", &panel.search, tr("Search"), focused, Mode::Line, cx));
         let search = text_input::field(search, "panel-search", Mode::Line, |shell, window, _| window.focus(&shell.panel_focus), cx);
         let header = div().flex().gap_2().when(empty, |d| d.child(new)).child(search);
 
@@ -321,11 +322,11 @@ impl Shell {
                 .justify_center()
                 .gap_2()
                 .text_center()
-                .child(div().text_color(rgb(theme::TEXT)).child("Create snippets from your commands"))
-                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Store your most used commands to reuse them in one click."))
+                .child(div().text_color(rgb(theme::TEXT)).child(tr("Create snippets from your commands")))
+                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Store your most used commands to reuse them in one click.")))
                 .into_any_element()
         } else {
-            div().flex_1().pt_5().text_center().text_color(rgb(theme::TEXT_MUTED)).child("No results").into_any_element()
+            div().flex_1().pt_5().text_center().text_color(rgb(theme::TEXT_MUTED)).child(tr("No results")).into_any_element()
         };
         div().flex_1().min_h_0().flex().flex_col().gap(px(12.)).child(header).child(body)
     }
@@ -377,11 +378,11 @@ impl Shell {
         let script = self.vault.snippet(id).map(|s| s.script.clone()).unwrap_or_default();
         let (run, all, paste, copy) = (script.clone(), script.clone(), script.clone(), script);
         let items = menu_panel("panel-snippet-menu")
-            .child(menu_row("panel-menu-run".into(), "Run", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&run, true, window, cx))))
-            .child(menu_row("panel-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_edit_snippet(Some(id), window, cx))))
-            .child(menu_row("panel-menu-all".into(), "Run in all tabs", false, false).on_click(cx.listener(move |shell, _, _, cx| shell.run_in_all_tabs(&all, cx))))
-            .child(menu_row("panel-menu-paste".into(), "Paste", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&paste, false, window, cx))))
-            .child(menu_row("panel-menu-copy".into(), "Copy", false, false).on_click(cx.listener(move |shell, _, _, cx| {
+            .child(menu_row("panel-menu-run".into(), tr("Run"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&run, true, window, cx))))
+            .child(menu_row("panel-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_edit_snippet(Some(id), window, cx))))
+            .child(menu_row("panel-menu-all".into(), tr("Run in all tabs"), false, false).on_click(cx.listener(move |shell, _, _, cx| shell.run_in_all_tabs(&all, cx))))
+            .child(menu_row("panel-menu-paste".into(), tr("Paste"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&paste, false, window, cx))))
+            .child(menu_row("panel-menu-copy".into(), tr("Copy"), false, false).on_click(cx.listener(move |shell, _, _, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                 if let Some(panel) = &mut shell.side_panel {
                     panel.menu = None;
@@ -433,8 +434,8 @@ impl Shell {
                 .justify_center()
                 .gap_2()
                 .text_center()
-                .child(div().text_color(rgb(theme::TEXT)).child("You don't have shell history yet"))
-                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Connect to a host via SSH to see your shell history here."));
+                .child(div().text_color(rgb(theme::TEXT)).child(tr("You don't have shell history yet")))
+                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Connect to a host via SSH to see your shell history here.")));
         }
         let button = |id: String, text: &str, accent: bool| {
             div()
@@ -456,7 +457,7 @@ impl Shell {
             let saving = panel.saving.as_ref().filter(|(row, _)| *row == i).map(|(_, l)| l.clone());
             let script = command.script.clone();
             let actions: AnyElement = if saving.is_some() {
-                button(format!("panel-history-done-{i}"), "Done", true)
+                button(format!("panel-history-done-{i}"), tr("Done"), true)
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         let label = shell.side_panel.as_mut().and_then(|p| p.saving.take()).map(|(_, l)| l).unwrap_or_default();
                         shell.save_panel_history(i, label);
@@ -471,19 +472,19 @@ impl Shell {
                     .gap_1()
                     .invisible()
                     .group_hover(hover.clone(), |s| s.visible())
-                    .child(button(format!("panel-history-save-{i}"), "SAVE", true).on_click(cx.listener(move |shell, _, window, cx| {
+                    .child(button(format!("panel-history-save-{i}"), tr("SAVE"), true).on_click(cx.listener(move |shell, _, window, cx| {
                         if let Some(panel) = &mut shell.side_panel {
                             panel.saving = Some((i, String::new()));
                         }
                         window.focus(&shell.panel_focus);
                         cx.notify();
                     })))
-                    .child(button(format!("panel-history-paste-{i}"), "PASTE", false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&script, false, window, cx))))
+                    .child(button(format!("panel-history-paste-{i}"), tr("PASTE"), false).on_click(cx.listener(move |shell, _, window, cx| shell.panel_send(&script, false, window, cx))))
                     .into_any_element()
             };
             let title = match saving {
                 Some(label) => {
-                    let input = div().id("panel-label").child(text_input::text("panel-label", &label, "Set a label", true, Mode::Line, cx));
+                    let input = div().id("panel-label").child(text_input::text("panel-label", &label, tr("Set a label"), true, Mode::Line, cx));
                     text_input::field(input, "panel-label", Mode::Line, |shell, window, _| window.focus(&shell.panel_focus), cx).into_any_element()
                 }
                 None => div().truncate().font_family("Menlo").text_xs().text_color(rgb(theme::TEXT)).child(command.script.clone()).into_any_element(),
@@ -529,7 +530,7 @@ impl Shell {
             .rounded(px(5.))
             .bg(rgb(theme::INPUT))
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(div().flex_1().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(format!("Search terminal - {}", if cfg!(target_os = "macos") { "⌘ + F" } else { "Ctrl + F" })))
+            .child(div().flex_1().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(termian_native::ui_format!("Search terminal - {}", "Поиск в терминале: {}", if cfg!(target_os = "macos") { "⌘ + F" } else { "Ctrl + F" })))
             .on_click(cx.listener(|shell, _, window, cx| {
                 if let Some(view) = shell.active_terminal() {
                     view.update(cx, |view, cx| view.open_search(window, cx));
@@ -550,7 +551,7 @@ impl Shell {
                     .items_center()
                     .gap(px(5.))
                     .text_color(rgb(theme::TEXT))
-                    .child("Autocomplete")
+                    .child(tr("Autocomplete"))
                     .child(div().px(px(4.)).rounded(px(3.)).border_1().border_color(rgb(theme::TEXT_MUTED)).text_size(px(9.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT_MUTED)).child("BETA")),
             )
             .child(
@@ -562,7 +563,7 @@ impl Shell {
                     .gap(px(5.))
                     .cursor_pointer()
                     .text_color(rgb(theme::TEXT))
-                    .child(if on { "Enabled" } else { "Disabled" })
+                    .child(if on { tr("Enabled") } else { tr("Disabled") })
                     .child(if open { caret.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { caret })
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(panel) = &mut shell.side_panel {
@@ -573,7 +574,7 @@ impl Shell {
             );
         let choices = open.then(|| {
             super::settings_terminal::menu_list(
-                [("Enabled", true), ("Disabled", false)]
+                [(tr("Enabled"), true), (tr("Disabled"), false)]
                     .into_iter()
                     .map(|(text, value)| {
                         super::settings_terminal::menu_item(format!("panel-autocomplete-{text}").into(), text, value == on)
@@ -625,7 +626,7 @@ impl Shell {
             .items_center()
             .gap_2()
             .text_color(rgb(theme::TEXT))
-            .child(div().flex_1().child("Font"))
+            .child(div().flex_1().child(tr("Font")))
             // Legacy «Font ›»; the arrow turns down while the font settings are open.
             .child(svg().path(icon("arrow_right")).size(px(8.)).text_color(rgb(theme::TEXT)).when(panel.font_open, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(std::f32::consts::FRAC_PI_2)))))
             .on_click(cx.listener(|shell, _, _, cx| {
@@ -668,7 +669,7 @@ impl Shell {
             let text_size = div()
                 .flex()
                 .items_center()
-                .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child("Text Size"))
+                .child(div().flex_1().text_color(rgb(theme::TEXT_MUTED)).child(tr("Text Size")))
                 .child(step("panel-size-down", "−", size <= MIN_FONT_SIZE).when(size > MIN_FONT_SIZE, |d| d.on_click(cx.listener(move |shell, _, _, cx| shell.update_terminal(|t| t.set_font_size(size - 1), cx)))))
                 .child(div().w(px(51.)).mx(px(5.)).h(px(36.)).flex().items_center().justify_center().rounded_md().border_1().border_color(rgb(theme::SURFACE_ACTIVE)).text_color(rgb(theme::TEXT)).child(size.to_string()))
                 .child(step("panel-size-up", "+", size >= MAX_FONT_SIZE).when(size < MAX_FONT_SIZE, |d| d.on_click(cx.listener(move |shell, _, _, cx| shell.update_terminal(|t| t.set_font_size(size + 1), cx)))));
@@ -736,7 +737,7 @@ impl Shell {
             .child(font_header)
             .children(font)
             .child(div().h(px(1.)).bg(rgb(theme::SURFACE_ACTIVE)))
-            .child(div().text_color(rgb(theme::TEXT_MUTED)).child("Themes"))
+            .child(div().text_color(rgb(theme::TEXT_MUTED)).child(tr("Themes")))
             .child(div().id("panel-themes").flex_1().overflow_y_scroll().flex().flex_col().gap(px(2.)).children(rows))
     }
 }

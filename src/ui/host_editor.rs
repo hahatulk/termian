@@ -3,6 +3,7 @@
 //! three-dots menu (Connect, Duplicate, Remove). Also the host card's
 //! right-click menu and the "Remove a host" confirmation.
 
+use termian_native::language::text as tr;
 use gpui::{
     div, prelude::*, px, rgb, svg, AnyElement, Context, Div, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point,
     SharedString, Stateful, Window,
@@ -135,7 +136,7 @@ fn remove_card(host: &Host, close: Stateful<Div>, remove: Stateful<Div>) -> Div 
                 .child(div().text_color(rgb(theme::TEXT)).child(host.display_label().to_owned()))
                 .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(host.subtitle())),
         );
-    dialog::card("Remove a host", false, close, div().flex().flex_col().child("You are going to remove this host:").child(row), vec![
+    dialog::card(tr("Remove a host"), false, close, div().flex().flex_col().child(tr("You are going to remove this host:")).child(row), vec![
         remove.into_any_element(),
     ])
 }
@@ -397,7 +398,7 @@ impl Shell {
     pub fn render_host_editor(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let editor = self.host_editor.as_ref()?;
         let host = &editor.host;
-        let title = if editor.created_here { "New Host" } else { "Host Details" };
+        let title = if editor.created_here { tr("New Host") } else { tr("Host Details") };
         let header = div()
             .h(px(64.))
             .flex_none()
@@ -408,7 +409,7 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             // Legacy shows the vault under the title; this client has only the personal one.
-            .child(div().flex_1().flex().flex_col().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title)).child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("Personal vault")))
+            .child(div().flex_1().flex().flex_col().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title)).child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(tr("Personal vault"))))
             .when(!editor.is_new, |d| {
                 d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT)))
             })
@@ -431,13 +432,13 @@ impl Shell {
             )
             .child(dialog::collapse_button("editor-close").on_click(cx.listener(|shell, _, _, cx| shell.close_editor(cx))));
 
-        let address = card("Address").child(
+        let address = card(tr("Address")).child(
             div()
                 .flex()
                 .items_center()
                 .gap_3()
                 .child(host_tile(host).size(px(36.)).rounded_lg())
-                .child(self.input(Field::Address, "IP or Hostname", &host.address, false, window, cx).flex_1()),
+                .child(self.input(Field::Address, tr("IP or Hostname"), &host.address, false, window, cx).flex_1()),
         );
 
         let group_label = host.group.and_then(|g| self.vault.group(g)).map(|g| g.label.clone());
@@ -464,7 +465,7 @@ impl Shell {
                     cx.notify();
                 }))
             };
-            let mut list = div().id("editor-group-list").occlude().max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, "No group".into(), cx));
+            let mut list = div().id("editor-group-list").occlude().max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().child(choice(None, tr("No group").into(), cx));
             for group in &self.vault.groups {
                 // Nested groups read as a path: work / Cenix.
                 let path = self.vault.breadcrumbs(Some(group.id)).iter().map(|g| g.label.as_str()).collect::<Vec<_>>().join(" / ");
@@ -506,7 +507,7 @@ impl Shell {
                         cx.notify();
                     }))
             }))
-            .child(text_input::text(("host", Field::Tags), &editor.tag, if host.tags.is_empty() { "Tags" } else { "" }, tags_focused, Mode::Line, cx));
+            .child(text_input::text(("host", Field::Tags), &editor.tag, if host.tags.is_empty() { tr("Tags") } else { "" }, tags_focused, Mode::Line, cx));
         let tags = text_input::field(tags, ("host", Field::Tags), Mode::Line, |shell, window, _| {
             if let Some(editor) = &mut shell.host_editor {
                 editor.field = Field::Tags;
@@ -545,8 +546,8 @@ impl Shell {
             }))
         });
 
-        let general = card("General")
-            .child(self.input(Field::Label, "Label", &host.label, false, window, cx))
+        let general = card(tr("General"))
+            .child(self.input(Field::Label, tr("Label"), &host.label, false, window, cx))
             // Lists open over the form, like the legacy autocomplete menus.
             .child(div().relative().child(group_picker).children(groups.map(|list| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list)))))
             .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)))
@@ -569,19 +570,19 @@ impl Shell {
                     .gap_2()
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(theme::TEXT))
-                    .child("SSH on")
+                    .child(tr("SSH on"))
                     .child(self.input(Field::Port, "22", &editor.port, false, window, cx).w(px(90.)))
                     .child("port"),
             )
             .child(divider())
-            .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child("Credentials"))
+            .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(tr("Credentials")))
             .children(self.render_credentials(window, cx))
             .child(divider())
             .children(self.render_ssh_settings(cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(
-            dialog::button("editor-connect", "Connect", Kind::Accent, !can_connect)
+            dialog::button("editor-connect", tr("Connect"), Kind::Accent, !can_connect)
                 .w_full()
                 .when(can_connect, |d| d.on_click(cx.listener(|shell, _, window, cx| shell.connect_from_editor(window, cx)))),
         );
@@ -591,13 +592,13 @@ impl Shell {
             let disabled = editor.is_new;
             div().absolute().top(px(56.)).right(px(50.)).child(
                 menu_panel("editor-menu")
-                    .child(menu_row("editor-menu-connect".into(), "Connect", false, disabled).when(!disabled, |d| {
+                    .child(menu_row("editor-menu-connect".into(), tr("Connect"), false, disabled).when(!disabled, |d| {
                         d.on_click(cx.listener(|shell, _, window, cx| shell.connect_from_editor(window, cx)))
                     }))
-                    .child(menu_row("editor-menu-duplicate".into(), "Duplicate", false, disabled).when(!disabled, |d| {
+                    .child(menu_row("editor-menu-duplicate".into(), tr("Duplicate"), false, disabled).when(!disabled, |d| {
                         d.on_click(cx.listener(move |shell, _, window, cx| shell.duplicate_host(id, window, cx)))
                     }))
-                    .child(menu_row("editor-menu-remove".into(), "Remove", true, disabled).when(!disabled, |d| {
+                    .child(menu_row("editor-menu-remove".into(), tr("Remove"), true, disabled).when(!disabled, |d| {
                         d.on_click(cx.listener(|shell, _, _, cx| {
                             if let Some(editor) = &mut shell.host_editor {
                                 editor.menu_open = false;
@@ -617,7 +618,7 @@ impl Shell {
                 }
                 cx.notify();
             }));
-            let remove = dialog::button("remove-confirm", "Remove", Kind::Error, false)
+            let remove = dialog::button("remove-confirm", tr("Remove"), Kind::Error, false)
                 .on_click(cx.listener(move |shell, _, _, cx| shell.remove_host(id, cx)));
             dialog::backdrop(remove_card(host, close, remove))
         });
@@ -630,12 +631,12 @@ impl Shell {
                     }
                     cx.notify();
                 }));
-                let discard = dialog::button("discard-confirm", "Discard changes", Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
+                let discard = dialog::button("discard-confirm", tr("Discard changes"), Kind::Error, false).on_click(cx.listener(|shell, _, _, cx| {
                     shell.host_editor = None;
                     cx.notify();
                 }));
                 dialog::backdrop(dialog::card(
-                    "Do you want to discard changes?",
+                    tr("Do you want to discard changes?"),
                     false,
                     close,
                     dialog::text("Not all required fields are filled. Do you want to finish editing and discard all changes?"),
@@ -692,7 +693,7 @@ impl Shell {
                 cx.notify();
             }));
             let remove =
-                dialog::button("remove-confirm", "Remove", Kind::Error, false).on_click(cx.listener(move |shell, _, _, cx| shell.remove_host(id, cx)));
+                dialog::button("remove-confirm", tr("Remove"), Kind::Error, false).on_click(cx.listener(move |shell, _, _, cx| shell.remove_host(id, cx)));
             return Some(dialog::backdrop(remove_card(host, close, remove)).into_any_element());
         }
         let viewport = window.viewport_size();
@@ -700,11 +701,11 @@ impl Shell {
         let rows = 5 + self.workspace_tabs().len();
         let top = menu.position.y.min(viewport.height - px(rows as f32 * 32. + 16.));
         let items = menu_panel("host-menu")
-            .child(menu_row("host-menu-quick".into(), "Quick Connect", false, false).on_click(cx.listener(move |shell, _, window, cx| {
+            .child(menu_row("host-menu-quick".into(), tr("Quick Connect"), false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.host_menu = None;
                 shell.connect_host(id, window, cx);
             })))
-            .child(menu_row("host-menu-sftp".into(), "Connect with SFTP", false, false).on_click(cx.listener(move |shell, _, window, cx| {
+            .child(menu_row("host-menu-sftp".into(), tr("Connect with SFTP"), false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.host_menu = None;
                 shell.open_sftp_for(id, window, cx);
             })))
@@ -715,13 +716,13 @@ impl Shell {
                     shell.add_to_workspace(tab, id, window, cx);
                 }))
             }))
-            .child(menu_row("host-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| {
+            .child(menu_row("host-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.edit_host(id, window, cx);
             })))
-            .child(menu_row("host-menu-duplicate".into(), "Duplicate", false, false).on_click(cx.listener(move |shell, _, window, cx| {
+            .child(menu_row("host-menu-duplicate".into(), tr("Duplicate"), false, false).on_click(cx.listener(move |shell, _, window, cx| {
                 shell.duplicate_host(id, window, cx);
             })))
-            .child(menu_row("host-menu-remove".into(), "Remove", true, false).on_click(cx.listener(|shell, _, _, cx| {
+            .child(menu_row("host-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(menu) = &mut shell.host_menu {
                     menu.confirm_remove = true;
                 }

@@ -1,6 +1,7 @@
 //! Automatic updates from GitHub Releases. Packages in `latest.json` carry
 //! a minisign signature bound to the version in the signed comment.
 
+use crate::language::text as tr;
 use serde::{Deserialize, Serialize};
 use std::{
     io::Read,
@@ -15,7 +16,6 @@ const REPOSITORY: &str = match option_env!("TERMIAN_UPDATE_REPOSITORY") {
 };
 const MANIFEST_ASSET: &str = "latest.json";
 pub const FIRST_CHECK: Duration = Duration::from_secs(20);
-pub const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PACKAGE_BYTES: u64 = 256 * 1024 * 1024;
 const PROGRESS_STEP: u64 = 256 * 1024;
@@ -28,12 +28,60 @@ pub enum Channel {
     PreRelease,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Mode {
+    Manual,
+    Check,
+    #[default]
+    Download,
+}
+
+impl Mode {
+    pub fn automatic_download(self) -> Option<bool> {
+        match self {
+            Self::Manual => None,
+            Self::Check => Some(false),
+            Self::Download => Some(true),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Interval {
+    Hour,
+    #[default]
+    SixHours,
+    TwelveHours,
+    Day,
+}
+
+impl Interval {
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(3600 * match self {
+            Self::Hour => 1,
+            Self::SixHours => 6,
+            Self::TwelveHours => 12,
+            Self::Day => 24,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Schedule {
+    pub mode: Mode,
+    pub interval: Interval,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum State {
     Disabled,
     #[default]
     Idle,
     Checking,
+    Available,
     Downloading,
     /// Verified and in place; starts on the next launch.
     Installed,
@@ -53,7 +101,7 @@ pub struct Status {
 
 impl Status {
     pub fn set(&mut self, state: State, version: Option<String>, error: Option<String>) {
-        let checked_at = if matches!(state, State::Idle | State::Error | State::Installed) { Some(unix_ms()) } else { self.checked_at };
+        let checked_at = if matches!(state, State::Idle | State::Available | State::Error | State::Installed) { Some(unix_ms()) } else { self.checked_at };
         *self = Status { state, version, error, downloaded: None, total: None, checked_at };
     }
 }
@@ -69,19 +117,20 @@ impl Status {
     /// formats `checked_at` (Unix ms).
     pub fn text(&self, time: impl Fn(u64) -> String) -> String {
         let mb = |bytes: u64| format!("{:.1}", bytes as f64 / 1_048_576.0);
-        let version = self.version.as_ref().map_or_else(|| "Новая версия".to_owned(), |v| format!("Termian {v}"));
-        let checked = self.checked_at.map(|at| format!(" Проверено: {}.", time(at))).unwrap_or_default();
+        let version = self.version.as_ref().map_or_else(|| tr("Новая версия").to_owned(), |v| format!("Termian {v}"));
+        let checked = self.checked_at.map(|at| crate::ui_format!(" Checked: {}.", " Проверено: {}.", time(at))).unwrap_or_default();
         match self.state {
-            State::Disabled => "Автообновление отключено: это локальная сборка или задан TERMIAN_DISABLE_UPDATES.".into(),
-            State::Checking => "Проверка обновлений…".into(),
+            State::Disabled => tr("Автообновление отключено: это локальная сборка или задан TERMIAN_DISABLE_UPDATES.").into(),
+            State::Checking => tr("Проверка обновлений…").into(),
+            State::Available => crate::ui_format!("Available: {version}.{checked}", "Доступна новая версия: {version}.{checked}"),
             State::Downloading => match self.percent() {
-                Some(percent) => format!("Загрузка {version}: {percent}% ({} из {} МБ)", mb(self.downloaded.unwrap_or(0)), mb(self.total.unwrap_or(0))),
-                None => format!("Загрузка {version}: {} МБ", mb(self.downloaded.unwrap_or(0))),
+                Some(percent) => crate::ui_format!("Download {version}: {percent}% ({} of {} MB)", "Загрузка {version}: {percent}% ({} из {} МБ)", mb(self.downloaded.unwrap_or(0)), mb(self.total.unwrap_or(0))),
+                None => crate::ui_format!("Download {version}: {} MB", "Загрузка {version}: {} МБ", mb(self.downloaded.unwrap_or(0))),
             },
-            State::Installed => format!("{version} загружена и будет установлена при перезапуске. Открытые SSH-сессии при перезапуске закроются."),
-            State::Error => format!("Не удалось проверить или загрузить обновление.{checked}"),
-            State::Idle if self.checked_at.is_some() => format!("В выбранном канале нет более новой версии.{checked}"),
-            State::Idle => "Обновления проверяются автоматически через 20 секунд после запуска и затем каждые 6 часов.".into(),
+            State::Installed => crate::ui_format!("{version} is ready to install on restart. Restarting closes open SSH sessions.", "{version} загружена и будет установлена при перезапуске. Открытые SSH-сессии при перезапуске закроются."),
+            State::Error => crate::ui_format!("Could not check for or download an update.{checked}", "Не удалось проверить или загрузить обновление.{checked}"),
+            State::Idle if self.checked_at.is_some() => crate::ui_format!("No newer version in this channel.{checked}", "В выбранном канале нет более новой версии.{checked}"),
+            State::Idle => tr("Обновления ещё не проверялись.").into(),
         }
     }
 }
@@ -589,16 +638,31 @@ mod tests {
     fn version_tab_text_follows_the_state() {
         let time = |_| "13.11.2026, 10:00".to_owned();
         let mut status = Status::default();
-        assert!(status.text(time).starts_with("Обновления проверяются автоматически"));
+        assert_eq!(status.text(time), "Updates have not been checked yet.");
+        status.set(State::Available, Some("1.3.0".into()), None);
+        assert_eq!(status.text(time), "Available: Termian 1.3.0. Checked: 13.11.2026, 10:00.");
         status = Status { state: State::Downloading, version: Some("1.3.0".into()), downloaded: Some(3 * 1_048_576), total: Some(12 * 1_048_576), ..Status::default() };
-        assert_eq!(status.text(time), "Загрузка Termian 1.3.0: 25% (3.0 из 12.0 МБ)");
+        assert_eq!(status.text(time), "Download Termian 1.3.0: 25% (3.0 of 12.0 MB)");
         status.total = None;
-        assert_eq!(status.text(time), "Загрузка Termian 1.3.0: 3.0 МБ");
+        assert_eq!(status.text(time), "Download Termian 1.3.0: 3.0 MB");
         status = Status { state: State::Idle, checked_at: Some(1), ..Status::default() };
-        assert_eq!(status.text(time), "В выбранном канале нет более новой версии. Проверено: 13.11.2026, 10:00.");
+        assert_eq!(status.text(time), "No newer version in this channel. Checked: 13.11.2026, 10:00.");
         status.state = State::Installed;
-        assert!(status.text(time).starts_with("Новая версия загружена"));
+        assert!(status.text(time).starts_with("New version is ready"));
         assert!(Status { state: State::Disabled, ..Status::default() }.text(time).contains("TERMIAN_DISABLE_UPDATES"));
+    }
+
+    #[test]
+    fn update_schedule_defaults_and_modes() {
+        let schedule: Schedule = serde_json::from_str("{}").unwrap();
+        assert_eq!(schedule.mode.automatic_download(), Some(true));
+        assert_eq!(schedule.interval.duration(), Duration::from_secs(6 * 3600));
+        assert_eq!(Mode::Manual.automatic_download(), None);
+        let check = Schedule { mode: Mode::Check, interval: Interval::Day };
+        let stored = serde_json::to_string(&check).unwrap();
+        assert_eq!(serde_json::from_str::<Schedule>(&stored).unwrap(), check);
+        assert_eq!(check.mode.automatic_download(), Some(false));
+        assert_eq!(check.interval.duration(), Duration::from_secs(24 * 3600));
     }
 
     #[test]

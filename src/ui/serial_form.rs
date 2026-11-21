@@ -3,6 +3,7 @@
 //! suggestions, «Advanced» (Charset, Data bits, Stop bits, Flow Control,
 //! Parity), Close and Connect (Enter).
 
+use termian_native::language::text as tr;
 use std::time::Duration;
 
 use gpui::{div, prelude::*, px, rgb, svg, Context, Div, FontWeight, KeyDownEvent, SharedString, Stateful, Window};
@@ -234,8 +235,8 @@ impl TerminalView {
         let (path_list, baud_list, charset_list) = (at(Field::Path), at(Field::Baud), at(Field::Charset));
         let mut suggestions = suggestions;
         let mut body = div().flex().flex_col().gap(px(14.));
-        body = body.child(div().w_full().child(self.serial_field(Field::Path, "Serial Port", &options.path, window, cx)).children(path_list.then(|| suggestions.take()).flatten()));
-        body = body.child(div().w_full().child(self.serial_field(Field::Baud, "Baud rate", &form.baud_text, window, cx)).children(baud_list.then(|| suggestions.take()).flatten()));
+        body = body.child(div().w_full().child(self.serial_field(Field::Path, tr("Serial Port"), &options.path, window, cx)).children(path_list.then(|| suggestions.take()).flatten()));
+        body = body.child(div().w_full().child(self.serial_field(Field::Baud, tr("Baud rate"), &form.baud_text, window, cx)).children(baud_list.then(|| suggestions.take()).flatten()));
         let advanced = div()
             .id("serial-advanced")
             .w(px(WIDTH))
@@ -252,7 +253,7 @@ impl TerminalView {
                     .items_center()
                     .font_weight(FontWeight::BOLD)
                     .text_color(rgb(theme::TEXT))
-                    .child(div().flex_1().child("Advanced"))
+                    .child(div().flex_1().child(tr("Advanced")))
                     .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(!form.advanced, |d| d.with_transformation(gpui::Transformation::rotate(gpui::radians(-std::f32::consts::FRAC_PI_2))))),
             )
             .on_click(cx.listener(|view, _, _, cx| {
@@ -267,11 +268,11 @@ impl TerminalView {
             let flow: Vec<(FlowControl, String)> = FlowControl::ALL.iter().map(|f| (*f, f.label().to_owned())).collect();
             let parity: Vec<(Parity, String)> = Parity::ALL.iter().map(|p| (*p, p.label().to_owned())).collect();
             advanced
-                .child(div().w_full().child(self.serial_field(Field::Charset, "Charset", &form.charset_text, window, cx)).children(charset_list.then(|| suggestions.take()).flatten()))
-                .child(self.serial_choice("serial-data", "Data bits", &data, options.data_bits, |o, v| o.data_bits = v, cx))
-                .child(self.serial_choice("serial-stop", "Stop bits", &stop, options.stop_bits, |o, v| o.stop_bits = v, cx))
-                .child(self.serial_choice("serial-flow", "Flow Control", &flow, options.flow_control, |o, v| o.flow_control = v, cx))
-                .child(self.serial_choice("serial-parity", "Parity", &parity, options.parity, |o, v| o.parity = v, cx))
+                .child(div().w_full().child(self.serial_field(Field::Charset, tr("Charset"), &form.charset_text, window, cx)).children(charset_list.then(|| suggestions.take()).flatten()))
+                .child(self.serial_choice("serial-data", tr("Data bits"), &data, options.data_bits, |o, v| o.data_bits = v, cx))
+                .child(self.serial_choice("serial-stop", tr("Stop bits"), &stop, options.stop_bits, |o, v| o.stop_bits = v, cx))
+                .child(self.serial_choice("serial-flow", tr("Flow Control"), &flow, options.flow_control, |o, v| o.flow_control = v, cx))
+                .child(self.serial_choice("serial-parity", tr("Parity"), &parity, options.parity, |o, v| o.parity = v, cx))
         } else {
             advanced
         };
@@ -281,8 +282,8 @@ impl TerminalView {
         let actions = div()
             .flex()
             .gap(px(10.))
-            .child(dialog::button("serial-close", "Close", Kind::Regular, false).on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalEvent::Close))))
-            .child(dialog::button("serial-connect", "Connect", Kind::Accent, disabled).when(!disabled, |d| d.on_click(cx.listener(|view, _, window, cx| view.serial_connect(window, cx)))));
+            .child(dialog::button("serial-close", tr("Close"), Kind::Regular, false).on_click(cx.listener(|_, _, _, cx| cx.emit(TerminalEvent::Close))))
+            .child(dialog::button("serial-connect", tr("Connect"), Kind::Accent, disabled).when(!disabled, |d| d.on_click(cx.listener(|view, _, window, cx| view.serial_connect(window, cx)))));
         Some(
             div()
                 .id("serial-form")

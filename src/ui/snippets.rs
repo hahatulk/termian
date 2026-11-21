@@ -4,6 +4,7 @@
 //! (Run, Edit, Duplicate, Remove) and «Add targets» / «Select targets».
 //! «Run» opens an SSH tab per target and types the script once it is ready.
 
+use termian_native::language::text as tr;
 use gpui::{div, prelude::*, px, rgb, svg, AnyElement, ClickEvent, Context, Div, FontWeight, KeyDownEvent, MouseButton, MouseDownEvent, Pixels, Point, SharedString, Stateful, Window};
 use termian_native::snippets::{self, Coverage, PackageChoice, LABEL_LIMIT, MAX_TARGETS};
 use termian_native::theme;
@@ -198,7 +199,7 @@ impl Shell {
                 .id("snippets-crumb-all")
                 .rounded_sm().icon_feedback()
                 .text_color(rgb(theme::ACCENT))
-                .child("All snippets")
+                .child(tr("All snippets"))
                 .on_click(cx.listener(|shell, _, _, cx| {
                     shell.snippet_package = None;
                     shell.close_snippet_sliders();
@@ -208,18 +209,18 @@ impl Shell {
                 div().pt_5().flex().items_center().gap_2().text_sm().child(crumb).child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(div().text_color(rgb(theme::TEXT)).child(package.label.clone())),
             );
         } else if !vault.packages.is_empty() {
-            body = body.child(section_title("Packages")).child(self.cards("snippets").children(self.listed("snippets", &vault.packages, |p| p.label.as_str(), |p| p.id).into_iter().map(|p| self.render_package_card(p, cx))));
+            body = body.child(section_title(tr("Packages"))).child(self.cards("snippets").children(self.listed("snippets", &vault.packages, |p| p.label.as_str(), |p| p.id).into_iter().map(|p| self.render_package_card(p, cx))));
         }
         if !snippets.is_empty() {
             let snippets = self.listed("snippets", snippets, |s| if s.label.is_empty() { s.script.as_str() } else { s.label.as_str() }, |s| s.id);
-            body = body.child(section_title("Snippets")).child(self.cards("snippets").children(snippets.into_iter().map(|s| self.render_snippet_card(s, cx))));
+            body = body.child(section_title(tr("Snippets"))).child(self.cards("snippets").children(snippets.into_iter().map(|s| self.render_snippet_card(s, cx))));
         } else if open.is_some() {
-            body = body.child(empty_state("snippets_package", "This package is empty", "Snippets you add to it appear here."));
+            body = body.child(empty_state("snippets_package", tr("This package is empty"), tr("Snippets you add to it appear here.")));
         } else if vault.packages.is_empty() {
-            body = body.child(empty_state("snippets", "Create a snippet", "Save commands you run often."));
+            body = body.child(empty_state("snippets", tr("Create a snippet"), tr("Save commands you run often.")));
         }
 
-        let add = tool_button("new-snippet", "snippets", "NEW SNIPPET").rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_snippet(window, cx)));
+        let add = tool_button("new-snippet", "snippets", tr("NEW SNIPPET")).rounded_r_none().on_click(cx.listener(|shell, _, window, cx| shell.new_snippet(window, cx)));
         let arrow = div()
             .id("new-snippet-menu")
             .surface_feedback(theme::INPUT)
@@ -236,7 +237,7 @@ impl Shell {
                 cx.notify();
             }));
         let split = div().id("new-snippet-split").flex().items_center().gap(px(1.)).child(add).child(arrow);
-        let history = tool_button("shell-history", "logs", "SHELL HISTORY").on_click(cx.listener(|shell, _, window, cx| {
+        let history = tool_button("shell-history", "logs", tr("SHELL HISTORY")).on_click(cx.listener(|shell, _, window, cx| {
             shell.close_snippet_sliders();
             shell.shell_history = Some(ShellHistoryPanel::default());
             window.focus(&shell.editor_focus);
@@ -483,8 +484,8 @@ impl Shell {
     fn snippet_menu_rows(&self, id: u64, saved: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let disabled = !saved;
         let panel = menu_panel("snippet-form-menu")
-            .child(menu_row("snippet-form-run".into(), "Run", false, disabled).when(saved, |d| d.on_click(cx.listener(move |shell, _, window, cx| shell.execute_snippet(id, window, cx)))))
-            .child(menu_row("snippet-form-duplicate".into(), "Duplicate", false, disabled).when(saved, |d| {
+            .child(menu_row("snippet-form-run".into(), tr("Run"), false, disabled).when(saved, |d| d.on_click(cx.listener(move |shell, _, window, cx| shell.execute_snippet(id, window, cx)))))
+            .child(menu_row("snippet-form-duplicate".into(), tr("Duplicate"), false, disabled).when(saved, |d| {
                 d.on_click(cx.listener(move |shell, _, window, cx| {
                     if let Some(copy) = shell.vault.duplicate_snippet(id) {
                         shell.save_vault();
@@ -492,7 +493,7 @@ impl Shell {
                     }
                 }))
             }))
-            .child(menu_row("snippet-form-remove".into(), "Remove", true, disabled).when(saved, |d| {
+            .child(menu_row("snippet-form-remove".into(), tr("Remove"), true, disabled).when(saved, |d| {
                 d.on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.snippet_editor {
                         editor.menu_open = false;
@@ -532,7 +533,7 @@ impl Shell {
         let snippet = &editor.snippet;
         let saved = self.vault.snippet(snippet.id).is_some();
         let on = |field: Field| focused && editor.field == field;
-        let head = header(if editor.created_here && !saved { "New Snippet" } else { "Edit Snippet" })
+        let head = header(if editor.created_here && !saved { tr("New Snippet") } else { tr("Edit Snippet") })
             .when(saved, |d| d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT))))
             .child(dots("snippet-dots").on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.snippet_editor {
@@ -549,7 +550,7 @@ impl Shell {
         let label = field_box(on(Field::Label))
             .id("snippet-label")
             .flex_1()
-            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Label), &snippet.label, "Action description", on(Field::Label), Mode::Line, cx)));
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Label), &snippet.label, tr("Action description"), on(Field::Label), Mode::Line, cx)));
         let label = text_input::field(label, ("snippet", Field::Label), Mode::Line, |shell, window, cx| shell.focus_snippet_field(Field::Label, window, cx), cx);
 
         // Package: a typed name filters the list or creates a package.
@@ -558,7 +559,7 @@ impl Shell {
         let package = field_box(on(Field::Package))
             .id("snippet-package")
             .child(svg().path(icon("snippets_package")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Package), &package_text, if chosen.is_some() && on(Field::Package) { chosen.as_deref().unwrap_or_default() } else { "Add a Package" }, on(Field::Package), Mode::Line, cx)))
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Package), &package_text, if chosen.is_some() && on(Field::Package) { chosen.as_deref().unwrap_or_default() } else { tr("Add a Package") }, on(Field::Package), Mode::Line, cx)))
             .when(chosen.is_some(), |d| {
                 d.child(
                     div()
@@ -567,7 +568,7 @@ impl Shell {
                         .px_2()
                         .text_sm()
                         .text_color(rgb(theme::ACCENT))
-                        .child("Remove")
+                        .child(tr("Remove"))
                         .on_click(cx.listener(|shell, _, _, cx| {
                             cx.stop_propagation();
                             shell.choose_package(None);
@@ -580,7 +581,7 @@ impl Shell {
             let choices = snippets::package_choices(&self.vault, &editor.package_query);
             let mut list = div().id("snippet-package-list").max_h(px(220.)).overflow_y_scroll().p_1().rounded_md().bg(rgb(theme::SURFACE)).border_1().border_color(rgb(theme::SURFACE_ACTIVE)).shadow_lg();
             if choices.is_empty() {
-                list = list.child(div().px_3().py_2().text_sm().text_color(rgb(theme::TEXT_MUTED)).child("Create a new package by typing the name"));
+                list = list.child(div().px_3().py_2().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(tr("Create a new package by typing the name")));
             }
             for (i, choice) in choices.into_iter().enumerate() {
                 let text = match &choice {
@@ -610,7 +611,7 @@ impl Shell {
             .font_family("Menlo")
             .text_sm()
             .text_color(rgb(if snippet.script.is_empty() { theme::TEXT_MUTED } else { theme::TEXT }))
-            .child(text_input::text(("snippet", Field::Script), &snippet.script, "Script *", script_on, Mode::Multiline, cx));
+            .child(text_input::text(("snippet", Field::Script), &snippet.script, tr("Script *"), script_on, Mode::Multiline, cx));
         let script = text_input::field(script, ("snippet", Field::Script), Mode::Multiline, |shell, window, cx| shell.focus_snippet_field(Field::Script, window, cx), cx);
 
         let form = div()
@@ -654,20 +655,20 @@ impl Shell {
         let card = div().p(px(15.)).flex().flex_col().gap(px(10.)).rounded_lg().bg(rgb(theme::SURFACE));
         let targets: Vec<_> = snippet.targets.iter().filter_map(|h| self.vault.host(*h)).collect();
         if targets.is_empty() {
-            let placeholder = || host_row(String::new(), tile("new_host", theme::SURFACE_ACTIVE), "IP or Hostname".into(), "SSH".into()).bg(rgb(theme::BACKGROUND)).opacity(0.6);
+            let placeholder = || host_row(String::new(), tile("new_host", theme::SURFACE_ACTIVE), tr("IP or Hostname").into(), "SSH".into()).bg(rgb(theme::BACKGROUND)).opacity(0.6);
             return card
-                .child(div().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child("Targets for execution"))
-                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Automate work with snippets. Add target hosts and automatically run the snippet on them in one click!"))
+                .child(div().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child(tr("Targets for execution")))
+                .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Automate work with snippets. Add target hosts and automatically run the snippet on them in one click!")))
                 .child(placeholder().id("target-placeholder-1"))
                 .child(placeholder().id("target-placeholder-2"))
-                .child(dialog::button("snippet-add-targets", "Add targets", Kind::Text, !saved).text_color(rgb(theme::ACCENT)).when(saved, |d| d.on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))));
+                .child(dialog::button("snippet-add-targets", tr("Add targets"), Kind::Text, !saved).text_color(rgb(theme::ACCENT)).when(saved, |d| d.on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))));
         }
         card.child(
             div()
                 .flex()
                 .items_center()
-                .child(div().flex_1().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child("Targets"))
-                .child(div().id("snippet-edit-targets").rounded_sm().icon_feedback().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme::ACCENT)).child("Edit").on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))),
+                .child(div().flex_1().font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child(tr("Targets")))
+                .child(div().id("snippet-edit-targets").rounded_sm().icon_feedback().text_sm().font_weight(FontWeight::BOLD).text_color(rgb(theme::ACCENT)).child(tr("Edit")).on_click(cx.listener(move |shell, _, window, cx| open_picker(shell, window, cx)))),
         )
         .children(targets.into_iter().map(|h| host_row(format!("target-{}", h.id), host_tile(h), h.display_label().to_owned(), h.subtitle()).bg(rgb(theme::BACKGROUND))))
     }
@@ -707,20 +708,20 @@ impl Shell {
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(back)
-            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if adding { "Add targets" } else { "Select targets" }));
+            .child(div().flex_1().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(if adding { tr("Add targets") } else { tr("Select targets") }));
 
         let searching = !editor.search.trim().is_empty();
         let search = field_box(focused && editor.field == Field::Search)
             .id("targets-search")
             .child(svg().path(icon("search")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Search), &editor.search, "Search", focused && editor.field == Field::Search, Mode::Line, cx)));
+            .child(div().flex_1().min_w_0().child(text_input::text(("snippet", Field::Search), &editor.search, tr("Search"), focused && editor.field == Field::Search, Mode::Line, cx)));
         let search = text_input::field(search, ("snippet", Field::Search), Mode::Line, |shell, window, cx| shell.focus_snippet_field(Field::Search, window, cx), cx);
 
         let mut list = div().flex().flex_col();
         if !searching {
             if let Some(group) = editor.picker_group {
                 let mut crumbs = div().pb_2().flex().items_center().gap_2().text_sm().child(
-                    div().id("targets-crumb-root").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(|shell, _, _, cx| {
+                    div().id("targets-crumb-root").rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child(tr("All hosts")).on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(editor) = &mut shell.snippet_editor {
                             editor.picker_group = None;
                         }
@@ -742,7 +743,7 @@ impl Shell {
             }
             let groups = self.vault.child_groups(editor.picker_group);
             if !groups.is_empty() {
-                list = list.child(div().px(px(10.)).pb(px(5.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child("Groups"));
+                list = list.child(div().px(px(10.)).pb(px(5.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child(tr("Groups")));
                 for group in groups {
                     let id = group.id;
                     let count = self.vault.hosts_under(Some(id)).len();
@@ -754,7 +755,7 @@ impl Shell {
                         }
                         cx.notify();
                     }));
-                    let row = host_row(format!("targets-group-{id}"), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {}", if count == 1 { "Host" } else { "Hosts" }))
+                    let row = host_row(format!("targets-group-{id}"), tile("group", theme::TILE_BLUE), group.label.clone(), format!("{count} {}", if count == 1 { tr("Host") } else { tr("Hosts") }))
                         .hover(|s| s.bg(rgb(theme::SURFACE)))
                         .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
                         .on_click(cx.listener(move |shell, _, _, cx| {
@@ -769,7 +770,7 @@ impl Shell {
         }
         let hosts = if searching { self.vault.search(&editor.search) } else { self.vault.hosts_under(editor.picker_group) };
         if !hosts.is_empty() {
-            list = list.child(div().px(px(10.)).pt(px(15.)).pb(px(5.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child("Hosts"));
+            list = list.child(div().px(px(10.)).pt(px(15.)).pb(px(5.)).font_weight(FontWeight::BOLD).text_color(rgb(theme::TEXT)).child(tr("Hosts")));
             for host in hosts {
                 let id = host.id;
                 let state = if editor.picked.contains(&id) { Coverage::All } else { Coverage::None };
@@ -793,12 +794,12 @@ impl Shell {
                 );
             }
         } else if self.vault.hosts.is_empty() {
-            list = list.child(empty_state("hosts", "No hosts yet", "Add hosts on the Hosts screen to run snippets on them."));
+            list = list.child(empty_state("hosts", tr("No hosts yet"), tr("Add hosts on the Hosts screen to run snippets on them.")));
         }
 
         let footer: Option<AnyElement> = if adding {
             (!self.vault.hosts.is_empty()).then(|| {
-                dialog::button("targets-save", "Save", Kind::Accent, false)
+                dialog::button("targets-save", tr("Save"), Kind::Accent, false)
                     .w_full()
                     .on_click(cx.listener(|shell, _, _, cx| {
                         if let Some(editor) = &mut shell.snippet_editor {
@@ -814,11 +815,11 @@ impl Shell {
         } else {
             let count = editor.picked.len();
             let enabled = (1..=MAX_TARGETS).contains(&count);
-            let toggle = dialog::checkbox("targets-save-toggle", "Save targets", self.snippet_save_targets).text_sm().text_color(rgb(theme::TEXT)).on_click(cx.listener(|shell, _, _, cx| {
+            let toggle = dialog::checkbox("targets-save-toggle", tr("Save targets"), self.snippet_save_targets).text_sm().text_color(rgb(theme::TEXT)).on_click(cx.listener(|shell, _, _, cx| {
                 shell.snippet_save_targets = !shell.snippet_save_targets;
                 cx.notify();
             }));
-            let run = dialog::button("targets-run", "Run", Kind::Accent, !enabled).w_full().when(enabled, |d| {
+            let run = dialog::button("targets-run", tr("Run"), Kind::Accent, !enabled).w_full().when(enabled, |d| {
                 d.on_click(cx.listener(|shell, _, window, cx| {
                     let Some(editor) = &mut shell.snippet_editor else { return };
                     let targets = editor.picked.clone();
@@ -896,7 +897,7 @@ impl Shell {
         let id = editor.package.id;
         let saved = self.vault.package(id).is_some();
         let focused = self.editor_focus.is_focused(window);
-        let head = header(if editor.created_here && !saved { "New Package" } else { "Edit Package" })
+        let head = header(if editor.created_here && !saved { tr("New Package") } else { tr("Edit Package") })
             .when(saved, |d| d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT))))
             .child(dots("package-dots").on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.package_editor {
@@ -909,7 +910,7 @@ impl Shell {
                 cx.notify();
             })));
         let label = field_box(focused).id("package-label").flex_1()
-            .child(text_input::text("package-label", &editor.package.label, "Label *", focused, Mode::Line, cx));
+            .child(text_input::text("package-label", &editor.package.label, tr("Label *"), focused, Mode::Line, cx));
         let label = text_input::field(label, "package-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx);
         let form = div()
             .p(px(15.))
@@ -918,7 +919,7 @@ impl Shell {
             .bg(rgb(theme::SURFACE))
             .child(div().flex().items_center().gap_3().child(tile("snippets_package", theme::TILE_BLUE).size(px(36.)).rounded_lg()).child(label));
         let menu = editor.menu_open.then(|| {
-            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("package-menu").child(menu_row("package-menu-remove".into(), "Remove", true, !saved).when(saved, |d| {
+            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("package-menu").child(menu_row("package-menu-remove".into(), tr("Remove"), true, !saved).when(saved, |d| {
                 d.on_click(cx.listener(|shell, _, _, cx| {
                     if let Some(editor) = &mut shell.package_editor {
                         editor.menu_open = false;
@@ -969,7 +970,7 @@ impl Shell {
     fn remove_card(&self, packages: &[u64], snippets: &[u64], close: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
         let (title, text) = snippets::remove_texts(&self.vault, packages, snippets);
         let (packages, snippets) = (packages.to_vec(), snippets.to_vec());
-        dialog::backdrop(dialog::card(&title, false, close, dialog::text(&text), vec![dialog::button("snippets-remove-confirm", "Remove", Kind::Error, false)
+        dialog::backdrop(dialog::card(&title, false, close, dialog::text(&text), vec![dialog::button("snippets-remove-confirm", tr("Remove"), Kind::Error, false)
             .on_click(cx.listener(move |shell, _, _, cx| shell.remove_items(&packages, &snippets, cx)))
             .into_any_element()]))
     }
@@ -1003,24 +1004,24 @@ impl Shell {
         let items = match menu.item {
             MenuItem::Snippet(id) => menu_panel("snippet-card-menu")
                 .child(
-                    menu_row("snippet-menu-run".into(), "Run", false, false)
+                    menu_row("snippet-menu-run".into(), tr("Run"), false, false)
                         .child(div().flex_1())
-                        .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Double Click"))
+                        .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Double Click")))
                         .on_click(cx.listener(move |shell, _, window, cx| shell.execute_snippet(id, window, cx))),
                 )
-                .child(menu_row("snippet-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_snippet(id, window, cx))))
-                .child(menu_row("snippet-menu-duplicate".into(), "Duplicate", false, false).on_click(cx.listener(move |shell, _, _, cx| {
+                .child(menu_row("snippet-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_snippet(id, window, cx))))
+                .child(menu_row("snippet-menu-duplicate".into(), tr("Duplicate"), false, false).on_click(cx.listener(move |shell, _, _, cx| {
                     shell.snippet_menu = None;
                     if shell.vault.duplicate_snippet(id).is_some() {
                         shell.save_vault();
                     }
                     cx.notify();
                 })))
-                .child(menu_row("snippet-menu-remove".into(), "Remove", true, false).on_click(cx.listener(Self::ask_remove_from_menu))),
+                .child(menu_row("snippet-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(Self::ask_remove_from_menu))),
             MenuItem::Package(id) => menu_panel("package-card-menu")
-                .child(menu_row("package-menu-edit".into(), "Edit", false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_package(id, window, cx))))
-                .child(menu_row("package-card-menu-remove".into(), "Remove", true, false).on_click(cx.listener(Self::ask_remove_from_menu))),
-            MenuItem::New => menu_panel("new-snippet-menu-panel").child(menu_row("new-snippet-package".into(), "New snippet package", false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_package(window, cx)))),
+                .child(menu_row("package-menu-edit".into(), tr("Edit"), false, false).on_click(cx.listener(move |shell, _, window, cx| shell.edit_package(id, window, cx))))
+                .child(menu_row("package-card-menu-remove".into(), tr("Remove"), true, false).on_click(cx.listener(Self::ask_remove_from_menu))),
+            MenuItem::New => menu_panel("new-snippet-menu-panel").child(menu_row("new-snippet-package".into(), tr("New snippet package"), false, false).on_click(cx.listener(|shell, _, window, cx| shell.new_package(window, cx)))),
         };
         let viewport = window.viewport_size();
         let left = menu.position.x.min(viewport.width - px(230.));
@@ -1099,7 +1100,7 @@ impl Shell {
             })));
         let commands = &self.vault.shell_history;
         let body = if commands.is_empty() {
-            div().child(empty_state("logs", "You don't have shell history yet", "Connect to a host via SSH to see your shell history here."))
+            div().child(empty_state("logs", tr("You don't have shell history yet"), tr("Connect to a host via SSH to see your shell history here.")))
         } else {
             div().flex().flex_col().children(commands.iter().enumerate().map(|(i, command)| {
                 let hover = SharedString::from(format!("history-row-{i}"));
@@ -1110,7 +1111,7 @@ impl Shell {
                     div().id(SharedString::from(id)).h(px(22.)).w(px(52.)).flex().items_center().justify_center().rounded_md().bg(rgb(theme::ACCENT)).text_xs().font_weight(FontWeight::BLACK).text_color(rgb(0xffffff)).child(text.to_owned())
                 };
                 let end = if editing.is_some() {
-                    Some(action(format!("history-done-{i}"), "Done").on_click(cx.listener(move |shell, _, _, cx| {
+                    Some(action(format!("history-done-{i}"), tr("Done")).on_click(cx.listener(move |shell, _, _, cx| {
                         cx.stop_propagation();
                         shell.save_history_command(i);
                         cx.notify();
@@ -1118,7 +1119,7 @@ impl Shell {
                 } else if saved {
                     Some(div().flex().items_center().gap_1().text_xs().text_color(rgb(theme::ACCENT)).child(svg().path(icon("check")).size(px(8.)).text_color(rgb(theme::ACCENT))).child("saved").into_any_element())
                 } else {
-                    Some(div().invisible().group_hover(hover.clone(), |s| s.visible()).child(action(format!("history-save-{i}"), "SAVE").on_click(cx.listener(move |shell, _, window, cx| {
+                    Some(div().invisible().group_hover(hover.clone(), |s| s.visible()).child(action(format!("history-save-{i}"), tr("SAVE")).on_click(cx.listener(move |shell, _, window, cx| {
                         cx.stop_propagation();
                         if let Some(panel) = &mut shell.shell_history {
                             panel.editing = Some((i, String::new()));
@@ -1129,7 +1130,7 @@ impl Shell {
                 };
                 let title = match &editing {
                     Some(label) => {
-                        let input = div().id("history-label").child(text_input::text("history-label", label, "Set a label", true, Mode::Line, cx));
+                        let input = div().id("history-label").child(text_input::text("history-label", label, tr("Set a label"), true, Mode::Line, cx));
                         text_input::field(input, "history-label", Mode::Line, |shell, window, _| window.focus(&shell.editor_focus), cx).into_any_element()
                     }
                     None => div().text_color(rgb(theme::TEXT)).font_family("Menlo").text_sm().when(!expanded, |d| d.truncate()).child(command.script.clone()).into_any_element(),
@@ -1165,7 +1166,7 @@ impl Shell {
             }))
         };
         let menu = panel.menu_open.then(|| {
-            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("history-menu").child(menu_row("history-delete-all".into(), "Delete All", true, false).on_click(cx.listener(|shell, _, _, cx| {
+            div().absolute().top(px(56.)).right(px(50.)).child(menu_panel("history-menu").child(menu_row("history-delete-all".into(), tr("Delete All"), true, false).on_click(cx.listener(|shell, _, _, cx| {
                 shell.vault.shell_history.clear();
                 shell.save_vault();
                 shell.shell_history = Some(ShellHistoryPanel::default());

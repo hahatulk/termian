@@ -14,14 +14,16 @@ import android.os.Looper;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
-import android.widget.HorizontalScrollView;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.PopupMenu;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -34,6 +36,8 @@ public final class MainActivity extends Activity {
     static { System.loadLibrary("termian_native"); }
 
     private static native String nativeCall(String request, byte[] key);
+    private static native void setRussian(boolean russian);
+    static native String text(String value);
     private static final int BACKGROUND = TermianStyle.BG;
     private static final int ACCENT = TermianStyle.GREEN_TEXT;
     private static final int MUTED = TermianStyle.MUTED;
@@ -41,9 +45,10 @@ public final class MainActivity extends Activity {
     private static final int NETWORK_REQUEST = 11;
     static final int PASSWORD = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private LinearLayout root, titleBar, tabsBar, body, hosts, console, controls;
-    private HorizontalScrollView tabScroll;
-    private View lockAction, syncAction;
+    private FrameLayout appFrame, drawer;
+    private LinearLayout root, titleBar, body, hosts, console, drawerRows;
+    private ScrollView drawerPanel;
+    private TextView pageTitle;
     private LinearLayout hostEditor;
     private java.util.function.BooleanSupplier hostEdited;
     private int terminalBackground = TermianStyle.BAR;
@@ -53,7 +58,7 @@ public final class MainActivity extends Activity {
     private MobileUpdates updates;
     TermianStyle style;
     private JSONArray tabs = new JSONArray();
-    private String tabId = "", page = "vault";
+    private String tabId = "", page = "vault", vaultName = "";
     private boolean wide, locked;
     private LinearLayout privacy;
     private TerminalView terminal, secondaryTerminal;
@@ -85,44 +90,48 @@ public final class MainActivity extends Activity {
             request.put("op", operation);
             return new JSONObject(nativeCall(request.toString(), key));
         } catch (org.json.JSONException | NullPointerException e) {
-            return obj("error", "Не удалось получить ответ Termian.");
+            return obj("error", text("Не удалось получить ответ Termian."));
         }
     }
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        setRussian(getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false));
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         style = new TermianStyle(this);
+        appFrame = new FrameLayout(this);
         root = column();
         root.setBackgroundColor(BACKGROUND);
-        root.setOnApplyWindowInsetsListener((view, insets) -> {
+        appFrame.addView(root,new FrameLayout.LayoutParams(-1,-1));
+        appFrame.setOnApplyWindowInsetsListener((view, insets) -> {
             if (Build.VERSION.SDK_INT >= 30) {
                 android.graphics.Insets bars = insets.getInsets(WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout());
                 android.graphics.Insets ime = insets.getInsets(WindowInsets.Type.ime());
-                root.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
+                view.setPadding(bars.left, bars.top, bars.right, Math.max(bars.bottom, ime.bottom));
             } else {
-                root.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                view.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
                     insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom());
             }
             return Build.VERSION.SDK_INT >= 30 ? WindowInsets.CONSUMED : insets.consumeSystemWindowInsets();
         });
-        setContentView(root);
+        setContentView(appFrame);
         if (Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
             android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::back);
         File data = new File(getNoBackupFilesDir(), "termian");
         try {
-            if (!data.isDirectory() && !data.mkdirs()) throw new java.io.IOException("Не удалось создать каталог Vault.");
+            if (!data.isDirectory() && !data.mkdirs()) throw new java.io.IOException(text("Не удалось создать каталог Vault."));
             byte[] key = VaultKey.load(data);
             JSONObject result;
             try { result = bridge("open", key, "root", data.getAbsolutePath()); }
             finally { Arrays.fill(key, (byte) 0); }
             if (result.has("error")) throw new java.io.IOException(result.optString("error"));
             opened = true;
+            vaultName=result.optString("vaultName");
             build();
             updates = new MobileUpdates(this);
         } catch (Exception e) {
             root.addView(label("Termian", 24, ACCENT));
-            root.addView(label("Не удалось открыть Vault. Данные не были сброшены.", 16, MUTED));
+            root.addView(label(text("Не удалось открыть Vault. Данные не были сброшены."), 16, MUTED));
         }
     }
 
@@ -152,8 +161,9 @@ public final class MainActivity extends Activity {
         super.onConfigurationChanged(config);
         if (opened) {
             readWindowWidth();
+            resizeDrawer();
             redrawHosts();
-            redrawTabs();
+            redrawNavigation();
             arrange();
         }
     }
@@ -201,18 +211,11 @@ public final class MainActivity extends Activity {
         titleBar.setBackgroundColor(TermianStyle.BAR);
         root.addView(titleBar,new LinearLayout.LayoutParams(-1,dp(56)));
 
-        tabScroll=new HorizontalScrollView(this);
-        tabScroll.setHorizontalScrollBarEnabled(false);
-        tabsBar=new LinearLayout(this);
-        tabsBar.setGravity(Gravity.CENTER_VERTICAL);
-        tabScroll.addView(tabsBar,new android.widget.FrameLayout.LayoutParams(-2,-1));
-        titleBar.addView(tabScroll,new LinearLayout.LayoutParams(0,-1,1));
-        titleBar.addView(style.iconAction("plus","New Tab",this::newLauncher));
-        lockAction=style.iconAction("privacy_lock","Lock",this::lock);
-        syncAction=style.iconAction("cloud_sync","Sync",this::cloudMenu);
-        titleBar.addView(lockAction);
-        titleBar.addView(syncAction);
-        titleBar.addView(style.iconAction("dots","Application menu",this::appMenu));
+        titleBar.addView(style.iconAction("menu",text("Open navigation menu"),this::openDrawer));
+        pageTitle=style.text("",16,TermianStyle.TEXT,500);
+        pageTitle.setSingleLine(true);
+        pageTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        titleBar.addView(pageTitle,new LinearLayout.LayoutParams(0,-2,1));
 
         body=new LinearLayout(this);
         root.addView(body,new LinearLayout.LayoutParams(-1,0,1));
@@ -225,7 +228,7 @@ public final class MainActivity extends Activity {
         LinearLayout terminalBar=new LinearLayout(this);
         terminalBar.setGravity(Gravity.CENTER_VERTICAL);
         terminalBar.addView(status,new LinearLayout.LayoutParams(0,-2,1));
-        terminalBar.addView(style.iconAction("workspace","Workspace",this::workspaceMenu));
+        terminalBar.addView(style.iconAction("workspace",text("Workspace"),this::workspaceMenu));
         console.addView(terminalBar,new LinearLayout.LayoutParams(-1,dp(48)));
 
         terminal=new TerminalView(this);
@@ -239,24 +242,21 @@ public final class MainActivity extends Activity {
         LinearLayout keys=new LinearLayout(this);
         keys.setGravity(Gravity.CENTER_VERTICAL);
         keys.setPadding(dp(4),0,dp(4),0);
-        keys.addView(style.iconAction("terminal","Keyboard",this::keyboard));
+        keys.addView(style.iconAction("terminal",text("Keyboard"),this::keyboard));
         ctrlButton=button("Ctrl",() -> setControl(!control));
         ctrlButton.setPadding(dp(9),0,dp(9),0);
         keys.addView(ctrlButton,new LinearLayout.LayoutParams(dp(48),dp(48)));
-        HorizontalScrollView keyScroll=new HorizontalScrollView(this);
-        keyScroll.setHorizontalScrollBarEnabled(false);
-        controls=new LinearLayout(this);
-        keyScroll.addView(controls);
-        for (String[] pair : new String[][] {{"Esc","escape"},{"Tab","tab"},{"↑","up"},{"↓","down"},{"←","left"},{"→","right"},{"Enter","enter"}})
-            controls.addView(button(pair[0],() -> key(pair[1],null,false,false,false)),new LinearLayout.LayoutParams(-2,dp(48)));
-        controls.addView(button("Paste",this::paste),new LinearLayout.LayoutParams(-2,dp(48)));
-        keys.addView(keyScroll,new LinearLayout.LayoutParams(0,dp(48),1));
+        for (String[] pair : new String[][] {{"Esc","escape"},{text("Tab"),"tab"}})
+            keys.addView(button(pair[0],() -> key(pair[1],null,false,false,false)),new LinearLayout.LayoutParams(dp(48),dp(48)));
+        View more=style.iconAction("dots",text("More terminal keys"),() -> {});
+        more.setOnClickListener(this::moreTerminalKeys);
+        keys.addView(more);
         console.addView(keys);
 
         vault=new MobileVault(this);
         files=new MobileFiles(this);
         redrawHosts();
-        redrawTabs();
+        redrawNavigation();
         arrange();
     }
 
@@ -296,75 +296,195 @@ public final class MainActivity extends Activity {
     private void newLauncher() { page("new"); }
 
     void page(String value) {
+        closeDrawer();
         if (!value.equals("terminal")) ime().hideSoftInputFromWindow(root.getWindowToken(),0);
         page=value;
         redrawHosts();
-        redrawTabs();
+        redrawNavigation();
         arrange();
     }
 
-    private void redrawTabs() {
+    private void redrawNavigation() {
         int bar=page.equals("terminal") ? terminalBackground : TermianStyle.BAR;
         titleBar.setBackgroundColor(bar);
         console.setBackgroundColor(bar);
-        lockAction.setVisibility(widthDp<380 ? View.GONE : View.VISIBLE);
-        syncAction.setVisibility(widthDp<380 ? View.GONE : View.VISIBLE);
-        tabsBar.removeAllViews();
-        View focused=appendTab("vaults","Vaults",page.equals("vault"),false,() -> page("vault"),null);
-        View sftp=appendTab("sftp","SFTP",page.equals("sftp"),false,() -> page("sftp"),null);
-        if (page.equals("sftp")) focused=sftp;
-        if (page.equals("new")) focused=appendTab("new_tab","New Tab",true,false,this::newLauncher,
-            () -> page(tabId.isEmpty() ? "vault" : "terminal"));
-        for (int i=0;i<tabs.length();i++) {
+        String title=page.equals("sftp") ? "SFTP" : page.equals("new") ? text("New Tab") : vault.sectionTitle();
+        if(page.equals("terminal")) {
+            title=text("Terminal");
+            for(int i=0;i<tabs.length();i++) {
+                JSONObject tab=tabs.optJSONObject(i);
+                if(tab!=null && tabId.equals(tab.optString("id"))) {
+                    title=tab.optString("label",title);
+                    break;
+                }
+            }
+        }
+        pageTitle.setText(title);
+    }
+
+    private void openDrawer() {
+        if(drawer!=null || locked) return;
+        ime().hideSoftInputFromWindow(root.getWindowToken(),0);
+        drawer=new FrameLayout(this);
+        View scrim=new View(this);
+        scrim.setBackgroundColor(0x99000000);
+        scrim.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        scrim.setOnClickListener(v -> closeDrawer());
+        drawer.addView(scrim,new FrameLayout.LayoutParams(-1,-1));
+
+        drawerPanel=new ScrollView(this);
+        drawerPanel.setBackgroundColor(TermianStyle.SIDEBAR);
+        drawerPanel.setFillViewport(true);
+        drawerPanel.setFocusableInTouchMode(true);
+        drawerPanel.setClickable(true);
+        drawerRows=column();
+        drawerRows.setPadding(dp(8),dp(8),dp(8),dp(12));
+        drawerPanel.addView(drawerRows,new FrameLayout.LayoutParams(-1,-2));
+        drawer.addView(drawerPanel,new FrameLayout.LayoutParams(drawerWidth(),-1,Gravity.LEFT));
+
+        root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BLOCK_DESCENDANTS);
+        appFrame.addView(drawer,new FrameLayout.LayoutParams(-1,-1));
+        drawerMenu();
+        drawerPanel.requestFocus();
+    }
+
+    private int drawerWidth() { return dp(Math.min(320,Math.max(160,widthDp-48))); }
+
+    private void resizeDrawer() {
+        if(drawerPanel!=null) drawerPanel.setLayoutParams(new FrameLayout.LayoutParams(drawerWidth(),-1,Gravity.LEFT));
+    }
+
+    private void closeDrawer() {
+        if(drawer==null) return;
+        appFrame.removeView(drawer);
+        drawer=null;
+        drawerPanel=null;
+        drawerRows=null;
+        root.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_AUTO);
+        root.setDescendantFocusability(ViewGroup.FOCUS_BEFORE_DESCENDANTS);
+    }
+
+    private void drawerMenu() {
+        if(drawerRows==null) return;
+        int offset=drawerPanel.getScrollY();
+        drawerRows.removeAllViews();
+        LinearLayout header=new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(label("Termian",20,ACCENT),new LinearLayout.LayoutParams(0,-2,1));
+        header.addView(style.iconAction("close",text("Close navigation menu"),this::closeDrawer));
+        drawerRows.addView(header);
+        drawerRows.addView(label(text("Vaults"),12,MUTED));
+        drawerEntry(drawerRows,"vaults",vaultName,false,this::switchVault,null);
+        vault.addSections(drawerRows,page.equals("vault"));
+        drawerEntry(drawerRows,"sftp","SFTP",page.equals("sftp"),() -> page("sftp"),null);
+
+        drawerRows.addView(label("Sessions",12,MUTED));
+        drawerEntry(drawerRows,"plus",text("New Tab"),page.equals("new"),this::newLauncher,null);
+        drawerEntry(drawerRows,"terminal",text("Local Terminal"),false,this::localTerminal,null);
+        for(int i=0;i<tabs.length();i++) {
             JSONObject tab=tabs.optJSONObject(i);
             if(tab==null) continue;
             String id=tab.optString("id");
-            boolean selected=page.equals("terminal") && id.equals(tabId);
-            String state=tab.optString("status");
-            boolean connecting=state.equals("Connecting…") || state.equals("Подключение…") ||
-                state.equals("Проверка ключа…") || state.equals("Вход…");
-            View item=appendTab("terminal",tab.optString("label"),selected,connecting,() -> selectTab(id),() -> closeTab(id));
-            if (selected) focused=item;
+            drawerEntry(drawerRows,"terminal",tab.optString("label"),page.equals("terminal") && id.equals(tabId),
+                () -> selectTab(id),() -> closeTab(id));
         }
-        View scrollTo=focused;
-        tabsBar.post(() -> {
-            if (scrollTo.getParent()!=tabsBar) return;
-            int left=tabScroll.getScrollX(), right=left+tabScroll.getWidth();
-            if (scrollTo.getLeft()<left) tabScroll.scrollTo(scrollTo.getLeft(),0);
-            else if (scrollTo.getRight()>right) tabScroll.scrollTo(scrollTo.getRight()-tabScroll.getWidth(),0);
+
+        drawerRows.addView(label("Application",12,MUTED));
+        drawerEntry(drawerRows,"cloud_sync",text("Sync"),false,this::cloudMenu,null);
+        drawerEntry(drawerRows,"privacy_lock",text("Lock"),false,this::lock,null);
+        drawerEntry(drawerRows,"dots",text("Settings"),false,this::appMenu,null);
+        if(offset>0) {
+            ScrollView panel=drawerPanel;
+            panel.post(() -> { if(panel==drawerPanel) panel.scrollTo(0,offset); });
+        }
+    }
+
+    void drawerEntry(LinearLayout items, String icon, String title, boolean selected, Runnable action, Runnable close) {
+        LinearLayout row=new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.addView(style.section(icon,title,selected,() -> { closeDrawer(); action.run(); }),
+            new LinearLayout.LayoutParams(0,-1,1));
+        if(close!=null) row.addView(style.iconAction("close","Close "+title,TermianStyle.MUTED,48,14,() -> {
+            closeDrawer();
+            close.run();
+        }));
+        items.addView(row,new LinearLayout.LayoutParams(-1,dp(48)));
+    }
+
+    private void switchVault() {
+        if(files!=null && !files.canSwitchVault()) {
+            toast(text("Close SFTP and finish file operations before switching Vaults."));
+            return;
+        }
+        confirmDiscard(() -> {
+            JSONObject info=call("vaultList");
+            JSONArray list=info.optJSONArray("entries");
+            if(list==null) { toast(info.optString("error")); return; }
+            String[] names=new String[list.length()];
+            int current=0;
+            for(int i=0;i<list.length();i++) {
+                JSONObject entry=list.optJSONObject(i);
+                names[i]=entry.optString("name");
+                if(entry.optString("id").equals(info.optString("selected"))) current=i;
+            }
+            new AlertDialog.Builder(this).setTitle(text("Switch Vault"))
+                .setSingleChoiceItems(names,current,(dialog,index) -> {
+                    String id=list.optJSONObject(index).optString("id");
+                    dialog.dismiss();
+                    if(!id.equals(info.optString("selected"))) changeVault(call("vaultSelect","id",id));
+                }).setNegativeButton(text("Cancel"),null)
+                .setPositiveButton(text("Create Vault"),(dialog,index) -> createVault()).show();
         });
     }
 
-    private View appendTab(String icon, String name, boolean selected, boolean connecting, Runnable activate, Runnable close) {
-        LinearLayout tab=new LinearLayout(this);
-        tab.setGravity(Gravity.CENTER_VERTICAL);
-        int color=connecting ? TermianStyle.CONNECTING_TEXT : TermianStyle.TEXT;
-        int background=connecting ? TermianStyle.CONNECTING : page.equals("terminal")
-            ? TermianStyle.tint(terminalBackground,selected ? 36 : 16)
-            : selected ? TermianStyle.ACTIVE : TermianStyle.SURFACE;
-        tab.setPadding(dp(close!=null && selected ? 0 : 10),0,dp(10),0);
-        if (close!=null && selected)
-            tab.addView(style.iconAction("close","Close "+name,color,48,14,close));
-        else {
-            tab.addView(style.icon(icon,color),new LinearLayout.LayoutParams(dp(14),dp(14)));
-        }
-        TextView text=style.text(name,13,color,500);
-        text.setPadding(dp(close!=null && selected ? 0 : 8),0,0,0);
-        text.setSingleLine(true);
-        text.setEllipsize(android.text.TextUtils.TruncateAt.END);
-        text.setMaxWidth(dp(close==null ? 96 : wide ? 170 : 104));
-        tab.addView(text,new LinearLayout.LayoutParams(-2,-2));
-        tab.setSelected(selected);
-        tab.setOnClickListener(v -> activate.run());
-        if(close!=null) tab.setOnLongClickListener(v -> {
-            new AlertDialog.Builder(this).setTitle(name).setItems(new String[]{"Close tab"},(d,w) -> close.run()).show();
-            return true;
+    private void createVault() {
+        LinearLayout form=column();
+        EditText name=field(form,text("Vault name"),"",InputType.TYPE_CLASS_TEXT);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle(text("Create Vault")).setView(form)
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Create Vault"),null).show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if(files!=null && !files.canSwitchVault()) {
+                toast(text("Close SFTP and finish file operations before switching Vaults."));
+                return;
+            }
+            if(changeVault(call("vaultCreate","name",value(name)))) dialog.dismiss();
         });
-        style.action(tab,background,6);
-        LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-2,dp(48));
-        lp.rightMargin=dp(4);
-        tabsBar.addView(tab,lp);
-        return tab;
+    }
+
+    private boolean changeVault(JSONObject result) {
+        if(result.has("error")) { toast(result.optString("error")); return false; }
+        vaultName=result.optString("vaultName");
+        pendingNetwork=null;
+        hostEditor=null;
+        hostEdited=null;
+        tabs=new JSONArray();
+        tabId="";
+        secondaryId="";
+        broadcasting=false;
+        terminal.clear();
+        secondaryTerminal.clear();
+        vault=new MobileVault(this);
+        files.refreshChooser();
+        page("vault");
+        return true;
+    }
+
+    void showVaultSection(Runnable select) {
+        confirmDiscard(() -> {
+            hostEditor=null;
+            hostEdited=null;
+            select.run();
+            page("vault");
+        });
+    }
+
+    private void moreTerminalKeys(View anchor) {
+        PopupMenu menu=new PopupMenu(this,anchor);
+        for(String[] item : new String[][] {{"↑","up"},{"↓","down"},{"←","left"},{"→","right"},{"Enter","enter"}})
+            menu.getMenu().add(item[0]).setOnMenuItemClickListener(v -> { key(item[1],null,false,false,false); return true; });
+        menu.getMenu().add(text("Paste")).setOnMenuItemClickListener(v -> { paste(); return true; });
+        menu.show();
     }
 
     JSONArray terminalTabs() { return tabs; }
@@ -410,7 +530,7 @@ public final class MainActivity extends Activity {
 
     void openLog(JSONObject row) {
         JSONObject response = call("openLog","id",row.optString("id"));
-        if (response.optBoolean("downloading")) { syncing = true; toast("Downloading log…"); }
+        if (response.optBoolean("downloading")) { syncing = true; toast(text("Downloading log…")); }
         else useTab(response);
     }
 
@@ -446,16 +566,16 @@ public final class MainActivity extends Activity {
             choices.add(broadcasting ? "Stop broadcast" : "Broadcast to both panes");
         }
         choices.add("Save workspace");
-        new AlertDialog.Builder(this).setTitle("Workspace").setItems(choices.toArray(new String[0]),(d,w) -> {
+        new AlertDialog.Builder(this).setTitle(text("Workspace")).setItems(choices.stream().map(MainActivity::text).toArray(String[]::new),(d,w) -> {
             String action=choices.get(w);
             if(action.equals("Hide second pane")) useTab(call("split","id",""));
-            else if(action.startsWith("Broadcast") || action.equals("Stop broadcast")) {
+            else if(action.equals("Broadcast to both panes") || action.equals("Stop broadcast")) {
                 useTab(call("broadcast","enabled",!broadcasting));
             } else if(action.equals("Save workspace")) {
                 LinearLayout form=column();
-                EditText name=field(form,"Workspace name","",InputType.TYPE_CLASS_TEXT);
-                new AlertDialog.Builder(this).setTitle("Save workspace").setView(form)
-                    .setNegativeButton("Cancel",null).setPositiveButton("Save",(x,y) ->
+                EditText name=field(form,text("Workspace name"),"",InputType.TYPE_CLASS_TEXT);
+                new AlertDialog.Builder(this).setTitle(text("Save workspace")).setView(form)
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),(x,y) ->
                         updateHosts(call("saveWorkspace","label",value(name)))).show();
             } else {
                 java.util.ArrayList<JSONObject> targets=new java.util.ArrayList<>();
@@ -464,8 +584,8 @@ public final class MainActivity extends Activity {
                     JSONObject t=tabs.optJSONObject(i);
                     if(!t.optString("id").equals(tabId)) { targets.add(t); names.add(t.optString("label")); }
                 }
-                if (names.isEmpty()) { toast("Open another terminal tab first."); return; }
-                new AlertDialog.Builder(this).setTitle("Second pane").setItems(names.toArray(new String[0]),(x,y) ->
+                if (names.isEmpty()) { toast(text("Open another terminal tab first.")); return; }
+                new AlertDialog.Builder(this).setTitle(text("Second pane")).setItems(names.toArray(new String[0]),(x,y) ->
                     useTab(call("split","id",targets.get(y).optString("id")))).show();
             }
         }).show();
@@ -493,6 +613,7 @@ public final class MainActivity extends Activity {
 
     private void back() {
         if (locked) return;
+        if(drawer!=null) { closeDrawer(); return; }
         if (opened && page.equals("vault") && hostEditor!=null) confirmDiscard(this::closeHostEditor);
         else if (opened && !page.equals("vault")) page("vault");
         else if (opened && vault.back()) return;
@@ -545,7 +666,8 @@ public final class MainActivity extends Activity {
                 if (now != null && !tabs.toString().equals(now.toString())) {
                     tabs = now;
                     if (page.equals("terminal")) updateTerminalTab();
-                    redrawTabs();
+                    redrawNavigation();
+                    drawerMenu();
                 }
                 JSONArray fileEvents = info.optJSONArray("files");
                 if (fileEvents != null) files.events(fileEvents);
@@ -557,7 +679,7 @@ public final class MainActivity extends Activity {
                     int bg=0xff000000 | frame.optInt("bg",TermianStyle.BAR);
                     if(bg!=terminalBackground) {
                         terminalBackground=bg;
-                        if(page.equals("terminal")) redrawTabs();
+                        if(page.equals("terminal")) redrawNavigation();
                     }
                 }
                 JSONObject companion = info.optJSONObject("secondaryFrame");
@@ -603,27 +725,27 @@ public final class MainActivity extends Activity {
                 break;
             case "changed":
                 dismissQuestion();
-                question = new AlertDialog.Builder(this).setTitle("Ключ сервера изменился")
+                question = new AlertDialog.Builder(this).setTitle(text("Ключ сервера изменился"))
                     .setMessage(fingerprint(event) + "\nПодключение отклонено.")
                     .setPositiveButton("OK", null).show();
                 break;
             case "trust":
                 dismissQuestion();
-                question = new AlertDialog.Builder(this).setTitle("Проверьте ключ сервера")
+                question = new AlertDialog.Builder(this).setTitle(text("Проверьте ключ сервера"))
                     .setMessage(fingerprint(event))
-                    .setNegativeButton("Отклонить", (d,w) -> sendAnswer(operation, id, "trust", "reject"))
-                    .setNeutralButton("Один раз", (d,w) -> sendAnswer(operation, id, "trust", "once"))
-                    .setPositiveButton("Запомнить", (d,w) -> sendAnswer(operation, id, "trust", "save"))
+                    .setNegativeButton(text("Отклонить"), (d,w) -> sendAnswer(operation, id, "trust", "reject"))
+                    .setNeutralButton(text("Один раз"), (d,w) -> sendAnswer(operation, id, "trust", "once"))
+                    .setPositiveButton(text("Запомнить"), (d,w) -> sendAnswer(operation, id, "trust", "save"))
                     .setOnCancelListener(d -> sendAnswer(operation, id, "trust", "reject")).show();
                 break;
             case "prompt":
                 dismissQuestion();
                 LinearLayout form = column();
                 EditText input = field(form, event.optString("value"), "", event.optBoolean("echo") ? InputType.TYPE_CLASS_TEXT : PASSWORD);
-                question = new AlertDialog.Builder(this).setTitle("Вход по SSH")
+                question = new AlertDialog.Builder(this).setTitle(text("Вход по SSH"))
                     .setView(form)
-                    .setNegativeButton("Отмена", (d,w) -> sendAnswer(operation, id, "text", null))
-                    .setPositiveButton("Продолжить", (d,w) -> {
+                    .setNegativeButton(text("Отмена"), (d,w) -> sendAnswer(operation, id, "text", null))
+                    .setPositiveButton(text("Продолжить"), (d,w) -> {
                         sendAnswer(operation, id, "text", value(input));
                         input.getText().clear();
                     })
@@ -641,7 +763,7 @@ public final class MainActivity extends Activity {
     private void sendAnswer(String operation, String id, String mode, String value) {
         call(operation, "id", id, "mode", mode, "value", value);
     }
-    void toast(String message) { Toast.makeText(this, message, Toast.LENGTH_LONG).show(); }
+    void toast(String message) { Toast.makeText(this, text(message), Toast.LENGTH_LONG).show(); }
 
     EditText field(LinearLayout form, String label, String initial, int type) {
         form.addView(label(label, 14, MUTED));
@@ -703,8 +825,8 @@ public final class MainActivity extends Activity {
             done.run();
             return;
         }
-        new AlertDialog.Builder(this).setTitle("Discard host changes?")
-            .setNegativeButton("Keep editing",null).setPositiveButton("Discard",(d,w) -> done.run()).show();
+        new AlertDialog.Builder(this).setTitle(text("Discard host changes?"))
+            .setNegativeButton(text("Keep editing"),null).setPositiveButton(text("Discard"),(d,w) -> done.run()).show();
     }
 
     void edit(JSONObject host) {
@@ -721,41 +843,41 @@ public final class MainActivity extends Activity {
         header.setBackgroundColor(TermianStyle.SIDEBAR);
         LinearLayout title=column();
         title.setPadding(dp(14),dp(8),0,dp(8));
-        title.addView(style.text(host==null ? "New Host" : "Host Details",17,TermianStyle.TEXT,700));
-        title.addView(style.text("Personal vault",13,MUTED,400));
+        title.addView(style.text(host==null ? text("New Host") : text("Host Details"),17,TermianStyle.TEXT,700));
+        title.addView(style.text(vaultName,13,MUTED,400));
         header.addView(title,new LinearLayout.LayoutParams(0,-2,1));
         String id=host==null ? "" : host.optString("id");
-        if(host!=null) header.addView(style.iconAction("dots","Host actions",() ->
-            new AlertDialog.Builder(this).setTitle(host.optString("label")).setItems(new String[]{"Delete host"},(d,w) ->
-                new AlertDialog.Builder(this).setMessage("Delete this saved host?")
-                    .setNegativeButton("Cancel",null).setPositiveButton("Delete",(x,y) -> {
+        if(host!=null) header.addView(style.iconAction("dots",text("Host actions"),() ->
+            new AlertDialog.Builder(this).setTitle(host.optString("label")).setItems(new String[]{text("Delete host")},(d,w) ->
+                new AlertDialog.Builder(this).setMessage(text("Delete this saved host?"))
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(x,y) -> {
                         JSONObject result=call("deleteHost","id",id);
                         if(!result.has("error")) closeHostEditor();
                         updateHosts(result);
                     }).show()).show()));
-        header.addView(style.iconAction("collapse_right","Close host editor",() -> confirmDiscard(this::closeHostEditor)));
+        header.addView(style.iconAction("collapse_right",text("Close host editor"),() -> confirmDiscard(this::closeHostEditor)));
         pane.addView(header,new LinearLayout.LayoutParams(-1,dp(64)));
 
         LinearLayout form=column();
         form.setPadding(dp(14),dp(14),dp(14),0);
-        LinearLayout addressCard=editorCard(form,"Address");
-        EditText address=field(addressCard,"IP or Hostname",host==null ? "" : host.optString("address"),
+        LinearLayout addressCard=editorCard(form,text("Address"));
+        EditText address=field(addressCard,text("IP or Hostname"),host==null ? "" : host.optString("address"),
             InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        LinearLayout general=editorCard(form,"General");
-        EditText name=field(general,"Label",host==null ? "" : host.optString("label"),InputType.TYPE_CLASS_TEXT);
+        LinearLayout general=editorCard(form,text("General"));
+        EditText name=field(general,text("Label"),host==null ? "" : host.optString("label"),InputType.TYPE_CLASS_TEXT);
         JSONObject data=call("vault");
-        android.widget.Spinner group=vault.pick(general,"Parent Group",data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
-        EditText tags=field(general,"Tags (comma-separated)",host==null ? "" : MobileVault.joinTags(host.optJSONArray("tags")),InputType.TYPE_CLASS_TEXT);
+        android.widget.Spinner group=vault.pick(general,text("Parent Group"),data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
+        EditText tags=field(general,text("Tags (comma-separated)"),host==null ? "" : MobileVault.joinTags(host.optJSONArray("tags")),InputType.TYPE_CLASS_TEXT);
         LinearLayout ssh=editorCard(form,"SSH");
-        EditText port=field(ssh,"Port",host==null ? "22" : String.valueOf(host.optInt("port")),InputType.TYPE_CLASS_NUMBER);
-        ssh.addView(label("Credentials",14,TermianStyle.TEXT));
-        android.widget.Spinner identity=vault.pick(ssh,"Identity",data.optJSONArray("identities"),host==null ? "" : fieldValue(host,"identityId"));
+        EditText port=field(ssh,text("Port"),host==null ? "22" : String.valueOf(host.optInt("port")),InputType.TYPE_CLASS_NUMBER);
+        ssh.addView(label(text("Credentials"),14,TermianStyle.TEXT));
+        android.widget.Spinner identity=vault.pick(ssh,text("Identity"),data.optJSONArray("identities"),host==null ? "" : fieldValue(host,"identityId"));
         LinearLayout personal=column();
         ssh.addView(personal);
-        EditText user=field(personal,"Username",host==null ? "" : fieldValue(host,"user"),InputType.TYPE_CLASS_TEXT);
-        EditText password=field(personal,"SSH password","",PASSWORD);
+        EditText user=field(personal,text("Username"),host==null ? "" : fieldValue(host,"user"),InputType.TYPE_CLASS_TEXT);
+        EditText password=field(personal,text("SSH password"),"",PASSWORD);
         CheckBox clear=host==null ? null : check(personal,"Remove saved password");
-        android.widget.Spinner key=vault.pick(personal,"SSH key",data.optJSONArray("keys"),host==null ? "" : fieldValue(host,"keyId"));
+        android.widget.Spinner key=vault.pick(personal,text("SSH key"),data.optJSONArray("keys"),host==null ? "" : fieldValue(host,"keyId"));
         personal.setVisibility(MobileVault.choice(identity).isEmpty() ? View.VISIBLE : View.GONE);
         identity.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long keyId) {
@@ -775,9 +897,9 @@ public final class MainActivity extends Activity {
         footer.setGravity(Gravity.END|Gravity.CENTER_VERTICAL);
         footer.setPadding(dp(10),dp(4),dp(10),dp(4));
         footer.setBackgroundColor(TermianStyle.SIDEBAR);
-        footer.addView(button("Cancel",() -> confirmDiscard(this::closeHostEditor)));
-        footer.addView(style.tool("check","Save",TermianStyle.GREEN,() -> {
-            if(value(address).trim().isEmpty()) {address.setError("Enter a host address");address.requestFocus();return;}
+        footer.addView(button(text("Cancel"),() -> confirmDiscard(this::closeHostEditor)));
+        footer.addView(style.tool("check",text("Save"),TermianStyle.GREEN,() -> {
+            if(value(address).trim().isEmpty()) {address.setError(text("Enter a host address"));address.requestFocus();return;}
             JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
                 "port",value(port),"user",value(user),"password",value(password),
                 "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
@@ -791,10 +913,10 @@ public final class MainActivity extends Activity {
     }
 
     void cloudMenu() {
-        if (syncing) { toast("Cloud operation in progress."); return; }
+        if (syncing) { toast(text("Cloud operation in progress.")); return; }
         JSONObject config = call("cloud");
         if (config.isNull("url")) { cloudSettings(config); return; }
-        new AlertDialog.Builder(this).setTitle("Self-hosted cloud").setItems(new String[]{"Check changes", "Settings"}, (d,w) -> {
+        new AlertDialog.Builder(this).setTitle(text("Self-hosted cloud")).setItems(new String[]{text("Check changes"), text("Settings")}, (d,w) -> {
             if (w == 1) cloudSettings(config);
             else allowNetwork(() -> cloudOperation("cloudPreview"));
         }).show();
@@ -803,47 +925,47 @@ public final class MainActivity extends Activity {
     private void cloudOperation(String operation) {
         JSONObject result = call(operation);
         if (result.has("error")) toast(result.optString("error"));
-        else { syncing = true; toast(operation.equals("cloudPreview") ? "Checking changes…" : "Sync in progress…"); }
+        else { syncing = true; toast(operation.equals("cloudPreview") ? text("Checking changes…") : text("Sync in progress…")); }
     }
 
     private void showCloudPreview(JSONObject result) {
         if (result.has("error")) {
-            new AlertDialog.Builder(this).setTitle("Sync").setMessage(result.optString("error"))
-                .setNegativeButton("Close",null).setPositiveButton("Check again",(d,w) -> cloudOperation("cloudPreview")).show();
+            new AlertDialog.Builder(this).setTitle(text("Sync")).setMessage(result.optString("error"))
+                .setNegativeButton(text("Close"),null).setPositiveButton(text("Check again"),(d,w) -> cloudOperation("cloudPreview")).show();
             return;
         }
         StringBuilder summary = new StringBuilder(result.optString("message"));
         JSONArray changes = result.optJSONArray("changes");
         if (changes != null) for (int i = 0; i < changes.length(); i++) summary.append("\n").append(changes.optString(i));
         java.util.ArrayList<String> labels = new java.util.ArrayList<>();
-        labels.add("Sync"); labels.add("Check again");
-        if (result.optBoolean("canUpload")) labels.add("Force upload");
-        if (result.optBoolean("canDownload")) labels.add("Force download");
-        new AlertDialog.Builder(this).setTitle("Sync preview").setMessage(summary.toString())
-            .setNegativeButton("Close",null).setPositiveButton("Sync",(d,w) -> cloudOperation("sync"))
-            .setNeutralButton("More",(d,w) -> new AlertDialog.Builder(this).setTitle("Cloud actions")
+        labels.add(text("Sync")); labels.add(text("Check again"));
+        if (result.optBoolean("canUpload")) labels.add(text("Force upload"));
+        if (result.optBoolean("canDownload")) labels.add(text("Force download"));
+        new AlertDialog.Builder(this).setTitle(text("Sync preview")).setMessage(summary.toString())
+            .setNegativeButton(text("Close"),null).setPositiveButton(text("Sync"),(d,w) -> cloudOperation("sync"))
+            .setNeutralButton(text("More"),(d,w) -> new AlertDialog.Builder(this).setTitle(text("Cloud actions"))
                 .setItems(labels.toArray(new String[0]),(x,y) -> {
                     String action = labels.get(y);
                     if (y < 2) cloudOperation(y == 0 ? "sync" : "cloudPreview");
                     else new AlertDialog.Builder(this).setTitle(action + "?")
-                        .setMessage(action.equals("Force upload") ? "Replace the cloud snapshot with this device's Vault?"
-                            : "Back up this device's Vault and replace its synced records with the cloud snapshot?")
-                        .setNegativeButton("Cancel",null).setPositiveButton("Confirm",(g,h) ->
-                            cloudOperation(action.equals("Force upload") ? "forceUpload" : "forceDownload")).show();
+                        .setMessage(action.equals(text("Force upload")) ? text("Replace the cloud snapshot with this device's Vault?")
+                            : text("Back up this device's Vault and replace its synced records with the cloud snapshot?"))
+                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Confirm"),(g,h) ->
+                            cloudOperation(action.equals(text("Force upload")) ? "forceUpload" : "forceDownload")).show();
                 }).show()).show();
     }
 
     private void cloudSettings(JSONObject config) {
         LinearLayout form = column();
-        EditText url = field(form, "HTTPS-адрес сервера", fieldValue(config, "url"), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        EditText token = field(form, "Токен", "", PASSWORD);
-        EditText secret = field(form, "Пароль снимка", "", PASSWORD);
-        CheckBox empty = check(form, "Использовать пустой пароль снимка");
-        EditText user = field(form, "Логин Basic auth", fieldValue(config, "basicUser"), InputType.TYPE_CLASS_TEXT);
-        EditText password = field(form, "Пароль Basic auth", "", PASSWORD);
-        if (!config.isNull("url")) form.addView(label("Пустые поля секретов сохраняют прежние значения для этого сервера.", 14, MUTED));
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Своё облако").setView(scroll(form))
-            .setNegativeButton("Отмена", null).setPositiveButton("Сохранить", null).show();
+        EditText url = field(form, text("HTTPS-адрес сервера"), fieldValue(config, "url"), InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        EditText token = field(form, text("Токен"), "", PASSWORD);
+        EditText secret = field(form, text("Пароль снимка"), "", PASSWORD);
+        CheckBox empty = check(form, text("Использовать пустой пароль снимка"));
+        EditText user = field(form, text("Логин Basic auth"), fieldValue(config, "basicUser"), InputType.TYPE_CLASS_TEXT);
+        EditText password = field(form, text("Пароль Basic auth"), "", PASSWORD);
+        if (!config.isNull("url")) form.addView(label(text("Пустые поля секретов сохраняют прежние значения для этого сервера."), 14, MUTED));
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(text("Своё облако")).setView(scroll(form))
+            .setNegativeButton(text("Отмена"), null).setPositiveButton(text("Сохранить"), null).show();
         dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
             JSONObject result = call("configureCloud", "url", value(url), "token", value(token), "passphrase", value(secret),
                 "emptyPassphrase", empty.isChecked(), "basicUser", value(user), "basicPassword", value(password));
@@ -870,7 +992,7 @@ public final class MainActivity extends Activity {
     void refreshVault() { redrawHosts(); }
 
     private void appMenu() {
-        String[] options=widthDp<380 ? new String[]{"Sync","Lock","Settings"} : new String[]{"Settings"};
+        String[] options=widthDp<380 ? new String[]{text("Sync"),text("Lock"),text("Settings")} : new String[]{text("Settings")};
         new AlertDialog.Builder(this).setItems(options,(d,index) -> {
             switch(options[index]) {
                 case "Sync": cloudMenu();break;
@@ -882,35 +1004,50 @@ public final class MainActivity extends Activity {
 
     private void settings() {
         JSONObject state = call("vault");
-        new AlertDialog.Builder(this).setTitle("Settings").setItems(new String[]{
-            "Self-hosted cloud", "Terminal", "Session logging", "Clear logs", "Privacy password", "Version"
+        new AlertDialog.Builder(this).setTitle(text("Settings")).setItems(new String[]{
+            text("Self-hosted cloud"), text("Terminal"), text("Session logging"), text("Clear logs"), text("Privacy password"), text("Version"), text("Language")
         }, (d,i) -> {
             if (i == 0) cloudSettings(call("cloud"));
             if (i == 1) vault.terminalSettings(state.optJSONObject("terminal"));
             if (i == 2) {
                 boolean enabled = state.optBoolean("logsEnabled");
-                new AlertDialog.Builder(this).setMessage(enabled ? "Stop recording session logs?" : "Record upcoming sessions?")
-                    .setNegativeButton("Cancel",null).setPositiveButton("Apply",(a,b) -> updateHosts(call("logsEnabled","enabled",!enabled))).show();
+                new AlertDialog.Builder(this).setMessage(enabled ? text("Stop recording session logs?") : text("Record upcoming sessions?"))
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Apply"),(a,b) -> updateHosts(call("logsEnabled","enabled",!enabled))).show();
             }
-            if (i == 3) new AlertDialog.Builder(this).setTitle("Clear logs").setItems(new String[]{"Last hour","Last day","Last week","All"},(a,b) ->
-                new AlertDialog.Builder(this).setMessage("Delete session logs for this period?")
-                    .setNegativeButton("Cancel",null).setPositiveButton("Delete",(x,y) -> {
+            if (i == 3) new AlertDialog.Builder(this).setTitle(text("Clear logs")).setItems(new String[]{text("Last hour"),text("Last day"),text("Last week"),text("All")},(a,b) ->
+                new AlertDialog.Builder(this).setMessage(text("Delete session logs for this period?"))
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(x,y) -> {
                         JSONObject res = call("clearLogs","hours",new int[]{1,24,168,0}[b]);
                         toast(res.optString(res.has("error") ? "error" : "message"));
                         redrawHosts();
                     }).show()).show();
             if (i == 4) privacyPassword(false);
             if (i == 5) updates.show();
+            if (i == 6) languageSettings();
         }).show();
+    }
+
+    private void languageSettings() {
+        boolean russian=getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false);
+        new AlertDialog.Builder(this).setTitle(text("Language"))
+            .setSingleChoiceItems(new String[]{"English","Русский"},russian ? 1 : 0,(dialog,index) -> {
+                boolean selected=index==1;
+                getPreferences(MODE_PRIVATE).edit().putBoolean("ui:russian",selected).apply();
+                setRussian(selected);
+                vaultName=call("vaultList").optString("vaultName",vaultName);
+                dialog.dismiss();
+                redrawHosts();
+                redrawNavigation();
+            }).setNegativeButton(text("Close"),null).show();
     }
 
     private void privacyPassword(boolean thenLock) {
         LinearLayout form = column();
         boolean set = call("vault").optBoolean("privacyConfigured");
-        EditText current = set ? field(form,"Current password","",PASSWORD) : null;
-        EditText password = field(form,"Lock password","",PASSWORD);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle("Privacy lock").setView(form)
-            .setNegativeButton("Cancel",null).setPositiveButton("Save",null).show();
+        EditText current = set ? field(form,text("Current password"),"",PASSWORD) : null;
+        EditText password = field(form,text("Lock password"),"",PASSWORD);
+        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(text("Privacy lock")).setView(form)
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),null).show();
         dialog.getButton(-1).setOnClickListener(v -> {
             JSONObject r = call("savePrivacy","password",value(password),"current",current == null ? "" : value(current));
             if (r.has("error")) toast(r.optString("error"));
@@ -930,13 +1067,13 @@ public final class MainActivity extends Activity {
         privacy.setBackgroundColor(BACKGROUND);
         privacy.setPadding(dp(30), dp(24), dp(30), dp(24));
         privacy.addView(style.icon("privacy_lock",ACCENT), new LinearLayout.LayoutParams(dp(42),dp(42)));
-        privacy.addView(label("Termian is locked",24,TermianStyle.TEXT));
-        EditText password = field(privacy,"Password","",PASSWORD);
-        privacy.addView(button("Unlock",() -> {
+        privacy.addView(label(text("Termian is locked"),24,TermianStyle.TEXT));
+        EditText password = field(privacy,text("Password"),"",PASSWORD);
+        privacy.addView(button(text("Unlock"),() -> {
             JSONObject r = call("unlock","password",value(password));
             if (r.has("error")) { toast(r.optString("error")); return; }
             locked = false;
-            setContentView(root);
+            setContentView(appFrame);
             if (!tabId.isEmpty()) useTab(call("selectTab","id",tabId));
             redrawHosts();
         }));

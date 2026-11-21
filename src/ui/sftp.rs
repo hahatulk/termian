@@ -1,6 +1,7 @@
 //! SFTP tab: two file panels side by side. The left one is the local disk;
 //! the right one shows a remote host once connected.
 
+use termian_native::language::text as tr;
 use futures::StreamExt;
 use gpui::{
     div, prelude::*, px, rgb, svg, ClickEvent, Context, Div, ExternalPaths, KeyDownEvent, MouseButton, MouseDownEvent, SharedString,
@@ -23,6 +24,7 @@ use crate::Shell;
 
 /// Folder blue from the legacy file icons.
 pub const FOLDER: u32 = 0x5ab4f0;
+const HIDDEN_TEXT: u32 = 0xbac0cf;
 const COLUMNS: [(SortKey, &str, f32); 4] =
     [(SortKey::Name, "Name", 0.), (SortKey::Modified, "Date Modified", 175.), (SortKey::Size, "Size", 115.), (SortKey::Kind, "Kind", 115.)];
 
@@ -239,28 +241,48 @@ impl SftpState {
     }
 }
 
-fn icon_button(id: String, name: &str, enabled: bool) -> Stateful<Div> {
+fn nav_button(id: String, label: &str, forward: bool, enabled: bool) -> Stateful<Div> {
+    let arrow = svg().path(icon("sftp_arrow")).size(px(16.))
+        .text_color(rgb(if enabled { theme::TEXT } else { theme::TEXT_MUTED }));
+    let arrow = if forward { arrow.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5))) } else { arrow };
+    let label = label.to_owned();
     div()
         .id(SharedString::from(id))
-        .size(px(24.))
+        .size(px(30.))
         .flex_none()
         .flex()
         .items_center()
         .justify_center()
-        .rounded_sm()
-        .when(enabled, |d| d.icon_feedback())
-        .child(svg().path(icon(name)).size(px(10.)).text_color(rgb(if enabled { theme::TEXT } else { theme::TEXT_MUTED })))
+        .rounded_md()
+        .when(enabled, |d| d.icon_feedback().tooltip(move |_, cx| cx.new(|_| super::cloud::Tooltip(label.clone())).into()))
+        .when(!enabled, |d| d.opacity(0.5))
+        .child(arrow)
 }
 
-fn entry_icon(entry: &Entry) -> impl IntoElement {
+fn path_separator() -> impl IntoElement {
+    svg().path(icon("sftp_chevron")).size(px(11.)).flex_none().text_color(rgb(theme::TEXT_MUTED))
+}
+
+fn folder_icon(size: f32, hidden: bool) -> Div {
+    div().relative().size(px(size)).flex_none()
+        .child(svg().path(icon("folder")).size(px(size)).text_color(rgb(if hidden { 0x799cb4 } else { FOLDER })))
+        .when(hidden, |d| d.child(
+            div().absolute().bottom(px(-1.)).right(px(-1.)).size(px(12.))
+                .flex().items_center().justify_center().rounded_full().bg(rgb(theme::TITLE_BAR))
+                .child(svg().path(icon("sftp_eye_off")).size(px(10.)).text_color(rgb(theme::TEXT))),
+        ))
+}
+
+fn entry_icon(entry: &Entry) -> gpui::AnyElement {
+    if !entry.is_link && entry.is_dir {
+        return folder_icon(18., entry.is_hidden()).into_any_element();
+    }
     let (name, color) = if entry.is_link {
         ("link", FOLDER)
-    } else if entry.is_dir {
-        ("folder", FOLDER)
     } else {
-        ("file", theme::TEXT)
+        ("file", if entry.is_hidden() { HIDDEN_TEXT } else { theme::TEXT })
     };
-    svg().path(icon(name)).size(px(18.)).flex_none().text_color(rgb(color))
+    svg().path(icon(name)).size(px(18.)).flex_none().text_color(rgb(color)).into_any_element()
 }
 
 fn button(id: &str, label: &str, primary: bool) -> Stateful<Div> {
@@ -336,6 +358,7 @@ impl Shell {
     }
 
     fn connect_sftp_target(&mut self, side: Side, label: String, os: Option<String>, mut target: SshTarget, window: &mut Window, cx: &mut Context<Self>) {
+        target.known_hosts = self.store.known_hosts_path();
         target.options = termian_native::session::SshOptions::from_vault(&self.vault);
         let mut connection = RemoteFs::connect(target.clone());
         let panel = self.sftp.side_mut(side);
@@ -415,24 +438,24 @@ impl Shell {
                     .justify_center()
                     .child(svg().path(icon("sftp")).size(px(26.)).text_color(rgb(theme::TEXT))),
             )
-            .child(div().pt_4().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Connect to host"))
+            .child(div().pt_4().text_lg().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Connect to host")))
             .child(
                 div()
                     .text_sm()
                     .text_color(rgb(theme::TEXT_MUTED))
-                    .child("Start by connecting to a saved host to manage your files with SFTP."),
+                    .child(tr("Start by connecting to a saved host to manage your files with SFTP.")),
             )
             .when_some(error, |d, error| d.child(div().text_sm().text_color(rgb(theme::TILE_UBUNTU)).child(error.to_owned())))
             .child(
                 div()
                     .flex()
                     .gap_2()
-                    .child(button(&format!("select-host-{key}"), "Select host", false).on_click(cx.listener(move |shell, _, _, cx| {
+                    .child(button(&format!("select-host-{key}"), tr("Select host"), false).on_click(cx.listener(move |shell, _, _, cx| {
                         shell.sftp.side_mut(side).state = RemoteState::Picking { query: String::new(), group: None };
                         cx.notify();
                     })))
                     .when(side == Side::Left, |d| {
-                        d.child(button("show-local", "Local", false).on_click(cx.listener(|shell, _, _, cx| {
+                        d.child(button("show-local", tr("Local"), false).on_click(cx.listener(|shell, _, _, cx| {
                             shell.disconnect_sftp(Side::Left);
                             cx.notify();
                         })))
@@ -496,15 +519,8 @@ impl Shell {
             .gap_3()
             .bg(rgb(theme::SIDEBAR))
             .child(
-                div()
-                    .id(SharedString::from(format!("pick-back-{key}")))
-                    .size(px(28.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_md()
-                    .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                    .child(svg().path(icon("arrow_left")).size(px(14.)).text_color(rgb(theme::TEXT)))
+                nav_button(format!("pick-back-{key}"), tr("Cancel"), false, true)
+                    .bg(rgb(theme::TITLE_BAR))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.cancel_pick(side);
                         cx.notify();
@@ -514,8 +530,8 @@ impl Shell {
                 div()
                     .flex()
                     .flex_col()
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("Select Host"))
-                    .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child("Vaults")),
+                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Select Host")))
+                    .child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(tr("Vaults"))),
             )
             .child(div().flex_1())
             .child(
@@ -533,7 +549,7 @@ impl Shell {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .text_color(rgb(0xffffff))
                     .child(svg().path(icon("local")).size(px(14.)).text_color(rgb(0xffffff)))
-                    .child("Local")
+                    .child(tr("Local"))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         shell.show_local(side);
                         cx.notify();
@@ -553,7 +569,7 @@ impl Shell {
             .border_t_1()
             .border_color(rgb(theme::TITLE_BAR))
             .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT_MUTED)))
-            .child(text_input::text(("sftp-picker", key), query, "Search", focused, Mode::Line, cx));
+            .child(text_input::text(("sftp-picker", key), query, tr("Search"), focused, Mode::Line, cx));
         let field = text_input::field(field, ("sftp-picker", key), Mode::Line, |shell, window, _| window.focus(&shell.sftp_answer_focus), cx);
         let row = |id: String, tile: Div, title: String, subtitle: String| {
             div()
@@ -575,10 +591,10 @@ impl Shell {
         if !searching {
             if let Some(open) = group {
                 let mut crumbs = div().px_3().pt_4().flex().items_center().gap_2().text_sm().child(
-                    div().id(SharedString::from(format!("pick-crumb-root-{key}"))).rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child("All hosts").on_click(cx.listener(set_group(None))),
+                    div().id(SharedString::from(format!("pick-crumb-root-{key}"))).rounded_sm().icon_feedback().text_color(rgb(theme::ACCENT)).child(tr("All hosts")).on_click(cx.listener(set_group(None))),
                 );
                 for g in self.vault.breadcrumbs(Some(open)) {
-                    crumbs = crumbs.child(div().text_color(rgb(theme::TEXT_MUTED)).child("›")).child(
+                    crumbs = crumbs.child(path_separator()).child(
                         div()
                             .id(SharedString::from(format!("pick-crumb-{key}-{}", g.id)))
                             .rounded_sm().icon_feedback()
@@ -591,11 +607,11 @@ impl Shell {
             }
             let groups = self.vault.child_groups(group);
             if !groups.is_empty() {
-                list = list.child(title("Groups"));
+                list = list.child(title(tr("Groups")));
                 for g in groups {
                     let count = self.vault.hosts_under(Some(g.id)).len();
                     list = list.child(
-                        row(format!("pick-group-{key}-{}", g.id), super::hosts::tile("group", theme::TILE_BLUE), g.label.clone(), format!("{count} {}", if count == 1 { "Host" } else { "Hosts" }))
+                        row(format!("pick-group-{key}-{}", g.id), super::hosts::tile("group", theme::TILE_BLUE), g.label.clone(), format!("{count} {}", if count == 1 { tr("Host") } else { tr("Hosts") }))
                             .on_click(cx.listener(set_group(Some(g.id)))),
                     );
                 }
@@ -603,7 +619,7 @@ impl Shell {
         }
         let hosts = if searching { self.vault.search(query) } else { self.vault.hosts_under(group) };
         if !hosts.is_empty() {
-            list = list.child(title("Hosts"));
+            list = list.child(title(tr("Hosts")));
             for host in hosts {
                 let id = host.id;
                 list = list.child(row(format!("pick-{key}-{id}"), host_tile(host), host.display_label().to_owned(), host.subtitle()).on_click(cx.listener(move |shell, _, window, cx| {
@@ -713,7 +729,7 @@ impl Shell {
                         .justify_center()
                         .child(svg().path(icon("local")).size(px(14.)).text_color(rgb(0xffffff))),
                 )
-                .child(div().text_color(rgb(theme::TEXT)).child("Local"))
+                .child(div().text_color(rgb(theme::TEXT)).child(tr("Local")))
                 .child({
                     let row = div();
                     row.child(
@@ -727,7 +743,7 @@ impl Shell {
                             .text_xs()
                             .font_weight(gpui::FontWeight::BOLD)
                             .text_color(rgb(theme::TEXT))
-                            .child("DISCONNECT")
+                            .child(tr("DISCONNECT"))
                             .on_click(cx.listener(move |shell, _, _, cx| {
                                 let panel = shell.sftp.side_mut(side);
                                 panel.host = true;
@@ -747,7 +763,7 @@ impl Shell {
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     .text_color(rgb(theme::TEXT))
-                    .child("DISCONNECT")
+                    .child(tr("DISCONNECT"))
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         shell.request_disconnect(side, window);
                         cx.notify();
@@ -765,7 +781,7 @@ impl Shell {
             .min_w(px(80.)).h(px(28.)).px_2().flex().items_center().gap_2().rounded_md()
             .when(filtering, |d| d.bg(rgb(theme::INPUT)).border_1().border_color(rgb(theme::ACCENT)))
             .child(svg().path(icon("search")).size(px(16.)).text_color(rgb(theme::TEXT)))
-            .child(text_input::text(("sftp-filter", key), &panel.filter, if filtering { "" } else { "Filter" }, filtering, Mode::Line, cx));
+            .child(text_input::text(("sftp-filter", key), &panel.filter, if filtering { "" } else { tr("Filter") }, filtering, Mode::Line, cx));
         let filter = text_input::field(input, ("sftp-filter", key), Mode::Line, move |shell, window, _| {
             shell.sftp.filtering = Some(side);
             window.focus(&shell.sftp_filter_focus);
@@ -783,30 +799,32 @@ impl Shell {
             .child(filter)
             .child(self.render_actions_button(side, cx));
 
+        let can_back = panel.can_go_back();
+        let can_forward = panel.can_go_forward();
         let navigation = div()
             .h(px(44.))
             .flex_none()
             .px_3()
             .flex()
             .items_center()
-            .gap_1()
+            .gap_2()
             .bg(rgb(theme::SIDEBAR))
-            .child(icon_button(format!("back-{key}"), "arrow_left", panel.can_go_back()).on_click(cx.listener(
-                move |shell, _, _, cx| {
-                    if shell.sftp.panel_mut(side).is_some_and(|p| p.go_back()) {
-                        shell.sftp.reload(side);
-                    }
-                    cx.notify();
-                },
-            )))
-            .child(icon_button(format!("forward-{key}"), "arrow_right", panel.can_go_forward()).on_click(cx.listener(
-                move |shell, _, _, cx| {
-                    if shell.sftp.panel_mut(side).is_some_and(|p| p.go_forward()) {
-                        shell.sftp.reload(side);
-                    }
-                    cx.notify();
-                },
-            )))
+            .child(div().flex().items_center().flex_none().gap_1().p_1()
+                .rounded_md().bg(rgb(theme::TITLE_BAR))
+                .child(nav_button(format!("back-{key}"), tr("Back folder"), false, can_back)
+                    .when(can_back, |d| d.on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.sftp.panel_mut(side).is_some_and(|p| p.go_back()) {
+                            shell.sftp.reload(side);
+                        }
+                        cx.notify();
+                    }))))
+                .child(nav_button(format!("forward-{key}"), tr("Forward folder"), true, can_forward)
+                    .when(can_forward, |d| d.on_click(cx.listener(move |shell, _, _, cx| {
+                        if shell.sftp.panel_mut(side).is_some_and(|p| p.go_forward()) {
+                            shell.sftp.reload(side);
+                        }
+                        cx.notify();
+                    })))))
             // Long paths are clipped here instead of spilling into the other panel.
             .child(div().flex_1().min_w_0().overflow_hidden().flex().items_center().gap_1().children(self.render_crumbs(side, &panel.path, cx)));
 
@@ -836,7 +854,7 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(label)
+                    .child(tr(label))
                     .children(marker)
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if let Some(panel) = shell.sftp.panel_mut(side) {
@@ -907,20 +925,23 @@ impl Shell {
         }
         for (i, (label, target)) in all.into_iter().enumerate().skip(skip) {
             if i > skip || skip > 0 {
-                out.push(div().id(SharedString::from(format!("crumb-sep-{}-{i}", side.key()))).flex_none().child(svg().path(icon("arrow_right")).size(px(8.)).text_color(rgb(theme::TEXT_MUTED))));
+                out.push(div().id(SharedString::from(format!("crumb-sep-{}-{i}", side.key()))).flex_none().child(path_separator()));
             }
+            let hidden = label.starts_with('.');
             out.push(
                 div()
                     .id(SharedString::from(format!("crumb-{}-{i}", side.key())))
+                    .h(px(28.))
                     .min_w_0()
-                    .px_1()
+                    .px_2()
                     .flex()
                     .items_center()
                     .gap_1()
-                    .rounded_sm()
-                    .hover(|s| s.bg(rgb(theme::SURFACE_ACTIVE)))
-                    .text_color(rgb(theme::TEXT))
-                    .child(svg().path(icon("folder")).size(px(16.)).flex_none().text_color(rgb(FOLDER)))
+                    .rounded_md()
+                    .icon_feedback()
+                    .text_sm()
+                    .text_color(rgb(if hidden { HIDDEN_TEXT } else { theme::TEXT }))
+                    .child(folder_icon(14., hidden))
                     .child(div().min_w_0().truncate().child(label))
                     .on_click(cx.listener(move |shell, _, _, cx| {
                         if let Some(panel) = shell.sftp.panel_mut(side) {
@@ -936,11 +957,11 @@ impl Shell {
 
     fn render_row(&self, side: Side, entry: Option<&Entry>, selected: bool, cx: &mut Context<Self>) -> Stateful<Div> {
         let name = entry.map(|e| e.name.clone()).unwrap_or_else(|| "..".into());
-        let text = if selected { 0xffffff } else { theme::TEXT };
+        let text = if selected { 0xffffff } else if entry.is_some_and(Entry::is_hidden) { HIDDEN_TEXT } else { theme::TEXT };
         let muted = if selected { 0xffffff } else { theme::TEXT_MUTED };
         let cell = |width: f32, content: String| div().w(px(width)).flex_none().text_color(rgb(muted)).text_sm().truncate().child(content);
         let icon_el = match entry {
-            Some(e) => entry_icon(e).into_any_element(),
+            Some(e) => entry_icon(e),
             None => svg().path(icon("folder")).size(px(18.)).text_color(rgb(FOLDER)).into_any_element(),
         };
         // Remote rows show permissions under the name, as in the legacy panel.

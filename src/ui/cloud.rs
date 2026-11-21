@@ -4,6 +4,7 @@
 //! the conflict choice offered but never made automatically. Network work
 //! runs off the UI thread; the hourly sync follows the `auto_sync` switch.
 
+use termian_native::language::text as tr;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -46,25 +47,25 @@ pub enum Operation {
 impl Operation {
     fn title(self) -> &'static str {
         match self {
-            Operation::Sync => "Синхронизация",
-            Operation::Upload => "Отправить изменения",
-            Operation::Download => "Получить изменения",
+            Operation::Sync => tr("Синхронизация"),
+            Operation::Upload => tr("Отправить изменения"),
+            Operation::Download => tr("Получить изменения"),
         }
     }
 
     fn warning(self) -> &'static str {
         match self {
-            Operation::Download => "Данные приложения будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия.",
-            Operation::Sync => "Изменения устройства и облака будут объединены: новые, изменённые и удалённые записи переносятся в обе стороны. Перед применением изменений из облака создаётся зашифрованная резервная копия.",
-            Operation::Upload => "Снимок в облаке будет полностью заменён текущими данными. Изменения других устройств будут затёрты.",
+            Operation::Download => tr("Данные приложения будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия."),
+            Operation::Sync => tr("Изменения устройства и облака будут объединены: новые, изменённые и удалённые записи переносятся в обе стороны. Перед применением изменений из облака создаётся зашифрованная резервная копия."),
+            Operation::Upload => tr("Снимок в облаке будет полностью заменён текущими данными. Изменения других устройств будут затёрты."),
         }
     }
 
     fn confirm(self) -> &'static str {
         match self {
-            Operation::Download => "Получить и заменить",
-            Operation::Sync => "Синхронизировать",
-            Operation::Upload => "Отправить и заменить",
+            Operation::Download => tr("Получить и заменить"),
+            Operation::Sync => tr("Синхронизировать"),
+            Operation::Upload => tr("Отправить и заменить"),
         }
     }
 }
@@ -136,13 +137,13 @@ impl ConfigForm {
     /// The browser's `reportValidity` checks of the legacy form.
     fn missing(&self) -> Option<&'static str> {
         if self.url.trim().is_empty() {
-            Some("Введите адрес сервера")
+            Some(tr("Введите адрес сервера"))
         } else if self.token.is_empty() && !self.has_token {
-            Some("Введите токен доступа")
+            Some(tr("Введите токен доступа"))
         } else if self.basic && self.basic_user.trim().is_empty() {
-            Some("Введите логин Basic auth")
+            Some(tr("Введите логин Basic auth"))
         } else if self.basic && self.basic_password.is_empty() && !self.has_basic_password {
-            Some("Введите пароль Basic auth")
+            Some(tr("Введите пароль Basic auth"))
         } else {
             None
         }
@@ -261,8 +262,13 @@ fn configured(vault: &Vault) -> bool {
 /// on it; then the old merge base stays and the next sync carries both the
 /// edit and what came from the cloud.
 fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
-    let edited = Vault { history: Vec::new(), update_channel: started.update_channel, ..live.clone() }
-        != Vault { history: Vec::new(), ..started.clone() };
+    let edited = Vault {
+        history: Vec::new(),
+        update_channel: started.update_channel,
+        update_schedule: started.update_schedule,
+        language: started.language,
+        ..live.clone()
+    } != Vault { history: Vec::new(), ..started.clone() };
     if edited || !live.history.iter().filter(|entry| entry.log.is_some())
         .eq(started.history.iter().filter(|entry| entry.log.is_some())) {
         return false;
@@ -279,6 +285,8 @@ fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
     }
     synced.history.sort_by_key(|entry| std::cmp::Reverse((entry.connected_at, entry.id)));
     synced.update_channel = live.update_channel;
+    synced.update_schedule = live.update_schedule;
+    synced.language = live.language;
     *live = synced;
     true
 }
@@ -324,8 +332,8 @@ impl Shell {
         };
         let checking = matches!(&body, Body::Run(run) if run.configured);
         let out = match &body {
-            Body::Run(run) if !run.configured => Some(Out::Working("Сначала сохраните адрес сервера, токен и пароль в настройках своего облака.".into())),
-            Body::Run(_) => Some(Out::Working("Проверяю изменения в облаке и на устройстве…".into())),
+            Body::Run(run) if !run.configured => Some(Out::Working(tr("Сначала сохраните адрес сервера, токен и пароль в настройках своего облака.").into())),
+            Body::Run(_) => Some(Out::Working(tr("Проверяю изменения в облаке и на устройстве…").into())),
             Body::Config(_) => None,
         };
         self.cloud.dialog = Some(CloudDialog { body, out, busy: checking });
@@ -477,7 +485,7 @@ impl Shell {
                             run.upload_preview = ticket;
                             run.checked(status, now());
                             dialog.out = if run.operation != Operation::Sync && !run.confirm && matches!(run.panel, Some(Status::Checked(_))) {
-                                Some(Out::Error("Нет проверенной ревизии для этой операции.".into()))
+                                Some(Out::Error(tr("Нет проверенной ревизии для этой операции.").into()))
                             } else { None };
                             dialog.busy = false;
                         }
@@ -526,9 +534,9 @@ impl Shell {
                 if result.is_ok() {
                     let mut candidate = shell.vault.clone();
                     if !adopt(&mut candidate, &started, vault) {
-                        result = Err("Конфигурация изменилась во время операции. Проверьте изменения и повторите.".into());
+                        result = Err(tr("Конфигурация изменилась во время операции. Проверьте изменения и повторите.").into());
                     } else if let Err(error) = shell.store.save(&candidate) {
-                        result = Err(format!("Не удалось сохранить результат операции в Vault: {error}"));
+                        result = Err(termian_native::ui_format!("Could not save the operation result to the Vault: {error}", "Не удалось сохранить результат операции в Vault: {error}"));
                     } else {
                         shell.vault = candidate;
                     }
@@ -561,14 +569,14 @@ impl Shell {
             return;
         }
         if self.cloud.logs_running {
-            dialog.out = Some(Out::Error("Дождитесь отправки логов и повторите.".into()));
+            dialog.out = Some(Out::Error(tr("Дождитесь отправки логов и повторите.").into()));
             cx.notify();
             return;
         }
         let operation = run.operation;
         run.confirm = false;
         dialog.busy = true;
-        dialog.out = Some(Out::Working("Выполняется…".into()));
+        dialog.out = Some(Out::Working(tr("Выполняется…").into()));
         let ticket = run.upload_preview.take();
         self.run_cloud(operation, ticket, cx);
         cx.notify();
@@ -595,15 +603,15 @@ impl Shell {
             return;
         }
         if self.cloud.running || self.cloud.logs_running {
-            *out = Some(Out::Error("Дождитесь завершения операции с облаком и повторите.".into()));
+            *out = Some(Out::Error(tr("Дождитесь завершения операции с облаком и повторите.").into()));
             cx.notify();
             return;
         }
         *busy = true;
         self.cloud.running = true;
-        let confirm = window.prompt(gpui::PromptLevel::Warning, "Проверить пароль шифрования?",
-            Some("Если на сервере есть снимок, Termian попробует открыть его этим паролем перед сохранением."),
-            &["Проверить и сохранить", "Отмена"], cx);
+        let confirm = window.prompt(gpui::PromptLevel::Warning, tr("Проверить пароль шифрования?"),
+            Some(tr("Если на сервере есть снимок, Termian попробует открыть его этим паролем перед сохранением.")),
+            &[tr("Проверить и сохранить"), tr("Отмена")], cx);
         cx.spawn(async move |this, cx| {
             let result = if confirm.await == Ok(0) {
                 let config = candidate.clone();
@@ -630,6 +638,11 @@ impl Shell {
 
     fn commit_cloud_config(&mut self, candidate: termian_native::cloud::CloudConfig, rotated: bool, cx: &mut Context<Self>) {
         let Some(CloudDialog { body: Body::Config(form), out, .. }) = &mut self.cloud.dialog else { return };
+        if let Err(error) = self.vaults.check_cloud_url(&candidate.url) {
+            *out = Some(Out::Error(error));
+            cx.notify();
+            return;
+        }
         let mut vault = self.vault.clone();
         if vault.cloud.as_ref().is_some_and(|previous| termian_native::sync::server_key(&previous.url) != termian_native::sync::server_key(&candidate.url)) {
             log_backup::reset_catalog(&mut vault);
@@ -642,7 +655,7 @@ impl Shell {
         }
         self.vault = vault;
         form.load(&self.vault);
-        *out = Some(Out::Success(if rotated { "Новый пароль сохранён. Следующие отправки будут зашифрованы им." } else { "Настройки сохранены" }.into()));
+        *out = Some(Out::Success(if rotated { tr("Новый пароль сохранён. Следующие отправки будут зашифрованы им.") } else { tr("Настройки сохранены") }.into()));
         if rotated {
             self.cloud.logs_paused_until = None;
         }
@@ -751,17 +764,17 @@ impl Shell {
 
     fn render_cloud_config(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(CloudDialog { body: Body::Config(form), busy, .. }) = &self.cloud.dialog else { return vec![] };
-        let token_hint = if form.has_token { "Токен сохранён. Поле — только для замены." } else { "Токен ещё не сохранён." };
-        let passphrase_hint = if form.has_passphrase { SAVED_SECRET } else { "Если снимок зашифрован пустым паролем, оставьте поле пустым." };
+        let token_hint = if form.has_token { tr("Токен сохранён. Поле — только для замены.") } else { tr("Токен ещё не сохранён.") };
+        let passphrase_hint = if form.has_passphrase { SAVED_SECRET } else { tr("Если снимок зашифрован пустым паролем, оставьте поле пустым.") };
         let basic_hint = form.has_basic_password.then_some(SAVED_SECRET);
         // The legacy Settings window holds this switch; the native client has no Settings yet.
         let auto_sync = configured(&self.vault).then(|| self.vault.cloud.as_ref().is_some_and(|c| c.auto_sync));
         let basic = form.basic;
         let disabled = *busy;
         vec![
-            self.cloud_input(Field::Url, "Адрес сервера", &form.url, false, "https://cloud.example/v1/snapshot", None, true, cx).into_any_element(),
-            self.cloud_input(Field::Token, "Токен доступа", &form.token, true, "Введите токен сервера", Some(token_hint), true, cx).into_any_element(),
-            self.cloud_input(Field::Passphrase, "Пароль шифрования", &form.passphrase, true, "Пароль снимка", Some(passphrase_hint), true, cx).into_any_element(),
+            self.cloud_input(Field::Url, tr("Адрес сервера"), &form.url, false, "https://cloud.example/v1/snapshot", None, true, cx).into_any_element(),
+            self.cloud_input(Field::Token, tr("Токен доступа"), &form.token, true, tr("Введите токен сервера"), Some(token_hint), true, cx).into_any_element(),
+            self.cloud_input(Field::Passphrase, tr("Пароль шифрования"), &form.passphrase, true, tr("Пароль снимка"), Some(passphrase_hint), true, cx).into_any_element(),
             div()
                 .p(px(12.))
                 .flex()
@@ -770,9 +783,9 @@ impl Shell {
                 .rounded(px(6.))
                 .border_1()
                 .border_color(rgb(0x3a4050))
-                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child("HTTP Basic auth"))
+                .child(div().text_xs().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("HTTP Basic auth")))
                 .child(
-                    super::dialog::checkbox("cloud-basic", "Сервер за прокси с Basic auth", basic).text_xs().on_click(cx.listener(move |shell, _, _, cx| {
+                    super::dialog::checkbox("cloud-basic", tr("Сервер за прокси с Basic auth"), basic).text_xs().on_click(cx.listener(move |shell, _, _, cx| {
                         if disabled {
                             return;
                         }
@@ -785,8 +798,8 @@ impl Shell {
                         cx.notify();
                     })),
                 )
-                .child(self.cloud_input(Field::BasicUser, "Логин", &form.basic_user, false, "", None, basic, cx))
-                .child(self.cloud_input(Field::BasicPassword, "Пароль", &form.basic_password, true, "", basic_hint, basic, cx))
+                .child(self.cloud_input(Field::BasicUser, tr("Логин"), &form.basic_user, false, "", None, basic, cx))
+                .child(self.cloud_input(Field::BasicPassword, tr("Пароль"), &form.basic_password, true, "", basic_hint, basic, cx))
                 .into_any_element(),
             div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(HELP).into_any_element(),
         ]
@@ -812,11 +825,11 @@ impl Shell {
     fn render_cloud_panel(&self, run: &Run, cx: &mut Context<Self>) -> Option<Div> {
         let status = run.panel.as_ref()?;
         let (headline, tone) = match status {
-            Status::Checking => ("Проверяю изменения…", theme::TEXT),
-            Status::Syncing => ("Синхронизация…", theme::TEXT),
-            Status::Error { .. } => ("Не удалось проверить состояние синхронизации", ERROR_TONE),
+            Status::Checking => (tr("Проверяю изменения…"), theme::TEXT),
+            Status::Syncing => (tr("Синхронизация…"), theme::TEXT),
+            Status::Error { .. } => (tr("Не удалось проверить состояние синхронизации"), ERROR_TONE),
             Status::Checked(preview) => (
-                preview.headline(),
+                tr(preview.headline()),
                 match preview {
                     Preview::Synced => self_cloud::TONE_OK,
                     Preview::Conflicts(_) => ERROR_TONE,
@@ -842,12 +855,12 @@ impl Shell {
             .text_color(rgb(theme::TEXT))
             .child(div().text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).child(headline));
         if run.operation == Operation::Sync && matches!(status, Status::Checked(Preview::Conflicts(_))) {
-            panel = panel.child(muted("Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия."));
+            panel = panel.child(muted(tr("Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия.")));
         }
         if let Status::Error { message, credentials } = status {
-            panel = panel.child(muted(message.clone()));
+            panel = panel.child(muted(tr(message).to_owned()));
             if *credentials {
-                panel = panel.child(muted("Автоматическая проверка приостановлена, чтобы не продлевать блокировку. Исправьте токен или пароль в настройках своего облака."));
+                panel = panel.child(muted(tr("Автоматическая проверка приостановлена, чтобы не продлевать блокировку. Исправьте токен или пароль в настройках своего облака.")));
             }
         }
         if let Status::Checked(preview) = status {
@@ -895,7 +908,7 @@ impl Shell {
                                 .gap(px(8.))
                                 .child(div().font_weight(FontWeight::SEMIBOLD).text_color(rgb(tone)).child(title))
                                 .child(div().flex_1())
-                                .child(div().text_size(px(11.)).text_color(rgb(theme::TEXT_MUTED)).child(group.direction))
+                                .child(div().text_size(px(11.)).text_color(rgb(theme::TEXT_MUTED)).child(tr(group.direction)))
                                 .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)).when(open, |s| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(0.5)))))
                                 .on_click(cx.listener(move |shell, _, _, cx| {
                                     if let Some(CloudDialog { body: Body::Run(run), .. }) = &mut shell.cloud.dialog {
@@ -912,7 +925,7 @@ impl Shell {
             }
         }
         if let Some(at) = run.checked_at {
-            panel = panel.child(div().mt(px(8.)).opacity(0.7).child(format!("Проверено: {}", clock(at))));
+            panel = panel.child(div().mt(px(8.)).opacity(0.7).child(termian_native::ui_format!("Checked: {}", "Проверено: {}", clock(at))));
         }
         Some(div().child(panel))
     }
@@ -922,9 +935,9 @@ impl Shell {
         let busy = dialog.busy;
         let (title, fields, actions): (&str, Vec<AnyElement>, Vec<AnyElement>) = match &dialog.body {
             Body::Config(_) => (
-                "Своё облако",
+                tr("Своё облако"),
                 self.render_cloud_config(cx),
-                vec![button("cloud-save", "Сохранить настройки", true, busy)
+                vec![button("cloud-save", tr("Сохранить настройки"), true, busy)
                     .on_click(cx.listener(|shell, _, window, cx| shell.save_cloud_config(window, cx))).into_any_element()],
             ),
             Body::Run(run) => {
@@ -936,7 +949,7 @@ impl Shell {
                 let credentials = matches!(run.panel, Some(Status::Error { credentials: true, .. }));
                 if !run.configured || credentials {
                     actions.push(
-                        button("cloud-configure", "Настроить своё облако", true, busy)
+                        button("cloud-configure", tr("Настроить своё облако"), true, busy)
                             .on_click(cx.listener(|shell, _, window, cx| {
                                 shell.close_cloud(window, cx);
                                 shell.open_cloud(None, window, cx);
@@ -945,7 +958,7 @@ impl Shell {
                     );
                 }
                 if run.configured && !credentials && !run.confirm && !busy && matches!(dialog.out, Some(Out::Error(_))) {
-                    actions.push(button("cloud-recheck", "Проверить снова", true, false).on_click(cx.listener(|shell, _, _, cx| shell.check_cloud(true, cx))).into_any_element());
+                    actions.push(button("cloud-recheck", tr("Проверить снова"), true, false).on_click(cx.listener(|shell, _, _, cx| shell.check_cloud(true, cx))).into_any_element());
                 }
                 if run.confirm {
                     actions.push(button("cloud-confirm", run.operation.confirm(), true, busy).on_click(cx.listener(|shell, _, _, cx| shell.confirm_cloud(cx))).into_any_element());
@@ -961,13 +974,18 @@ impl Shell {
             };
             div().text_xs().text_color(rgb(tone)).child(text)
         });
-        let card_height = (window.viewport_size().height - px(48.)).clamp(px(120.), px(760.));
+        let height = window.viewport_size().height;
+        let padding = px(24.).min(height / 8.);
+        let card_height = (height - padding * 2.).min(px(760.));
         let card = div()
             .id("cloud-dialog")
             .w(px(520.))
             .max_w_full()
             .max_h(card_height)
+            .min_h_0()
             .overflow_y_scroll()
+            .flex()
+            .flex_col()
             .rounded(px(12.))
             .border_1()
             .border_color(rgb(BORDER))
@@ -980,6 +998,7 @@ impl Shell {
             .on_click(|_, _, cx| cx.stop_propagation())
             .child(
                 div()
+                    .flex_none()
                     .px(px(24.))
                     .pt(px(24.))
                     .pb(px(18.))
@@ -1009,12 +1028,14 @@ impl Shell {
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     ),
             )
-            .child(div().px(px(24.)).pb(px(20.)).flex().flex_col().gap(px(16.)).children(fields).children(out))
+            .child(div().flex_none().px(px(24.)).pb(px(20.)).flex().flex_col().gap(px(16.)).children(fields).children(out))
             .child(
                 div()
+                    .flex_none()
                     .px(px(24.))
                     .py(px(16.))
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .justify_between()
                     .gap(px(12.))
@@ -1033,10 +1054,10 @@ impl Shell {
                             .text_color(rgb(theme::TEXT_MUTED))
                             .when(busy, |d| d.opacity(0.45))
                             .when(!busy, |d| d.icon_feedback())
-                            .child("Закрыть")
+                            .child(tr("Закрыть"))
                             .on_click(cx.listener(|shell, _, window, cx| shell.close_cloud(window, cx))),
                     )
-                    .child(div().flex().gap(px(8.)).children(actions)),
+                    .child(div().flex().flex_wrap().gap(px(8.)).children(actions)),
             );
         Some(
             div()
@@ -1044,7 +1065,7 @@ impl Shell {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .p(px(24.))
+                .p(padding)
                 .flex()
                 .items_center()
                 .justify_center()
@@ -1083,7 +1104,7 @@ mod tests {
         assert!(form.value(Field::BasicUser).is_none(), "disabled fields take no input");
         let mut fresh = ConfigForm::from_vault(&Vault::default());
         fresh.url = "https://sync.example".into();
-        assert_eq!(fresh.missing(), Some("Введите токен доступа"));
+        assert_eq!(fresh.missing(), Some("Enter the access token"));
     }
 
     #[test]
@@ -1115,11 +1136,19 @@ mod tests {
 
     #[test]
     fn adopting_a_synced_copy_keeps_live_history_and_edits() {
+        use termian_native::updater::{Interval, Mode, Schedule};
+
         let started = Vault::default();
-        let mut live = Vault { history: vec![termian_native::vault::HistoryEntry { id: 7, ..Default::default() }], ..Vault::default() };
+        let schedule = Schedule { mode: Mode::Manual, interval: Interval::TwelveHours };
+        let mut live = Vault {
+            history: vec![termian_native::vault::HistoryEntry { id: 7, ..Default::default() }],
+            update_schedule: schedule,
+            ..Vault::default()
+        };
         let synced = Vault { hosts: termian_native::vault::demo().hosts, ..Vault::default() };
         assert!(adopt(&mut live, &started, synced.clone()));
         assert_eq!(live.history[0].id, 7);
+        assert_eq!(live.update_schedule, schedule);
         assert!(!live.hosts.is_empty());
         let mut edited = Vault { groups: termian_native::vault::demo().groups, ..Vault::default() };
         assert!(!adopt(&mut edited, &started, synced), "an edit made meanwhile is never overwritten");
