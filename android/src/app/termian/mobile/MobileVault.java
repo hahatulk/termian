@@ -202,13 +202,17 @@ final class MobileVault {
     void addSections(LinearLayout items, boolean current) {
         for(int i=0;i<SECTIONS.length;i++) {
             String name=SECTIONS[i];
-            app.drawerEntry(items,ICONS[i],name,current && section.equals(name),() -> app.showVaultSection(() -> {
-                if(!section.equals(name)) {
-                    section=name;
-                    filter="";
-                }
-            }),null);
+            app.drawerEntry(items,ICONS[i],text(name),current && section.equals(name),() -> openSection(name),null);
         }
+    }
+
+    void openSection(String name) {
+        app.showVaultSection(() -> {
+            if (!section.equals(name)) {
+                section=name;
+                filter="";
+            }
+        });
     }
 
     private void toolbar(LinearLayout page) {
@@ -709,15 +713,4 @@ final class MobileVault {
         return false;
     }
 
-    void terminalSettings(JSONObject current) {
-        LinearLayout form=app.column();
-        EditText font=app.field(form,text("Font size"),value(current,"font"),InputType.TYPE_CLASS_NUMBER);
-        String name=value(current,"theme");
-        EditText theme=field(form,text("Color theme"),name,false);
-        editor(text("Terminal"),form,null,"",() -> {
-            JSONObject result=app.call("saveTerminal","font",MainActivity.value(font),"theme",MainActivity.value(theme));
-            if (!result.has("error")) app.applyTerminalFont(result.optJSONObject("terminal").optInt("font",14));
-            return result;
-        });
-    }
 }

@@ -415,6 +415,7 @@ pub struct Vault {
     #[serde(default)]
     pub shortcuts: crate::shortcuts::ShortcutSettings,
     #[serde(default)]
+    #[serde(skip_serializing_if = "crate::cloud::CloudConfig::workspace_config")]
     pub cloud: Option<crate::cloud::CloudConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_password: Option<crate::privacy_password::PrivacyPassword>,

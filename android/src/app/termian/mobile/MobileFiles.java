@@ -12,6 +12,7 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Switch;
 import android.widget.TextView;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -30,18 +31,46 @@ final class MobileFiles {
     private final LinearLayout remote;
     private LinearLayout rows;
     private TextView activity, path;
+    private View backFolder, forwardFolder;
     private String export, exportName;
-    private boolean ready, documentBusy;
+    private boolean ready, documentBusy, showHidden;
+    private int openAfterSave;
     boolean polling;
 
     MobileFiles(MainActivity app) {
         this.app = app;
+        showHidden=app.getPreferences(Activity.MODE_PRIVATE).getBoolean("sftp:showHidden",false);
         view=app.column();
         remote=app.column();
         refreshChooser();
     }
 
     boolean canSwitchVault() { return !documentBusy && !polling; }
+
+    boolean documentOperation() { return documentBusy; }
+
+    void settings(LinearLayout card) {
+        card.addView(app.label(text("Android opens saved files with apps chosen in the system file menu."),14,TermianStyle.MUTED));
+        Switch hidden=new Switch(app);
+        hidden.setText(text("Show Hidden Files"));
+        hidden.setMinHeight(app.dp(48));
+        hidden.setChecked(showHidden);
+        card.addView(hidden,new LinearLayout.LayoutParams(-1,-2));
+        hidden.setOnCheckedChangeListener((button, enabled) -> {
+            if (!setHidden(enabled)) app.renderSettings();
+        });
+    }
+
+    private boolean setHidden(boolean enabled) {
+        if (polling) {
+            JSONObject response=app.call("filesHidden","enabled",enabled);
+            if (error(response)) return false;
+            if (response.has("entries")) listing(response);
+        }
+        showHidden=enabled;
+        app.getPreferences(Activity.MODE_PRIVATE).edit().putBoolean("sftp:showHidden",enabled).apply();
+        return true;
+    }
 
     void arrange(boolean wide) {
         view.removeAllViews();
@@ -100,10 +129,11 @@ final class MobileFiles {
 
     private void start(JSONObject host) {
         app.allowNetwork(() -> {
-            JSONObject response=app.call("filesOpen","id",host.optString("id"));
+            JSONObject response=app.call("filesOpen","id",host.optString("id"),"showHidden",showHidden);
             if(error(response))return;
             polling=true;
             ready=false;
+            openAfterSave=0;
             remote.removeAllViews();
             LinearLayout header=new LinearLayout(app);
             header.setGravity(android.view.Gravity.CENTER_VERTICAL);
@@ -121,14 +151,21 @@ final class MobileFiles {
             path.setMaxLines(2);
             remote.addView(path);
             LinearLayout actions=new LinearLayout(app);
-            actions.addView(app.style.iconAction("arrow_left",text("Back folder"),() -> run("filesBack")));
-            actions.addView(app.style.iconAction("arrow_right",text("Forward folder"),() -> run("filesForward")));
+            backFolder=app.style.iconAction("sftp_arrow",text("Back folder"),() -> run("filesBack"));
+            forwardFolder=app.style.iconAction("sftp_arrow",text("Forward folder"),() -> run("filesForward"));
+            forwardFolder.setRotation(180);
+            navEnabled(backFolder,false);
+            navEnabled(forwardFolder,false);
+            actions.addView(backFolder);
+            actions.addView(forwardFolder);
             actions.addView(app.button("Up",() -> run("filesUp")),new LinearLayout.LayoutParams(0,app.dp(48),1));
             actions.addView(app.button(text("Refresh"),() -> run("filesRefresh")),new LinearLayout.LayoutParams(0,app.dp(48),1));
             View more=app.style.iconAction("dots",text("File actions"),() -> {});
             more.setOnClickListener(anchor -> {
                 android.widget.PopupMenu menu=new android.widget.PopupMenu(app,anchor);
                 menu.getMenu().add(text("New Folder")).setOnMenuItemClickListener(v -> { folderDialog(null); return true; });
+                menu.getMenu().add(text(showHidden ? "Hide Hidden Files" : "Show Hidden Files"))
+                    .setOnMenuItemClickListener(v -> { setHidden(!showHidden); return true; });
                 menu.getMenu().add(text("Cancel transfer")).setOnMenuItemClickListener(v -> { run("filesControl","retry",false); return true; });
                 menu.show();
             });
@@ -180,31 +217,45 @@ final class MobileFiles {
             }).show();
     }
 
+    private void navEnabled(View button,boolean enabled) {
+        button.setEnabled(enabled);
+        button.setAlpha(enabled ? 1f : .5f);
+    }
+
+    private void download(String name,int open) {
+        if (!ready || documentBusy) { app.toast(text("Finish the current file operation first.")); return; }
+        if (!error(app.call("filesDownload","name",name))) openAfterSave=open;
+    }
+
     private void fileMenu(JSONObject file) {
         boolean folder=file.optBoolean("folder");
         boolean link=file.optBoolean("link");
         String name=file.optString("name");
         java.util.ArrayList<String> options=new java.util.ArrayList<>();
-        if(!link) {
-            if(folder) options.add(text("Open"));
-            options.add(text("Download"));
+        if (!link) {
+            options.add("Open");
+            if (!folder) options.add("Open with...");
+            options.add("Copy to target directory");
         }
-        options.add(text("Rename"));
-        if(!link) options.add(text("Permissions"));
-        options.add(text("Delete"));
-        new AlertDialog.Builder(app).setTitle(name).setItems(options.toArray(new String[0]),(d,w) -> {
-            switch(options.get(w)) {
-                case "Open": run("filesFolder","name",name);break;
-                case "Download": run("filesDownload","name",name);break;
-                case "Rename": folderDialog(file);break;
-                case "Permissions":
+        options.add("Rename");
+        options.add("Delete");
+        if (!link) options.add("Edit Permissions");
+        String[] labels=options.stream().map(MainActivity::text).toArray(String[]::new);
+        new AlertDialog.Builder(app).setTitle(name).setItems(labels,(d,w) -> {
+            switch (options.get(w)) {
+                case "Open": if (folder) run("filesFolder","name",name); else download(name,1); break;
+                case "Open with...": download(name,2); break;
+                case "Copy to target directory": download(name,0); break;
+                case "Rename": folderDialog(file); break;
+                case "Edit Permissions":
                     LinearLayout form=app.column();
                     EditText mode=app.field(form,text("Octal mode"),MainActivity.fieldValue(file,"mode"),InputType.TYPE_CLASS_NUMBER);
-                    new AlertDialog.Builder(app).setTitle(text("Permissions")).setView(form)
-                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Apply"),(a,b) -> run("filesChmod","name",name,"mode",MainActivity.value(mode))).show();
+                    new AlertDialog.Builder(app).setTitle(text("Edit Permissions")).setView(form)
+                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Apply"),(a,b) ->
+                            run("filesChmod","name",name,"mode",MainActivity.value(mode))).show();
                     break;
                 case "Delete":
-                    new AlertDialog.Builder(app).setTitle("Delete " + name + "?")
+                    new AlertDialog.Builder(app).setTitle(text("Delete") + ": " + name)
                         .setMessage(folder&&!link?text("This deletes the folder and its contents."): text("This deletes the remote entry."))
                         .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(a,b) -> run("filesDelete","name",name)).show();
                     break;
@@ -212,24 +263,29 @@ final class MobileFiles {
         }).show();
     }
 
+    private void listing(JSONObject listing) {
+        path.setText(listing.optString("path"));
+        navEnabled(backFolder,listing.optBoolean("canBack"));
+        navEnabled(forwardFolder,listing.optBoolean("canForward"));
+        rows.removeAllViews();
+        JSONArray entries=listing.optJSONArray("entries");
+        for (int j=0;j<entries.length();j++) {
+            JSONObject f=entries.optJSONObject(j);
+            boolean link=f.optBoolean("link");
+            boolean dir=f.optBoolean("folder") && !link;
+            String name=f.optString("name");
+            add(rows,app.style.fileCard(dir ? "folder" : link ? "link" : "file", name, dir ? text("Folder") : f.optString("size"),
+                () -> { if(dir)run("filesFolder","name",name);else fileMenu(f); },() -> fileMenu(f),f.optBoolean("hidden")));
+        }
+        if (entries.length()==0) rows.addView(app.label(text("Folder is empty"),15,TermianStyle.MUTED));
+    }
+
     void events(JSONArray events) {
         for(int i=0;i<events.length();i++) {
             JSONObject e=events.optJSONObject(i);
             switch(e.optString("type")) {
                 case "connected": ready=true;activity.setText(text("Connected"));break;
-                case "listing":
-                    path.setText(e.optString("path"));
-                    rows.removeAllViews();
-                    JSONArray entries=e.optJSONArray("entries");
-                    for(int j=0;j<entries.length();j++) {
-                        JSONObject f=entries.optJSONObject(j);
-                        boolean dir=f.optBoolean("folder") && !f.optBoolean("link");
-                        String name=f.optString("name");
-                        add(rows,app.style.card(dir?"group":"file",TermianStyle.TILE,name,dir?text("Folder"):f.optString("size"),
-                            () -> { if(dir)run("filesFolder","name",name);else fileMenu(f); },() -> fileMenu(f)));
-                    }
-                    if(entries.length()==0) rows.addView(app.label(text("Folder is empty"),15,TermianStyle.MUTED));
-                    break;
+                case "listing": listing(e); break;
                 case "progress": activity.setText(e.optString("value"));break;
                 case "retry": new AlertDialog.Builder(app).setTitle(text("Transfer stopped")).setMessage(e.optString("value"))
                     .setNegativeButton(text("Cancel"),(d,w) -> run("filesControl","retry",false))
@@ -251,13 +307,30 @@ final class MobileFiles {
         app.startActivityForResult(request,tree ? PICK_TREE : PICK);
     }
 
+    private static String contentType(String name) {
+        int dot=name.lastIndexOf('.');
+        String type=dot<0 ? null : android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+            name.substring(dot+1).toLowerCase(java.util.Locale.ROOT));
+        return type==null ? "application/octet-stream" : type;
+    }
+
+    private void openSaved(Uri document,String name,boolean chooser) {
+        Intent view=new Intent(Intent.ACTION_VIEW).setDataAndType(document,contentType(name))
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        view.setClipData(android.content.ClipData.newRawUri(name,document));
+        try { app.startActivity(chooser ? Intent.createChooser(view,text("Open with...")) : view); }
+        catch (android.content.ActivityNotFoundException | SecurityException error) {
+            app.toast(text("No app could open the saved file."));
+        }
+    }
+
     private void save(String name,String local,boolean tree) {
         export=local;
         exportName=name;
         documentBusy=true;
         Intent request=tree ? new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE) :
             new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("application/octet-stream").putExtra(Intent.EXTRA_TITLE,name);
+                .setType(contentType(name)).putExtra(Intent.EXTRA_TITLE,name);
         app.startActivityForResult(request,tree ? SAVE_TREE : CREATE);
     }
 
@@ -266,13 +339,18 @@ final class MobileFiles {
         boolean tree=request==PICK_TREE||request==SAVE_TREE;
         if(!download&&request!=PICK&&request!=PICK_TREE)return;
         if(result!=Activity.RESULT_OK || intent==null || intent.getData()==null) {
-            if(download)app.call("filesRelease");
+            if (download) {
+                app.call("filesRelease");
+                openAfterSave=0;
+            }
             documentBusy=false;
             return;
         }
         Uri document=intent.getData();
         if(download) {
             String source=export, name=exportName;
+            int open=openAfterSave;
+            openAfterSave=0;
             new Thread(() -> {
                 String problem=null;
                 try {
@@ -285,6 +363,8 @@ final class MobileFiles {
                     app.call("filesRelease");
                     documentBusy=false;
                     activity.setText(error==null?text("Download saved"):error);
+                    if (error==null && !tree && open!=0 && !app.isFinishing() && !app.privacyLocked())
+                        openSaved(document,name,open==2);
                 });
             }).start();
         } else {

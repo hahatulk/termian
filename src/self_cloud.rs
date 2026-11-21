@@ -273,13 +273,16 @@ pub fn checked_preview(vault: &Vault) -> Result<(Preview, Option<UploadPreview>)
     let Some(config) = vault.cloud.clone().filter(|c| c.validate().is_ok()) else { return Ok((Preview::Unconfigured, None)) };
     let client = config.validate()?;
     let (remote, can_create) = client.fetch_for_sync().map_err(|e| config.redact(&e))?;
-    let ticket = |condition| UploadPreview { server: sync::server_key(&config.url), condition };
+    if remote.is_none() && !can_create && !config.workspace.is_nil() {
+        return Err(crate::language::text("Update the sync server to use more than one Vault.").into());
+    }
+    let ticket = |condition| UploadPreview { server: config.sync_key(), condition };
     let Some(remote) = remote else {
         return Ok((Preview::Empty, can_create.then(|| ticket(Condition::Create))));
     };
     let ticket = remote.revision.map(|revision| ticket(Condition::Revision(revision)));
     let remote = sync::validate_snapshot(&remote.snapshot)?;
-    let server = sync::server_key(&config.url);
+    let server = config.sync_key();
     let saved = vault.sync_state.clone().filter(|s| s.server == server);
     let mut ids = saved.as_ref().map(|s| s.ids.clone()).unwrap_or_default();
     let exported = sync::validate_snapshot(&portable::export(vault, &now()))?;
@@ -330,15 +333,24 @@ pub fn candidate_config(vault: &Vault, changes: ConfigChanges) -> Result<cloud::
         },
         basic_user,
         auto_sync: saved.auto_sync,
+        workspace: saved.workspace,
     };
     config.validate()?;
     Ok(config)
 }
 
 pub fn verify_cloud_password(config: &cloud::CloudConfig) -> Result<(), String> {
-    if let Some(remote) = config.validate()?.fetch().map_err(|error| config.redact(&error))? {
-        sync::validate_snapshot(&remote.snapshot)?;
+    let verify = |cloud: cloud::Cloud| {
+        if let Some(remote) = cloud.fetch().map_err(|error| config.redact(&error))? {
+            sync::validate_snapshot(&remote.snapshot)?;
+        }
+        Ok::<(), String>(())
+    };
+    verify(config.scoped(uuid::Uuid::nil()).validate()?)?;
+    if !config.workspace.is_nil() {
+        verify(config.validate()?)?;
     }
+    config.catalog()?.fetch().map_err(|error| config.redact(&error))?;
     Ok(())
 }
 
@@ -380,7 +392,7 @@ pub fn sync(vault: &mut Vault, backups: &CloudBackups) -> Result<String, String>
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
     }
-    let server = sync::server_key(&config.url);
+    let server = config.sync_key();
     let mut attempt = 0;
     loop {
         let saved = vault.sync_state.clone();
@@ -416,7 +428,7 @@ pub fn upload_checked(vault: &mut Vault, preview: UploadPreview) -> Result<Strin
     if vault.secrets_missing {
         return Err(SECRETS_MISSING.into());
     }
-    let mut ids = vault.sync_state.as_ref().filter(|s| s.server == sync::server_key(&config.url)).map(|s| s.ids.clone()).unwrap_or_default();
+    let mut ids = vault.sync_state.as_ref().filter(|s| s.server == config.sync_key()).map(|s| s.ids.clone()).unwrap_or_default();
     let exported = sync::validate_snapshot(&portable::export(vault, &now()))?;
     let snapshot = sync::validate_snapshot(&sync::to_sync_form(&exported, &mut ids))?;
     let (remote, can_create) = client.fetch_for_sync().map_err(|e| config.redact(&e))?;
@@ -425,11 +437,11 @@ pub fn upload_checked(vault: &mut Vault, preview: UploadPreview) -> Result<Strin
         None if can_create => Condition::Create,
         None => return Err("Сервер не подтвердил безопасное создание снимка.".into()),
     };
-    if preview.server != sync::server_key(&config.url) || preview.condition != condition {
+    if preview.server != config.sync_key() || preview.condition != condition {
         return Err(cloud::REVISION_CHANGED.into());
     }
     client.upload(&snapshot, preview.condition).map_err(|e| config.redact(&e))?;
-    vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&snapshot)), remote: sync::digests_of(Some(&snapshot)), ids });
+    vault.sync_state = Some(sync::State { server: config.sync_key(), local: sync::digests_of(Some(&snapshot)), remote: sync::digests_of(Some(&snapshot)), ids });
     Ok("Данные загружены".into())
 }
 
@@ -454,12 +466,12 @@ pub(crate) fn download(vault: &mut Vault, backups: &CloudBackups) -> Result<Stri
 pub fn download_checked(vault: &mut Vault, backups: &CloudBackups, preview: UploadPreview) -> Result<String, String> {
     let (config, client) = configured(vault)?;
     let remote = client.fetch().map_err(|e| config.redact(&e))?.ok_or("В облаке ещё нет данных")?;
-    if preview.server != sync::server_key(&config.url) || remote.revision.map(Condition::Revision) != Some(preview.condition) {
+    if preview.server != config.sync_key() || remote.revision.map(Condition::Revision) != Some(preview.condition) {
         return Err(cloud::REVISION_CHANGED.into());
     }
     let snapshot = sync::validate_snapshot(&remote.snapshot)?;
     backups.save(vault)?;
-    let server = sync::server_key(&config.url);
+    let server = config.sync_key();
     let mut matched = vault.sync_state.as_ref().filter(|state| state.server == server)
         .map(|state| state.ids.clone()).unwrap_or_default();
     let exported = portable::export(vault, &now());
@@ -469,7 +481,7 @@ pub fn download_checked(vault: &mut Vault, backups: &CloudBackups, preview: Uplo
     let exported = sync::validate_snapshot(&portable::export(vault, &now()))?;
     sync::match_ids(&exported, Some(&snapshot), &mut ids);
     let local = sync::to_sync_form(&exported, &mut ids);
-    vault.sync_state = Some(sync::State { server: sync::server_key(&config.url), local: sync::digests_of(Some(&local)), remote: sync::digests_of(Some(&snapshot)), ids });
+    vault.sync_state = Some(sync::State { server: config.sync_key(), local: sync::digests_of(Some(&local)), remote: sync::digests_of(Some(&snapshot)), ids });
     Ok("Данные загружены и применены".into())
 }
 

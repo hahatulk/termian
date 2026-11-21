@@ -7,7 +7,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
-    Router,
+    Extension, Router,
 };
 use sha2::{Digest, Sha256};
 use std::{
@@ -214,7 +214,10 @@ async fn main() {
         loop {
             let state = retention.clone();
             let _ = tokio::task::spawn_blocking(move || {
-                with_storage(&state, |cfg| Ok(prune_logs(cfg, SystemTime::now())))
+                with_storage(&state, |cfg| {
+                    let now = SystemTime::now();
+                    Ok(storage_scopes(cfg)?.iter().map(|scope| prune_logs(&scope.scoped(cfg), now)).sum::<usize>())
+                })
             }).await;
             tokio::time::sleep(LOG_RETENTION_CHECK).await;
         }
@@ -227,11 +230,89 @@ async fn main() {
         .expect("server");
 }
 
+const WORKSPACES: &str = "workspaces";
+
+#[derive(Clone, PartialEq, Eq)]
+enum Scope {
+    Personal,
+    Catalog,
+    Vault(String),
+}
+
+impl Scope {
+    fn scoped(&self, config: &Config) -> Config {
+        let mut cfg = config.clone();
+        cfg.dir = match self {
+            Self::Personal => cfg.dir,
+            Self::Catalog => cfg.dir.join(WORKSPACES).join("catalog"),
+            Self::Vault(id) => cfg.dir.join(WORKSPACES).join(id),
+        };
+        cfg
+    }
+}
+
+fn vault_id(id: &str) -> bool {
+    id.len() == 36 && id != "00000000-0000-0000-0000-000000000000"
+        && id.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_digit() || (b'a'..=b'f').contains(&b),
+        })
+}
+
+async fn select_scope(mut request: Request, next: Next) -> Response {
+    let path = request.uri().path();
+    let scope = if path == "/v1/vaults" {
+        Scope::Catalog
+    } else if let Some(rest) = path.strip_prefix("/v1/vaults/") {
+        let Some((id, _)) = rest.split_once('/') else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        if !vault_id(id) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        Scope::Vault(id.to_owned())
+    } else {
+        Scope::Personal
+    };
+    request.extensions_mut().insert(scope);
+    next.run(request).await
+}
+
+fn storage_scopes(cfg: &Config) -> io::Result<Vec<Scope>> {
+    let entries = match fs::read_dir(cfg.dir.join(WORKSPACES)) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(vec![Scope::Personal]),
+        Err(error) => return Err(error),
+    };
+    let mut scopes = vec![Scope::Personal];
+    let mut ids = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if entry.file_type()?.is_dir() {
+            if name == "catalog" {
+                scopes.push(Scope::Catalog);
+            } else if vault_id(name) {
+                ids.push(name.to_owned());
+            }
+        }
+    }
+    ids.sort_unstable();
+    scopes.extend(ids.into_iter().map(Scope::Vault));
+    Ok(scopes)
+}
+
 fn make_app(state: Shared) -> Router {
     let protected = Router::new()
         .route("/v1/snapshot", get(get_snapshot).put(put_snapshot))
         .route("/v1/logs", axum::routing::delete(delete_logs))
         .route("/v1/logs/:name", get(get_log).put(put_log))
+        .route("/v1/vaults", get(get_snapshot).put(put_snapshot))
+        .route("/v1/vaults/:vault/snapshot", get(get_snapshot).put(put_snapshot))
+        .route("/v1/vaults/:vault/logs", axum::routing::delete(delete_logs))
+        .route("/v1/vaults/:vault/logs/:name", get(get_log).put(put_log))
+        .route_layer(middleware::from_fn(select_scope))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         .route("/health", get(health))
@@ -351,9 +432,11 @@ fn storage_generation<'a>(state: &AppState, cfg: &'a Config) -> &'a str {
     }
 }
 
-async fn get_snapshot(State(state): State<Shared>) -> Response {
+async fn get_snapshot(State(state): State<Shared>, Extension(scope): Extension<Scope>) -> Response {
     let storage = state.clone();
-    match tokio::task::spawn_blocking(move || with_storage(&storage, |cfg| Ok((current(cfg)?, storage_generation(&storage, cfg).to_owned())))).await {
+    match tokio::task::spawn_blocking(move || with_storage(&storage, |cfg| {
+        Ok((current(&scope.scoped(cfg))?, storage_generation(&storage, cfg).to_owned()))
+    })).await {
         Ok(Ok((Some(data), generation))) => {
             if let Ok(mut last) = state.last_download.lock() {
                 *last = Some(SystemTime::now());
@@ -383,6 +466,7 @@ async fn get_snapshot(State(state): State<Shared>) -> Response {
 
 async fn put_snapshot(
     State(state): State<Shared>,
+    Extension(scope): Extension<Scope>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
@@ -410,7 +494,7 @@ async fn put_snapshot(
         None => false,
     };
     let result = tokio::task::spawn_blocking(move || {
-        store_snapshot(&state, &body, condition.as_deref(), create_only)
+        store_snapshot(&state, &scope, &body, condition.as_deref(), create_only)
     })
     .await;
     match result {
@@ -440,6 +524,7 @@ impl From<io::Error> for StoreError {
 
 fn store_snapshot(
     state: &AppState,
+    scope: &Scope,
     body: &[u8],
     condition: Option<&str>,
     create_only: bool,
@@ -448,16 +533,23 @@ fn store_snapshot(
         .write_lock
         .lock()
         .map_err(|_| io::Error::other("write lock poisoned"))?;
-    let cfg = active_config(&state.cfg)?;
+    let root = active_config(&state.cfg)?;
+    let cfg = scope.scoped(&root);
     let old = current(&cfg)?;
-    if (storage_generation(state, &cfg) != INITIAL_GENERATION && !create_only && condition.is_none_or(|tag| tag == "*"))
+    if ((!matches!(scope, Scope::Personal) || storage_generation(state, &root) != INITIAL_GENERATION)
+        && !create_only && condition.is_none_or(|tag| tag == "*"))
         || (create_only && old.is_some()) || !if_match_satisfied(condition, old.as_deref()) {
         return Err(StoreError::Precondition);
     }
     if let Some(previous) = old.as_deref() {
         backup(&cfg, previous, &digest(previous))?;
     }
+    fs::create_dir_all(&cfg.dir)?;
     durable_replace(&cfg.dir, &snapshot_path(&cfg), body)?;
+    if !matches!(scope, Scope::Personal) {
+        sync_directory(&root.dir.join(WORKSPACES))?;
+        sync_directory(&root.dir)?;
+    }
     Ok(digest(body))
 }
 
@@ -550,11 +642,15 @@ fn logs_dir(cfg: &Config) -> PathBuf {
     cfg.dir.join("logs")
 }
 
-async fn get_log(State(state): State<Shared>, UrlPath(name): UrlPath<String>) -> Response {
-    if !valid_log_name(&name) {
+async fn get_log(
+    State(state): State<Shared>,
+    Extension(scope): Extension<Scope>,
+    UrlPath(mut params): UrlPath<HashMap<String, String>>,
+) -> Response {
+    let Some(name) = params.remove("name").filter(|name| valid_log_name(name)) else {
         return (StatusCode::BAD_REQUEST, "invalid log name\n").into_response();
-    }
-    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| fs::read(logs_dir(cfg).join(&name)))).await {
+    };
+    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| fs::read(logs_dir(&scope.scoped(cfg)).join(&name)))).await {
         Ok(Ok(data)) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "application/octet-stream".parse().unwrap());
@@ -569,27 +665,29 @@ async fn get_log(State(state): State<Shared>, UrlPath(name): UrlPath<String>) ->
 
 async fn put_log(
     State(state): State<Shared>,
-    UrlPath(name): UrlPath<String>,
+    Extension(scope): Extension<Scope>,
+    UrlPath(mut params): UrlPath<HashMap<String, String>>,
     headers: HeaderMap,
     body: Result<Bytes, axum::extract::rejection::BytesRejection>,
 ) -> Response {
-    if !valid_log_name(&name) {
+    let Some(name) = params.remove("name").filter(|name| valid_log_name(name)) else {
         return (StatusCode::BAD_REQUEST, "invalid log name\n").into_response();
-    }
+    };
     let body = match body {
         Ok(body) if body.len() <= state.cfg.limit => body,
         _ => return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large\n").into_response(),
     };
     let supplied = headers.get(LOG_GENERATION_HEADER).cloned();
     let revision = headers.get("x-termian-snapshot-revision").cloned();
-    let result = tokio::task::spawn_blocking(move || with_storage(&state, |cfg| {
-        let Some(snapshot) = current(cfg)? else { return Ok(false) };
+    let result = tokio::task::spawn_blocking(move || with_storage(&state, |root| {
+        let cfg = scope.scoped(root);
+        let Some(snapshot) = current(&cfg)? else { return Ok(false) };
         if !revision.is_some_and(|r| r.as_bytes() == etag(&digest(&snapshot)).as_bytes()) { return Ok(false); }
-        let active = storage_generation(&state, cfg);
+        let active = storage_generation(&state, root);
         if !supplied.as_ref().map_or(active == INITIAL_GENERATION, |value| value.as_bytes() == active.as_bytes()) {
             return Ok(false);
         }
-        let dir = logs_dir(cfg);
+        let dir = logs_dir(&cfg);
         fs::create_dir_all(&dir)?;
         durable_replace(&dir, &dir.join(&name), &body)?;
         Ok(true)
@@ -609,9 +707,9 @@ struct ClearLogs {
     since: Option<u64>,
 }
 
-async fn delete_logs(State(state): State<Shared>, Query(query): Query<ClearLogs>) -> Response {
+async fn delete_logs(State(state): State<Shared>, Extension(scope): Extension<Scope>, Query(query): Query<ClearLogs>) -> Response {
     let since = SystemTime::UNIX_EPOCH + Duration::from_millis(query.since.unwrap_or(0));
-    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| clear_logs(cfg, since))).await {
+    match tokio::task::spawn_blocking(move || with_storage(&state, |cfg| clear_logs(&scope.scoped(cfg), since))).await {
         Ok(Ok((removed, failed))) => {
             let mut headers = HeaderMap::new();
             headers.insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
@@ -1196,6 +1294,82 @@ mod tests {
             .header(header::AUTHORIZATION, format!("Bearer {TOKEN}"))
             .body(body)
             .unwrap()
+    }
+
+    fn at(method: &str, uri: &str, body: Body) -> axum::http::Request<Body> {
+        let mut req = request(method, body);
+        *req.uri_mut() = uri.parse().unwrap();
+        req
+    }
+
+    #[tokio::test]
+    async fn workspaces_isolate_snapshots_revisions_and_log_cleanup() {
+        let dir = TempDir::new().unwrap();
+        let app = app(dir.path(), 1024);
+        let work = "/v1/vaults/10000000-0000-4000-8000-000000000001";
+        let other = "/v1/vaults/10000000-0000-4000-8000-000000000002";
+        for path in ["/v1/vaults", &format!("{work}/snapshot"), &format!("{other}/snapshot")] {
+            let read = app.clone().oneshot(at("GET", path, Body::empty())).await.unwrap();
+            assert_eq!(read.status(), StatusCode::NOT_FOUND);
+            assert_eq!(read.headers()[CONDITIONAL_CREATE_HEADER], "v1");
+            let mut upload = at("PUT", path, Body::from(path.to_owned()));
+            upload.headers_mut().insert(header::IF_NONE_MATCH, "*".parse().unwrap());
+            let response = app.clone().oneshot(upload).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        assert_eq!(app.clone().oneshot(request("GET", Body::empty())).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let invalid = at("PUT", "/v1/vaults/%2e%2e/snapshot", Body::from("other"));
+        assert_eq!(app.clone().oneshot(invalid).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let version = |prefix: &str| etag(&digest(format!("{prefix}/snapshot").as_bytes()));
+        let mut wrong = at("PUT", &format!("{work}/snapshot"), Body::from("overwritten"));
+        wrong.headers_mut().insert(header::IF_MATCH, version(other).parse().unwrap());
+        assert_eq!(app.clone().oneshot(wrong).await.unwrap().status(), StatusCode::PRECONDITION_FAILED);
+
+        for prefix in [work, other] {
+            let path = format!("{prefix}/logs/test.log");
+            let mut log = at("PUT", &path, Body::from(prefix));
+            log.headers_mut().insert("x-termian-snapshot-revision", version(prefix).parse().unwrap());
+            assert_eq!(app.clone().oneshot(log).await.unwrap().status(), StatusCode::OK);
+        }
+        let response = app.clone().oneshot(at("DELETE", &format!("{work}/logs?since=0"), Body::empty())).await.unwrap();
+        assert_eq!(json_body(response).await["removed"], 1);
+        let work_log = at("GET", &format!("{work}/logs/test.log"), Body::empty());
+        assert_eq!(app.clone().oneshot(work_log).await.unwrap().status(), StatusCode::NOT_FOUND);
+        let other_log = at("GET", &format!("{other}/logs/test.log"), Body::empty());
+        let response = app.oneshot(other_log).await.unwrap();
+        assert_eq!(response.into_body().collect().await.unwrap().to_bytes(), other.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn password_rotation_includes_the_catalog_and_workspace_logs() {
+        let dir = TempDir::new().unwrap();
+        let shared = state(dir.path(), 1024 * 1024);
+        let api = make_app(shared.clone());
+        let scope = "/v1/vaults/10000000-0000-4000-8000-000000000001";
+        let workspace_path = format!("{scope}/snapshot");
+        let catalog = serde_json::json!({"version":1, "entries":[{"id":scope.split('/').last().unwrap(), "name":"Work"}]});
+        let workspace = serde_json::json!({"version":1, "hosts":[{"label":"workspace fixture"}]});
+        let log_data = serde_json::json!({"name":"test.log", "version":1});
+        let original = seal(&workspace, "");
+        for (path, body) in [("/v1/vaults", seal(&catalog, "")), (workspace_path.as_str(), original.clone())] {
+            let mut req = at("PUT", path, Body::from(body));
+            req.headers_mut().insert(header::IF_NONE_MATCH, "*".parse().unwrap());
+            assert_eq!(api.clone().oneshot(req).await.unwrap().status(), StatusCode::OK);
+        }
+        let log_path = format!("{scope}/logs/test.log");
+        let mut log = at("PUT", &log_path, Body::from(seal(&log_data, "")));
+        log.headers_mut().insert("x-termian-snapshot-revision", etag(&digest(&original)).parse().unwrap());
+        assert_eq!(api.clone().oneshot(log).await.unwrap().status(), StatusCode::OK);
+
+        let rotated = panel::make_panel(shared).oneshot(rotation_request(&digest(&original), "", Some(TOKEN))).await.unwrap();
+        assert_eq!(rotated.status(), StatusCode::OK);
+        for (path, expected) in [("/v1/vaults", catalog), (workspace_path.as_str(), workspace), (&log_path, log_data)] {
+            let result = api.clone().oneshot(at("GET", path, Body::empty())).await.unwrap();
+            assert_eq!(result.status(), StatusCode::OK);
+            let bytes = result.into_body().collect().await.unwrap().to_bytes();
+            assert_eq!(panel::open_envelope(&bytes, "7").unwrap(), expected);
+            assert!(panel::open_envelope(&bytes, "").is_err());
+        }
     }
 
     #[tokio::test]

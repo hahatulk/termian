@@ -24,32 +24,8 @@ use crate::Shell;
 
 gpui::actions!(termian, [OpenSettings, OpenVaults, OpenSftp, OpenFileAccess, Quit]);
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Tab {
-    Account,
-    Terminal,
-    Sftp,
-    Logs,
-    Shortcuts,
-    Version,
-    Language,
-}
-
-impl Tab {
-    pub const ALL: [Tab; 7] = [Tab::Account, Tab::Terminal, Tab::Sftp, Tab::Logs, Tab::Shortcuts, Tab::Version, Tab::Language];
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Tab::Account => "Account",
-            Tab::Terminal => "Terminal",
-            Tab::Sftp => "SFTP",
-            Tab::Logs => "Logs",
-            Tab::Shortcuts => "Shortcuts",
-            Tab::Version => "Version",
-            Tab::Language => "Language",
-        }
-    }
-}
+pub use termian_native::settings_menu::Tab;
+use termian_native::settings_menu::AppItem;
 
 const FOREGROUND: u32 = 0x1e2133;
 const BORDER: u32 = 0x151826;
@@ -267,15 +243,20 @@ impl Shell {
 
     pub fn render_app_menu(&self, cx: &mut Context<Self>) -> Option<gpui::AnyElement> {
         let at = self.app_menu.as_ref()?.at;
-        let mut items: Vec<(&str, Box<dyn gpui::Action>)> = vec![
-            ("Settings…", Box::new(OpenSettings)),
-            (tr("Vaults"), Box::new(OpenVaults)),
-            ("SFTP", Box::new(OpenSftp)),
-        ];
+        let mut menu = AppItem::COMMON.to_vec();
         if cfg!(target_os = "macos") {
-            items.push((tr("Доступ к файлам…"), Box::new(OpenFileAccess)));
+            menu.insert(menu.len() - 1, AppItem::FileAccess);
         }
-        items.push((tr("Quit Termian"), Box::new(Quit)));
+        let items = menu.into_iter().map(|item| {
+            let action: Box<dyn gpui::Action> = match item {
+                AppItem::Settings => Box::new(OpenSettings),
+                AppItem::Vaults => Box::new(OpenVaults),
+                AppItem::Sftp => Box::new(OpenSftp),
+                AppItem::FileAccess => Box::new(OpenFileAccess),
+                AppItem::Quit => Box::new(Quit),
+            };
+            (tr(item.title()), action)
+        });
         let panel = super::host_editor::menu_panel("app-menu")
             .tab_group()
             .track_focus(&self.app_menu_focus)
@@ -503,10 +484,15 @@ impl SettingsWindow {
                 .when(configured, |d| {
                     d.on_click(cx.listener(move |settings, _, _, cx| {
                         settings.shell.update(cx, |shell, cx| {
-                            if let Some(config) = &mut shell.vault.cloud {
-                                config.auto_sync = !auto_sync;
+                            if shell.log_sync_busy() {
+                                return;
                             }
-                            shell.save_vault();
+                            if let Some(mut config) = shell.vault.cloud.clone() {
+                                config.auto_sync = !auto_sync;
+                                if let Err(message) = shell.vaults.set_cloud(&mut shell.vault, config) {
+                                    shell.cloud.header.set(Status::Error { message, credentials: false });
+                                }
+                            }
                             cx.notify();
                         });
                     }))

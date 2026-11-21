@@ -35,6 +35,8 @@ pub struct CloudConfig {
     /// Hourly sync; on unless turned off.
     #[serde(default = "enabled")]
     pub auto_sync: bool,
+    #[serde(skip)]
+    pub workspace: uuid::Uuid,
 }
 
 fn enabled() -> bool {
@@ -68,7 +70,35 @@ impl CloudConfig {
             }
             Some(STANDARD.encode(format!("{}:{}", self.basic_user, self.basic_password)))
         };
-        Ok(Cloud { endpoint: snapshot_endpoint(&url), token: self.token.clone(), passphrase: self.passphrase.clone(), basic })
+        let mut endpoint = snapshot_endpoint(&url);
+        if !self.workspace.is_nil() {
+            let api = endpoint.path().trim_end_matches("/snapshot");
+            endpoint.set_path(&format!("{api}/vaults/{}/snapshot", self.workspace));
+        }
+        Ok(Cloud { endpoint, token: self.token.clone(), passphrase: self.passphrase.clone(), basic })
+    }
+
+    pub(crate) fn scoped(&self, workspace: uuid::Uuid) -> Self {
+        Self { workspace, ..self.clone() }
+    }
+
+    pub(crate) fn catalog(&self) -> Result<Cloud, String> {
+        let mut cloud = self.scoped(uuid::Uuid::nil()).validate()?;
+        let api = cloud.endpoint.path().trim_end_matches("/snapshot");
+        cloud.endpoint.set_path(&format!("{api}/vaults"));
+        Ok(cloud)
+    }
+
+    pub(crate) fn sync_key(&self) -> String {
+        if self.workspace.is_nil() {
+            crate::sync::server_key(&self.url)
+        } else {
+            crate::sync::server_key(&format!("{}/vaults/{}", self.url, self.workspace))
+        }
+    }
+
+    pub(crate) fn workspace_config(config: &Option<Self>) -> bool {
+        config.as_ref().is_some_and(|config| !config.workspace.is_nil())
     }
 
     /// Removes the secrets from a message that may echo server text.
@@ -460,6 +490,7 @@ pub(crate) mod tests {
         let state = stored.clone();
         let url_key = url.clone();
         std::thread::spawn(move || {
+            let mut scoped = std::collections::HashMap::new();
             for stream in listener.incoming().flatten() {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut line = String::new();
@@ -487,7 +518,12 @@ pub(crate) mod tests {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
-                let mut snapshot = state.lock().unwrap();
+                let mut personal = state.lock().unwrap();
+                let snapshot = if path == "/v1/snapshot" {
+                    &mut *personal
+                } else {
+                    scoped.entry(path.clone()).or_insert(None)
+                };
                 let etag = |rev: u64| format!("\"r{rev}\"");
                 let (status, reply, tag) = if auth != "Bearer test-token" {
                     ("401 Unauthorized", Vec::new(), None)

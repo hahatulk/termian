@@ -144,18 +144,33 @@ final class TermianStyle {
         return card(icon,tileColor,title,detail,select,menu,false);
     }
 
+    View fileCard(String icon, String title, String detail, Runnable select, Runnable menu, boolean hidden) {
+        return card(icon,TILE,title,detail,select,menu,false,hidden);
+    }
+
     View card(String icon, int tileColor, String title, String detail, Runnable select, Runnable menu, boolean marked) {
+        return card(icon,tileColor,title,detail,select,menu,marked,false);
+    }
+
+    private View card(String icon, int tileColor, String title, String detail, Runnable select, Runnable menu, boolean marked, boolean hidden) {
         LinearLayout row = new LinearLayout(context);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(context.dp(12), context.dp(8), context.dp(4), context.dp(8));
         row.setMinimumHeight(context.dp(60));
         android.widget.FrameLayout tile = new android.widget.FrameLayout(context);
         tile.setBackground(shape(tileColor, 8));
-        tile.addView(icon(icon, 0xffffffff), new android.widget.FrameLayout.LayoutParams(context.dp(20), context.dp(20), Gravity.CENTER));
+        tile.addView(icon(icon, hidden ? 0xffbac0cf : 0xffffffff),
+            new android.widget.FrameLayout.LayoutParams(context.dp(20), context.dp(20), Gravity.CENTER));
+        if (hidden && icon.equals("folder")) {
+            ImageView eye=icon("sftp_eye_off",TEXT);
+            eye.setBackground(shape(BAR,8));
+            eye.setPadding(context.dp(2),context.dp(2),context.dp(2),context.dp(2));
+            tile.addView(eye,new android.widget.FrameLayout.LayoutParams(context.dp(16),context.dp(16),Gravity.RIGHT|Gravity.BOTTOM));
+        }
         row.addView(tile, new LinearLayout.LayoutParams(context.dp(40), context.dp(40)));
         LinearLayout titles = context.column();
         titles.setPadding(context.dp(12), 0, context.dp(8), 0);
-        TextView name = text(title, 15, TEXT, 500);
+        TextView name = text(title, 15, hidden ? 0xffbac0cf : TEXT, 500);
         name.setMaxLines(1);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         titles.addView(name);

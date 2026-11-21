@@ -53,9 +53,17 @@ Behind a reverse proxy every request comes from the proxy's address. Set `SYNC_T
 
 The sync API cannot detect a wrong **encryption password**: it only stores ciphertext. The Termian client limits repeated failed decryptions locally; the web panel limits them separately.
 
+## Vaults
+
+One server stores all Vaults for a sync account. Enter its address, bearer token and encryption password once in Termian. A normal sync exchanges the encrypted Vault list and merges each Vault separately. The token grants access to every Vault on this server.
+
+"Personal" keeps `/v1/snapshot` and `/v1/logs`. An upgraded server keeps reading those files from the same data volume. Other Vaults have `workspaces/<uuid>/snapshot.bin`, `revisions/` and `logs/` in the same active storage. `workspaces/catalog/snapshot.bin` contains the encrypted Vault IDs and names. The server API does not decrypt the list.
+
+The panel displays and exports "Personal", or the first available Vault when "Personal" has no snapshot. Password rotation covers the catalog, all snapshots and session logs in one storage generation.
+
 ## API
 
-Snapshot endpoints require `Authorization: Bearer <token>`.
+Snapshot, Vault list and log endpoints require `Authorization: Bearer <token>`.
 
 When a reverse proxy in front of the server requires HTTP Basic auth, the proxy owns the `Authorization` header. Enable Basic auth in the client's sync settings: it then sends `Authorization: Basic …` for the proxy and the token in `X-Termian-Token: <token>`. The proxy must forward that header. Example for nginx:
 
@@ -71,12 +79,16 @@ location / {
 | --- | --- |
 | `GET /health` | Public health check |
 | `GET /v1/snapshot` | Download snapshot with `ETag`; if absent, returns 404 with `X-Termian-Conditional-Create: v1` |
-| `PUT /v1/snapshot` | Replace snapshot; returns new `ETag` |
+| `PUT /v1/snapshot` | Replace the Personal snapshot; returns new `ETag` |
+| `GET`, `PUT /v1/vaults` | Encrypted Vault list with conditional writes |
+| `GET`, `PUT /v1/vaults/<uuid>/snapshot` | Snapshot of one Vault with conditional writes |
+| `GET`, `PUT /v1/vaults/<uuid>/logs/<name>` | Session log in one Vault |
+| `DELETE /v1/vaults/<uuid>/logs?since=<ms>` | Delete session logs in one Vault |
 | `GET /v1/logs/<name>` | Download a session log backup or 404 |
 | `PUT /v1/logs/<name>` | Store or replace a session log backup |
 | `DELETE /v1/logs?since=<ms>` | Delete logs uploaded at or after a Unix time in milliseconds (`0` or none: all); returns `{"removed": n, "failed": 0}` on success. Partial deletion returns HTTP 500 with both counts |
 
-For conditional writes, `If-Match` checks an existing revision, while `If-None-Match: *` permits creation only if absent. Both merge and forced upload use a conditional write. After password rotation, replacing the snapshot requires its exact current ETag. Older clients that upload unconditionally receive HTTP 412. A failed precondition returns HTTP 412. The last 10 revisions are retained in `revisions/`.
+For conditional writes, `If-Match` checks an existing revision, while `If-None-Match: *` permits creation only if absent. Both merge and forced upload use a conditional write. After password rotation, replacing the snapshot requires its exact current ETag. Older clients that upload unconditionally receive HTTP 412. A failed precondition returns HTTP 412. The Vault list and Vault snapshots always require a precondition for writes. Each snapshot retains its last 10 revisions in its own `revisions/`.
 
 Session logs are encrypted by the client (sealed with the encryption password, like the snapshot) and stored in `logs/`, separately from the snapshot and its revisions. Names may contain only letters, digits, `.`, `_` and `-`. Logs not updated for `SYNC_LOG_RETENTION_DAYS` (default `60`) are deleted at start and then every 6 hours. The snapshot response also includes `X-Termian-Key-Generation`. For `PUT /v1/logs/<name>`, the client first decrypts the current snapshot and sends its `ETag` in `X-Termian-Snapshot-Revision` along with `X-Termian-Key-Generation`. The server returns HTTP 412 if there is no snapshot or the revision is missing or stale. After password rotation it also requires the current generation. Older clients that omit the revision cannot upload logs to this server. For a new store, sync once to create the snapshot, then sync again to upload logs.
 

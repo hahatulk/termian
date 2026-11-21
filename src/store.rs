@@ -95,6 +95,14 @@ impl Store {
         Self::with_header(path, &Zeroizing::new(key), MAGIC.to_vec())
     }
 
+    #[cfg(target_os = "android")]
+    pub(crate) fn open_android(path: PathBuf, key: [u8; 32]) -> Result<Self, String> {
+        let lock = lock_vault(path.parent().ok_or("vault path has no folder")?)?;
+        let mut store = Self::new(path, key);
+        store._lock = Some(Arc::new(lock));
+        Ok(store)
+    }
+
     fn with_header(path: PathBuf, key: &Key, header: Vec<u8>) -> Self {
         Self {
             path,
@@ -335,7 +343,7 @@ impl Store {
     }
 }
 
-#[cfg(any(target_os = "macos", windows))]
+#[cfg(any(target_os = "macos", target_os = "android", windows))]
 fn lock_vault(dir: &Path) -> Result<std::fs::File, String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let lock = std::fs::OpenOptions::new()

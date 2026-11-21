@@ -23,7 +23,7 @@ pub(super) struct Browser {
 }
 
 impl Browser {
-    pub(super) fn new(target: SshTarget, root: PathBuf) -> Result<Self, String> {
+    pub(super) fn new(target: SshTarget, root: PathBuf, show_hidden: bool) -> Result<Self, String> {
         let temp = tempfile::Builder::new()
             .prefix("sftp-")
             .tempdir_in(root)
@@ -32,10 +32,12 @@ impl Browser {
         let events = remote
             .take_events()
             .ok_or("Could not display SFTP events.")?;
+        let mut panel = files::Panel::new("/");
+        panel.show_hidden = show_hidden;
         Ok(Self {
             remote,
             events,
-            panel: files::Panel::new("/"),
+            panel,
             ready: false,
             loading: true,
             temp,
@@ -58,7 +60,22 @@ impl Browser {
         };
     }
 
+    fn listing(&self) -> Value {
+        json!({"type":"listing", "path":self.panel.path,
+            "canBack":self.panel.can_go_back(), "canForward":self.panel.can_go_forward(),
+            "entries":self.panel.rows().iter().map(|e| json!({
+                "name":e.name, "folder":e.is_dir, "link":e.is_link, "hidden":e.is_hidden(),
+                "size":e.size_label(), "modified":e.modified_label(),
+                "mode":e.mode.map(|n| format!("{:03o}", n & 0o777))
+            })).collect::<Vec<_>>()
+        })
+    }
+
     pub(super) fn call(&mut self, op: &str, args: &Value) -> Result<Value, String> {
+        if op == "filesHidden" {
+            self.panel.show_hidden = args["enabled"] == true;
+            return Ok(if self.ready && !self.loading { self.listing() } else { json!({}) });
+        }
         if op == "filesAnswer" {
             self.remote.answer(super::login_answer(args));
             return Ok(json!({}));
@@ -237,8 +254,9 @@ impl Browser {
                 }
                 RemoteEvent::Connected { home } => {
                     self.ready = true;
+                    let show_hidden = self.panel.show_hidden;
                     self.panel = files::Panel::new(&home);
-                    self.panel.show_hidden = true;
+                    self.panel.show_hidden = show_hidden;
                     self.refresh();
                     events.push(json!({"type":"connected"}));
                 }
@@ -247,11 +265,7 @@ impl Browser {
                     match result {
                         Ok(entries) => {
                             self.panel.set_entries(entries);
-                            events.push(json!({"type":"listing", "path":path,
-                                "canBack":self.panel.can_go_back(),"canForward":self.panel.can_go_forward(),
-                                "entries": self.panel.rows().iter().map(|e| json!({"name":e.name,"folder":e.is_dir,"link":e.is_link,
-                                    "size":e.size_label(),"modified":e.modified_label(),"mode":e.mode.map(|n| format!("{:03o}", n & 0o777))})).collect::<Vec<_>>()
-                            }));
+                            events.push(self.listing());
                         }
                         Err(error) => events.push(json!({"type":"error","value":error})),
                     }

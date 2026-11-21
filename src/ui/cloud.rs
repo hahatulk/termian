@@ -33,7 +33,7 @@ const ERROR_TONE: u32 = 0xec706f;
 /// Legacy title-bar badge text (`#131626`).
 const BADGE_TEXT: u32 = 0x131626;
 
-const HELP: &str = "Токен и пароли сохраняются в конфиге этого профиля. Сохранённые значения не передаются в интерфейс. Чтобы заменить секрет, введите новый; пустое поле оставляет прежний.";
+const HELP: &str = "Все Vault используют один сервер. Пустое поле токена или пароля сохраняет прежнее значение для этого сервера.";
 const AUTO_SYNC: &str = "Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)";
 const SAVED_SECRET: &str = "Пароль сохранён. Поле — только для замены.";
 
@@ -55,9 +55,9 @@ impl Operation {
 
     fn warning(self) -> &'static str {
         match self {
-            Operation::Download => tr("Данные приложения будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия."),
-            Operation::Sync => tr("Изменения устройства и облака будут объединены: новые, изменённые и удалённые записи переносятся в обе стороны. Перед применением изменений из облака создаётся зашифрованная резервная копия."),
-            Operation::Upload => tr("Снимок в облаке будет полностью заменён текущими данными. Изменения других устройств будут затёрты."),
+            Operation::Download => tr("Данные выбранного Vault будут заменены снимком из облака. Перед заменой будет создана зашифрованная резервная копия."),
+            Operation::Sync => tr("Изменения устройства и облака объединяются отдельно в каждом Vault. Перед применением изменений из облака создаётся зашифрованная резервная копия."),
+            Operation::Upload => tr("Снимок выбранного Vault будет заменён текущими данными. Изменения других устройств в этом Vault будут затёрты."),
         }
     }
 
@@ -508,28 +508,29 @@ impl Shell {
         }
         let started = self.vault.clone();
         let mut vault = started.clone();
+        let mut vaults = self.vaults.clone();
         let backups = self.store.cloud_backups();
         let logs_dir = self.logs_dir.clone();
         let active = self.workspaces.values().flat_map(|workspace| workspace.panes.values().filter_map(|pane| pane.history))
             .filter(|id| self.vault.history.iter().any(|entry| entry.id == *id && entry.disconnected_at.is_none())).collect();
         let task = cx.background_spawn(async move {
-            let logs_notice = if operation == Operation::Download {
-                None
-            } else {
-                self_cloud::prepare_logs(&mut vault, &logs_dir, &active)
-            };
             let result = match operation {
-                Operation::Sync => self_cloud::sync(&mut vault, &backups),
-                Operation::Upload => ticket.ok_or_else(|| "Сначала проверьте изменения.".to_string()).and_then(|t| self_cloud::upload_checked(&mut vault, t)),
+                Operation::Sync => vaults.sync_all(&mut vault, &active),
+                Operation::Upload => ticket.ok_or_else(|| "Сначала проверьте изменения.".to_string()).and_then(|t| {
+                    vaults.sync_catalog()?;
+                    let notice = self_cloud::prepare_logs(&mut vault, &logs_dir, &active);
+                    self_cloud::upload_checked(&mut vault, t)
+                        .map(|message| match notice { Some(notice) => format!("{message}. {notice}"), None => message })
+                }),
                 Operation::Download => ticket.ok_or_else(|| "Сначала проверьте изменения.".to_string()).and_then(|t| self_cloud::download_checked(&mut vault, &backups, t)),
             };
-            let result = result.map(|text| match logs_notice { Some(notice) => format!("{text}. {notice}"), None => text });
-            (vault, result)
+            (vaults, vault, result)
         });
         cx.spawn(async move |this, cx| {
-            let (vault, result) = task.await;
+            let (vaults, vault, result) = task.await;
             let _ = this.update(cx, |shell, cx| {
                 shell.cloud.running = false;
+                shell.vaults = vaults;
                 let mut result = result;
                 if result.is_ok() {
                     let mut candidate = shell.vault.clone();
@@ -585,6 +586,11 @@ impl Shell {
     fn save_cloud_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(CloudDialog { body: Body::Config(form), out, busy }) = &mut self.cloud.dialog else { return };
         if *busy { return; }
+        if self.cloud.running || self.cloud.logs_running {
+            *out = Some(Out::Error(tr("Дождитесь завершения операции с облаком и повторите.").into()));
+            cx.notify();
+            return;
+        }
         let candidate = form.missing().map_or_else(|| self_cloud::candidate_config(&self.vault, form.changes()), |error| Err(error.into()));
         let candidate = match candidate {
             Ok(candidate) => candidate,
@@ -600,11 +606,6 @@ impl Shell {
         });
         if !rotating {
             self.commit_cloud_config(candidate, false, cx);
-            return;
-        }
-        if self.cloud.running || self.cloud.logs_running {
-            *out = Some(Out::Error(tr("Дождитесь завершения операции с облаком и повторите.").into()));
-            cx.notify();
             return;
         }
         *busy = true;
@@ -638,22 +639,11 @@ impl Shell {
 
     fn commit_cloud_config(&mut self, candidate: termian_native::cloud::CloudConfig, rotated: bool, cx: &mut Context<Self>) {
         let Some(CloudDialog { body: Body::Config(form), out, .. }) = &mut self.cloud.dialog else { return };
-        if let Err(error) = self.vaults.check_cloud_url(&candidate.url) {
+        if let Err(error) = self.vaults.set_cloud(&mut self.vault, candidate) {
             *out = Some(Out::Error(error));
             cx.notify();
             return;
         }
-        let mut vault = self.vault.clone();
-        if vault.cloud.as_ref().is_some_and(|previous| termian_native::sync::server_key(&previous.url) != termian_native::sync::server_key(&candidate.url)) {
-            log_backup::reset_catalog(&mut vault);
-        }
-        vault.cloud = Some(candidate);
-        if let Err(error) = self.store.save(&vault) {
-            *out = Some(Out::Error(error));
-            cx.notify();
-            return;
-        }
-        self.vault = vault;
         form.load(&self.vault);
         *out = Some(Out::Success(if rotated { tr("Новый пароль сохранён. Следующие отправки будут зашифрованы им.") } else { tr("Настройки сохранены") }.into()));
         if rotated {
@@ -1089,7 +1079,7 @@ mod tests {
     #[test]
     fn the_settings_form_never_shows_saved_secrets() {
         let vault = Vault {
-            cloud: Some(CloudConfig { url: "https://sync.example".into(), token: "secret-token".into(), passphrase: "a long passphrase".into(), basic_user: "me".into(), basic_password: "pw".into(), auto_sync: true }),
+            cloud: Some(CloudConfig { url: "https://sync.example".into(), token: "secret-token".into(), passphrase: "a long passphrase".into(), basic_user: "me".into(), basic_password: "pw".into(), auto_sync: true, ..Default::default() }),
             ..Vault::default()
         };
         let mut form = ConfigForm::from_vault(&vault);
