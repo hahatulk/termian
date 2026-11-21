@@ -176,7 +176,7 @@ fn newest_manifest(releases: Vec<Release>, current: &semver::Version, channel: C
             let version = semver::Version::parse(release.tag_name.strip_prefix('v')?).ok()?;
             let asset = release.assets.into_iter().find(|asset| asset.name == MANIFEST_ASSET)?;
             let url = url::Url::parse(&asset.browser_download_url).ok()?;
-            (version.pre.is_empty() != prerelease && version.build.is_empty() && &version > current
+            ((prerelease || version.pre.is_empty()) && version.build.is_empty() && &version > current
                 && url.scheme() == "https" && url.host_str() == Some("github.com"))
                 .then_some((version, url))
         })
@@ -554,6 +554,25 @@ mod tests {
         assert_eq!(find(Channel::PreRelease, &beta), None);
         let body = r#"{"tag_name":"v2.0.0","draft":false,"prerelease":false,"assets":[{"name":"latest.json","browser_download_url":"https://github.com/o/r/releases/download/v2.0.0/latest.json"}]}"#;
         assert!(newest_manifest(vec![serde_json::from_str(body).unwrap()], &beta, Channel::Latest).is_some());
+    }
+
+    #[test]
+    fn normal_tag_moves_to_latest_after_promotion() {
+        let installed = semver::Version::new(1, 2, 0);
+        let candidate = semver::Version::new(1, 3, 0);
+        let url = "https://github.com/o/r/releases/download/v1.3.0/latest.json";
+        for (prerelease, visible, hidden) in [
+            (true, Channel::PreRelease, Channel::Latest),
+            (false, Channel::Latest, Channel::PreRelease),
+        ] {
+            let releases = || vec![release("v1.3.0", prerelease, false, Some(url))];
+            assert_eq!(
+                newest_manifest(releases(), &installed, visible).map(|(version, _)| version),
+                Some(candidate.clone())
+            );
+            assert!(newest_manifest(releases(), &installed, hidden).is_none());
+            assert!(newest_manifest(releases(), &candidate, visible).is_none());
+        }
     }
 
     #[test]

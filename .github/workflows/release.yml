@@ -33,7 +33,6 @@ jobs:
     outputs:
       version: ${{ steps.release.outputs.version }}
       tag: ${{ steps.release.outputs.tag }}
-      prerelease: ${{ steps.release.outputs.prerelease }}
       sha: ${{ steps.release.outputs.sha }}
       changelog: ${{ steps.release.outputs.changelog }}
     steps:
@@ -234,7 +233,26 @@ jobs:
             export TERMIAN_SIGNING_PRIVATE_KEY_PASSWORD="$PREVIOUS_SIGNING_PASSWORD"
           fi
           cargo run --locked --manifest-path scripts/release/Cargo.toml -- sign release-assets
+      - name: Check existing release
+        id: release_status
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body=$(mktemp)
+          trap 'rm -f "$body"' EXIT
+          status=$(curl --silent --show-error --max-time 30 --output "$body" --write-out '%{http_code}' \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")
+          case "$status" in
+            200) publish=$(jq -r '.draft == true or .prerelease == true' "$body") ;;
+            404) publish=true ;;
+            *) printf 'Release lookup for %s failed (HTTP %s)\n' "$RELEASE_TAG" "$status" >&2; exit 1 ;;
+          esac
+          printf 'publish=%s\n' "$publish" >> "$GITHUB_OUTPUT"
       - name: Publish GitHub Release
+        if: steps.release_status.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.prepare.outputs.tag }}
@@ -242,7 +260,7 @@ jobs:
           name: Termian ${{ needs.prepare.outputs.version }}
           body: ${{ needs.prepare.outputs.changelog }}
           generate_release_notes: true
-          prerelease: ${{ needs.prepare.outputs.prerelease }}
-          make_latest: ${{ needs.prepare.outputs.prerelease == 'false' }}
+          prerelease: true
+          make_latest: false
           fail_on_unmatched_files: true
           files: release-assets/*
