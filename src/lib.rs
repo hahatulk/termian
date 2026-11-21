@@ -28,6 +28,7 @@ pub mod remote_fs;
 pub mod session;
 pub mod serial;
 pub mod session_log;
+pub mod settings_menu;
 pub mod shell_history;
 pub mod shell_integration;
 pub mod shortcuts;

@@ -177,6 +177,12 @@ final class TerminalView extends View {
         };
     }
 
+    @Override public boolean onGenericMotionEvent(MotionEvent event) {
+        if (event.getActionMasked()==MotionEvent.ACTION_BUTTON_PRESS && event.getActionButton()==MotionEvent.BUTTON_SECONDARY
+            && activity.pasteByMouse(tabId)) return true;
+        return super.onGenericMotionEvent(event);
+    }
+
     @Override public boolean onKeyDown(int code, KeyEvent event) {
         String key;
         switch (code) {

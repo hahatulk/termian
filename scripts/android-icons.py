@@ -47,7 +47,8 @@ def shapes(parent, node, style):
 for name in ("vaults", "hosts", "sftp", "keychain", "identity", "logs", "port_forwarding", "snippets", "known_hosts", "terminal",
              "privacy_lock", "workspace", "plus", "search", "dots", "new_host", "linux", "debian", "ubuntu",
              "group", "file", "upload", "download", "cloud_sync", "local", "bookmark", "bookmark_filled",
-             "grid", "list", "arrow_left", "arrow_right", "caret_down", "collapse_right", "new_tab",
+             "grid", "list", "arrow_left", "arrow_right", "sftp_arrow", "sftp_eye_off", "link", "caret_down", "collapse_right", "new_tab",
+             "person", "env", "cloud_download",
              "edit", "sorting", "backspace", "check", "connect", "side_panel", "broadcast"):
     root = ET.parse(f"assets/icons/{name}.svg").getroot()
     x, y, w, h = map(float, root.get("viewBox").split())

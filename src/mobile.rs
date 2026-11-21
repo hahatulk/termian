@@ -5,6 +5,7 @@ use std::{
 };
 
 mod files;
+mod settings;
 mod updates;
 mod vault;
 use std::sync::{mpsc, Mutex};
@@ -75,7 +76,7 @@ struct App {
     next_tab: u64,
     files: Option<files::Browser>,
     forwards: BTreeMap<u64, vault::Forward>,
-    sync: Option<mpsc::Receiver<Result<(Vault, String), String>>>,
+    sync: Option<mpsc::Receiver<Result<(VaultSet, Vault, Result<String, String>), String>>>,
     cloud_check: Option<
         mpsc::Receiver<
             Result<
@@ -108,7 +109,7 @@ fn text<'a>(v: &'a Value, field: &str) -> &'a str {
 
 impl App {
     fn new(root: PathBuf, key: [u8; 32]) -> Result<Self, String> {
-        let base = Store::new(root.join("vault.bin"), key);
+        let base = Store::open_android(root.join("vault.bin"), key)?;
         let personal = base.load()?.unwrap_or_default();
         let (vaults, store, vault) = VaultSet::load(base, personal)?;
         let root = store.path().parent().ok_or("Invalid Vault path.")?.to_owned();
@@ -178,6 +179,7 @@ impl App {
             "group": self.vault.host_location(h), "groupId": h.group.map(|id| id.to_string()),
             "os":h.os, "tags": h.tags, "keyId":h.key.map(|id| id.to_string()), "identityId":h.identity.map(|id| id.to_string()),
             "identity": h.identity.and_then(|id| self.vault.identity(id)).map(|i| i.label.as_str()),
+            "theme": h.settings.theme_name().map(|name| crate::terminal_settings::theme(name).name.as_str()),
         })).collect::<Vec<_>>())
     }
 
@@ -275,9 +277,22 @@ impl App {
                 h.password = Some(password.to_owned());
             }
         }
+        let theme_changed = if let Some(theme) = args["theme"].as_str() {
+            h.settings.color_scheme = if theme.is_empty() {
+                None
+            } else {
+                Some(json!(settings::theme_name(theme)?))
+            };
+            true
+        } else {
+            false
+        };
         let id = h.id.to_string();
         vault.save_host(h);
         self.save(vault)?;
+        if theme_changed {
+            self.apply_terminal_settings();
+        }
         Ok(json!({"hosts": self.hosts(), "id": id}))
     }
 
@@ -359,7 +374,7 @@ impl App {
             Connection {
                 session: Some(session),
                 events,
-                screen: Terminal::with_settings(cols.into(), rows.into(), &self.vault.terminal),
+                screen: Terminal::with_settings(cols.into(), rows.into(), &settings::for_host(&self.vault, host)),
                 ready: local,
                 backspace,
                 dirty: true,
@@ -450,6 +465,7 @@ impl App {
         let (cols, rows) = self.size;
         let mut command = portable_pty::CommandBuilder::new("/system/bin/sh");
         command.cwd(&self.root);
+        command.env("TERM", self.vault.terminal.emulation());
         let session = session::local_command(command, cols, rows)?;
         self.new_terminal(session, "Local Terminal".into(), None, false, true)
     }
@@ -495,19 +511,12 @@ impl App {
         }
         let files = self.files.as_mut().map(files::Browser::poll);
         let forwards = self.forward_poll();
-        let sync = self.sync.as_ref().and_then(|rx| match rx.try_recv() {
-            Ok(result) => Some(result),
-            Err(mpsc::TryRecvError::Disconnected) => Some(Err("Синхронизация прервана.".into())),
-            Err(mpsc::TryRecvError::Empty) => None,
-        });
-        let sync = sync.map(|result| {
-            self.sync = None;
-            match result.and_then(|(mut vault, message)| {
+        let sync = completed(&mut self.sync).map(|response| {
+            match response.and_then(|(vaults, mut vault, result)| {
+                self.vaults = vaults;
+                let message = result?;
                 for old in &self.vault.history {
-                    if let Some(row) = vault
-                        .history_entry_mut(old.id)
-                        .filter(|row| row.log == old.log)
-                    {
+                    if let Some(row) = vault.history_entry_mut(old.id).filter(|row| row.log == old.log) {
                         row.disconnected_at = old.disconnected_at;
                     }
                 }
@@ -560,11 +569,20 @@ impl App {
                         | "local"
                         | "duplicateHost"
                         | "logsEnabled"
+                        | "saveTerminal"
                 ))
         {
             return Err("Дождитесь завершения синхронизации.".into());
         }
         match op {
+            "settingsMenu" => Ok(settings::menus()),
+            "settingsState" => Ok(json!({
+                "vaultName":self.vaults.selected_name(),
+                "logsEnabled":!self.vault.logs_disabled,
+            })),
+            "terminalSettings" => Ok(self.terminal_settings()),
+            "terminalThemes" => Ok(settings::themes()),
+            "saveTerminal" => self.save_terminal_setting(args),
             "vaultList" => Ok(self.list_vaults()),
             "vaultSelect" => self.change_vault(Destination::Existing(
                 text(args, "id").parse().map_err(|_| "Vault not found.")?
@@ -587,6 +605,10 @@ impl App {
                     .ok_or("Enter user@host:port.")?;
                 target.known_hosts = self.root.join("known_hosts");
                 target.identity_files.clear();
+                let options = session::SshOptions::from_vault(&self.vault);
+                target.options.term = options.term;
+                target.options.keepalive = options.keepalive;
+                target.options.pqc_kex = options.pqc_kex;
                 let title = target.host.clone();
                 self.new_terminal(
                     session::ssh(target, self.size.0, self.size.1),
@@ -621,7 +643,9 @@ impl App {
                 Ok(self.tab_state())
             }
             "filesOpen" => {
-                self.files = Some(files::Browser::new(self.target(id()?)?, self.root.clone())?);
+                self.files = Some(files::Browser::new(
+                    self.target(id()?)?, self.root.clone(), args["showHidden"] == true,
+                )?);
                 Ok(json!({}))
             }
             "filesClose" => {
@@ -638,7 +662,7 @@ impl App {
                 "basicUser":self.vault.cloud.as_ref().map(|c| &c.basic_user)})),
             "configureCloud" => {
                 let url = text(args, "url").trim();
-                let current = self.vault.cloud.as_ref().filter(|c| c.url == url);
+                let current = self.vault.cloud.as_ref().filter(|c| crate::cloud::same_snapshot_endpoint(&c.url, url));
                 let secret = |field, previous: Option<&str>| {
                     let value = text(args, field);
                     if value.is_empty() {
@@ -649,7 +673,7 @@ impl App {
                 };
                 let basic_user = text(args, "basicUser").trim().to_owned();
                 let config = CloudConfig {
-                    url: url.to_owned(),
+                    url: current.map_or_else(|| url.to_owned(), |c| c.url.clone()),
                     token: secret("token", current.map(|c| c.token.as_str())),
                     passphrase: if args["emptyPassphrase"] == true {
                         String::new()
@@ -668,12 +692,10 @@ impl App {
                     },
                     basic_user,
                     auto_sync: false,
+                    workspace: uuid::Uuid::nil(),
                 };
-                config.validate()?;
-                self.vaults.check_cloud_url(&config.url)?;
-                let mut vault = self.vault.clone();
-                vault.cloud = Some(config);
-                self.save(vault)?;
+                self.vaults.set_cloud(&mut self.vault, config)?;
+                self.ticket = None;
                 Ok(json!({}))
             }
             "cloudPreview" => {
@@ -701,33 +723,26 @@ impl App {
                     Some(ticket)
                 };
                 let mut vault = self.vault.clone();
+                let mut vaults = self.vaults.clone();
                 let backups = self.store.cloud_backups();
                 let (tx, rx) = mpsc::sync_channel(1);
                 let logs = self.root.join("session-logs-v2");
                 let active = self.sessions.values().filter_map(|c| c.history).collect();
                 std::thread::Builder::new()
                     .spawn(move || {
-                        let notice = (operation != "forceDownload")
-                            .then(|| crate::self_cloud::prepare_logs(&mut vault, &logs, &active))
-                            .flatten();
                         let result = match (operation.as_str(), ticket) {
-                            ("forceUpload", Some(ticket)) => {
+                            ("forceUpload", Some(ticket)) => vaults.sync_catalog().and_then(|()| {
+                                let notice = crate::self_cloud::prepare_logs(&mut vault, &logs, &active);
                                 crate::self_cloud::upload_checked(&mut vault, ticket)
-                            }
+                                    .map(|message| match notice { Some(notice) => format!("{message}. {notice}"), None => message })
+                            }),
                             ("forceDownload", Some(ticket)) => {
                                 crate::self_cloud::download_checked(&mut vault, &backups, ticket)
                             }
-                            ("sync", _) => crate::self_cloud::sync(&mut vault, &backups),
+                            ("sync", _) => vaults.sync_all(&mut vault, &active),
                             _ => Err("Check the cloud preview again.".into()),
-                        }
-                        .map(|message| {
-                            if let Some(notice) = notice {
-                                format!("{message}. {notice}")
-                            } else {
-                                message
-                            }
-                        });
-                        let _ = tx.send(result.map(|message| (vault, message)));
+                        };
+                        let _ = tx.send(Ok((vaults, vault, result)));
                     })
                     .map_err(|e| e.to_string())?;
                 self.sync = Some(rx);
@@ -864,6 +879,7 @@ impl Connection {
                 _ => {}
             }
         }
+        let bell = self.screen.take_bell();
         if !visible || !std::mem::take(&mut self.dirty) {
             return None;
         }
@@ -879,7 +895,7 @@ impl Connection {
             .collect();
         Some(
             json!({"lines":lines, "cursor":frame.cursor, "bg":self.screen.look().background,
-            "cursorColor":self.screen.look().cursor}),
+            "cursorColor":self.screen.look().cursor, "bell":bell}),
         )
     }
 }

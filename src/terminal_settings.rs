@@ -205,6 +205,12 @@ pub struct Theme {
     pub selection_alpha: u8,
 }
 
+impl Theme {
+    pub fn swatches(&self) -> [u32; 6] {
+        [2, 1, 3, 4, 5, 6].map(|index| self.palette[index])
+    }
+}
+
 #[derive(Deserialize)]
 struct RawTheme {
     name: String,

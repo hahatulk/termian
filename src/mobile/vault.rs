@@ -65,8 +65,7 @@ impl App {
                 "destinationPort":r.destination_port,"running":self.forwards.contains_key(&r.id),
                 "activePort": self.forwards.get(&r.id).and_then(|f| f.port)
             })).collect::<Vec<_>>(),
-            "logsEnabled": !v.logs_disabled, "privacyConfigured": v.privacy_password.is_some(),
-            "terminal": {"font":v.terminal.font_size,"theme":v.terminal.theme().name}
+            "logsEnabled": !v.logs_disabled
         })
     }
 
@@ -490,44 +489,6 @@ impl App {
                 crate::workspace_template::save(&mut v, &workspace);
             }
             "deleteWorkspace" => crate::workspace_template::remove(&mut v, id()?),
-            "saveTerminal" => {
-                v.terminal.set_font_size(
-                    text(args, "font")
-                        .trim()
-                        .parse()
-                        .map_err(|_| "Enter a font size.")?,
-                );
-                let theme = text(args, "theme").trim();
-                if !crate::terminal_settings::themes()
-                    .iter()
-                    .any(|t| t.name.eq_ignore_ascii_case(theme))
-                {
-                    return Err("Theme not found.".into());
-                }
-                v.terminal.color_scheme = theme.to_lowercase();
-            }
-            "savePrivacy" => {
-                if let Some(current) = &v.privacy_password {
-                    if !current.verify(text(args, "current")) {
-                        return Err("Incorrect lock password.".into());
-                    }
-                }
-                v.privacy_password = Some(
-                    crate::privacy_password::PrivacyPassword::new(text(args, "password"))
-                        .ok_or("Enter a lock password.")?,
-                );
-            }
-            "unlock" => {
-                return if v
-                    .privacy_password
-                    .as_ref()
-                    .is_some_and(|p| p.verify(text(args, "password")))
-                {
-                    Ok(json!({}))
-                } else {
-                    Err("Incorrect lock password.".into())
-                }
-            }
             _ => return Err("Unknown operation.".into()),
         }
         self.save(v)?;

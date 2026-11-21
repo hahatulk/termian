@@ -503,7 +503,7 @@ impl SettingsWindow {
                         .justify_center()
                         .gap(px(6.))
                         .child(div().text_size(px(12.)).text_color(rgb(theme.foreground)).truncate().child(name.clone()))
-                        .child(div().flex().gap(px(3.)).children([2usize, 1, 3, 4, 5, 6].map(|i| div().size(px(8.)).rounded_full().bg(rgb(theme.palette[i]))))),
+                        .child(div().flex().gap(px(3.)).children(theme.swatches().map(|color| div().size(px(8.)).rounded_full().bg(rgb(color))))),
                 )
                 .on_click(cx.listener(move |settings, _, _, cx| {
                     let key = key.clone();

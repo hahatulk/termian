@@ -2,7 +2,6 @@ package app.termian.mobile;
 
 import static app.termian.mobile.MainActivity.text;
 
-import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -65,7 +64,7 @@ final class MobileUpdates {
     private ProgressBar progress;
     private RadioGroup channels;
     private Spinner modes, intervals;
-    private AlertDialog dialog;
+    private Button checkButton, downloadButton;
     private int percent=-1;
 
     MobileUpdates(MainActivity app) {
@@ -96,11 +95,17 @@ final class MobileUpdates {
         closed=true;
         handler.removeCallbacksAndMessages(null);
         worker.shutdown();
-        dismiss();
+        detach();
     }
 
-    void dismiss() {
-        if(dialog!=null) dialog.dismiss();
+    void detach() {
+        status=null;
+        progress=null;
+        channels=null;
+        modes=null;
+        intervals=null;
+        checkButton=null;
+        downloadButton=null;
     }
 
     private void schedule() {
@@ -130,9 +135,7 @@ final class MobileUpdates {
         return spinner;
     }
 
-    void show() {
-        if(dialog!=null) return;
-        LinearLayout form=app.column();
+    void build(LinearLayout form) {
         String version="";
         try { version=app.getPackageManager().getPackageInfo(app.getPackageName(),0).versionName; }
         catch(PackageManager.NameNotFoundException ignored) {}
@@ -164,13 +167,13 @@ final class MobileUpdates {
         progress.setMax(100);
         form.addView(progress);
 
-        dialog=new AlertDialog.Builder(app).setTitle(text("Version")).setView(app.scroll(form))
-            .setNegativeButton(text("Close"),null).setPositiveButton(text("Check for updates"),null).show();
-        dialog.setOnDismissListener(d -> dialog=null);
-        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+        checkButton=app.button(text("Check for updates"),() -> check(false));
+        downloadButton=app.button(text("Download update"),() -> {
             if(readyApk!=null) install();
-            else check(availableVersion!=null);
+            else if(availableVersion!=null) check(true);
         });
+        form.addView(checkButton,new LinearLayout.LayoutParams(-1,-2));
+        form.addView(downloadButton,new LinearLayout.LayoutParams(-1,-2));
         render();
     }
 
@@ -194,14 +197,9 @@ final class MobileUpdates {
     }
 
     private void selectChannel(boolean preview) {
-        if(busy || prerelease==preview) return;
+        if(busy || readyApk!=null || prerelease==preview) return;
         prerelease=preview;
         preferences.edit().putBoolean("updates:preRelease",prerelease).apply();
-        if(readyApk!=null) {
-            app.revokeUriPermission(UpdateApkProvider.uri(app,readyApk),Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            readyApk.delete();
-            readyApk=null;
-        }
         availableVersion=null;
         message=enabled ? text("Update channel changed. Check for updates.") : text("Updates are disabled in this build.");
         nextCheck=SystemClock.elapsedRealtime()+intervalMillis();
@@ -257,7 +255,7 @@ final class MobileUpdates {
                 readyApk=downloaded;
                 availableVersion=found;
                 message=done;
-                if(visible && dialog==null && !app.privacyLocked()
+                if(visible && status==null && !app.privacyLocked()
                     && (downloaded!=null || (found!=null && !found.equals(notifiedVersion)))) {
                     notifiedVersion=found;
                     app.toast(done+" Open Settings > Version.");
@@ -325,17 +323,18 @@ final class MobileUpdates {
     }
 
     private void render() {
-        if(dialog==null) return;
+        if(status==null) return;
         status.setText(text(message));
-        boolean configurable=!busy;
+        boolean configurable=!busy && readyApk==null;
         for(int i=0;i<channels.getChildCount();i++) channels.getChildAt(i).setEnabled(configurable);
         modes.setEnabled(configurable);
         intervals.setEnabled(configurable && mode!=Mode.MANUAL);
         progress.setVisibility(busy ? View.VISIBLE : View.GONE);
         progress.setIndeterminate(percent<0);
         if(percent>=0) progress.setProgress(percent);
-        Button action=dialog.getButton(AlertDialog.BUTTON_POSITIVE);
-        action.setEnabled(enabled && !busy);
-        action.setText(readyApk!=null ? text("Install") : availableVersion!=null ? text("Download update") : text("Check for updates"));
+        checkButton.setEnabled(enabled && !busy && readyApk==null);
+        downloadButton.setEnabled(enabled && !busy);
+        downloadButton.setVisibility(readyApk!=null || availableVersion!=null ? View.VISIBLE : View.GONE);
+        downloadButton.setText(readyApk!=null ? text("Install") : text("Download update"));
     }
 }

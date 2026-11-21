@@ -844,6 +844,52 @@ pub(crate) async fn connect_forwarding(target: &SshTarget, io: SharedPrompter, f
     open(target, io, forward_to, Arc::default()).await
 }
 
+#[cfg(target_os = "macos")]
+async fn connect_macos_tcp<T, F>(
+    addresses: impl IntoIterator<Item = std::net::SocketAddr>,
+    mut dial: impl FnMut(std::net::SocketAddr) -> F,
+    waiting: impl std::future::Future<Output = ()>,
+) -> std::io::Result<T>
+where
+    F: std::future::Future<Output = std::io::Result<T>>,
+{
+    use std::net::IpAddr;
+
+    let mut waiting = Some(waiting);
+    let mut addresses = addresses.into_iter().collect::<Vec<_>>();
+    let mut last = std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "could not resolve to any addresses",
+    );
+    loop {
+        let mut retry = Vec::new();
+        for endpoint in addresses {
+            match dial(endpoint).await {
+                Ok(stream) => return Ok(stream),
+                Err(error) => {
+                    if error.raw_os_error() == Some(libc::EHOSTUNREACH)
+                        && match endpoint.ip().to_canonical() {
+                            IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+                            IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+                        }
+                    {
+                        retry.push(endpoint);
+                    }
+                    last = error;
+                }
+            }
+        }
+        if retry.is_empty() {
+            return Err(last);
+        }
+        if let Some(notify) = waiting.take() {
+            notify.await;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        addresses = retry;
+    }
+}
+
 async fn open(
     target: &SshTarget,
     io: SharedPrompter,
@@ -861,7 +907,19 @@ async fn open(
             io.log(format!("debug1: Identity files: {}", target.identity_files.len() + usize::from(target.key.is_some())));
         }
     }
-    let stream = tokio::time::timeout(CONNECT_TIMEOUT, tokio::net::TcpStream::connect((target.host.as_str(), target.port)))
+    #[cfg(target_os = "macos")]
+    let connect = async {
+        let addresses = tokio::net::lookup_host((target.host.as_str(), target.port)).await?;
+        connect_macos_tcp(addresses, tokio::net::TcpStream::connect, async {
+            io.lock().await.log(crate::language::text(
+                "macOS could not reach the local address. If prompted, allow Termian to access the local network. Check System Settings > Privacy & Security > Local Network.",
+            ).to_owned());
+        })
+        .await
+    };
+    #[cfg(not(target_os = "macos"))]
+    let connect = tokio::net::TcpStream::connect((target.host.as_str(), target.port));
+    let stream = tokio::time::timeout(CONNECT_TIMEOUT, connect)
         .await
         .map_err(|_| format!("ssh: connect to host {address}: timed out"))?
         .map_err(|error| format!("ssh: connect to host {address}: {error}"))?;
@@ -1238,7 +1296,12 @@ pub(crate) mod tests {
         type Modes = Arc<std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, u32>>>;
 
         #[derive(Clone, Copy, PartialEq, Eq)]
-        pub enum SftpFault { PublicDirectory, MissingAttributes, DenyMode }
+        pub enum SftpFault {
+            PublicDirectory,
+            MissingAttributes,
+            DenyMode,
+            ReadWindow { start: u64, end: u64 },
+        }
 
         struct Files {
             fault: Option<SftpFault>,
@@ -1339,6 +1402,11 @@ pub(crate) mod tests {
             }
 
             async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, StatusCode> {
+                if let Some(SftpFault::ReadWindow { start, end }) = self.fault {
+                    if offset < start || offset.saturating_add(u64::from(len)) > end {
+                        return Err(StatusCode::PermissionDenied);
+                    }
+                }
                 let mut data = vec![0; len as usize];
                 let file = self.file(&handle)?;
                 file.seek(SeekFrom::Start(offset)).map_err(failed)?;
@@ -1920,6 +1988,62 @@ pub(crate) mod tests {
         let mut session = ssh(target(port, dir.path().join("kh")), 80, 24);
         let output = collect_until(&mut session, "<closed");
         assert!(output.contains(&format!("connect to host 127.0.0.1:{port}")), "{output:?}");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn retries_only_the_unreachable_local_address() {
+        use std::{cell::Cell, future::ready, io::Error, net::SocketAddr};
+
+        let local: SocketAddr = "10.0.0.1:22".parse().unwrap();
+        let refused: SocketAddr = "10.0.0.2:22".parse().unwrap();
+        let public: SocketAddr = "192.0.2.1:22".parse().unwrap();
+        let notice = Cell::new(0);
+        let mut attempts = Vec::new();
+        let result = connect_macos_tcp(
+            [local, refused, public],
+            |endpoint| {
+                let allowed = endpoint == local && attempts.contains(&local);
+                attempts.push(endpoint);
+                ready(if allowed {
+                    Ok(endpoint)
+                } else {
+                    Err(Error::from_raw_os_error(if endpoint == refused {
+                        libc::ECONNREFUSED
+                    } else {
+                        libc::EHOSTUNREACH
+                    }))
+                })
+            },
+            async { notice.set(notice.get() + 1) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, local);
+        assert_eq!(attempts, [local, refused, public, local]);
+        assert_eq!(notice.get(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unreachable_local_address_respects_the_connection_deadline() {
+        use std::{cell::Cell, future::ready, io::Error};
+
+        let attempts = Cell::new(0);
+        let result = tokio::time::timeout(
+            Duration::from_millis(20),
+            connect_macos_tcp(
+                ["[fd00::1]:22".parse().unwrap()],
+                |_| {
+                    attempts.set(attempts.get() + 1);
+                    ready(Err::<(), _>(Error::from_raw_os_error(libc::EHOSTUNREACH)))
+                },
+                async {},
+            ),
+        )
+        .await;
+        assert!(result.is_err());
+        assert_eq!(attempts.get(), 1);
     }
 
     #[test]

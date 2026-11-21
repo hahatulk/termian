@@ -179,7 +179,7 @@ async fn open_with_limit(state: &Shared, ip: std::net::IpAddr, passphrase: Strin
     let storage = state.clone();
     let (result, permit) = tokio::task::spawn_blocking(move || {
         let result = (|| -> Result<(Opened, Option<Vec<u8>>), &'static str> {
-            let Some(data) = crate::with_storage(&storage, current).map_err(|_| "storage")? else {
+            let Some(data) = crate::with_storage(&storage, |cfg| current(&panel_scope(cfg)?.scoped(cfg))).map_err(|_| "storage")? else {
                 return Ok((Opened::Missing, None));
             };
             let snapshot = open_envelope(&data, &passphrase)?;
@@ -255,6 +255,8 @@ async fn server_info(state: &Shared) -> Value {
 }
 
 fn server_info_at(state: &Shared, cfg: &crate::Config) -> Value {
+    let display = panel_scope(cfg).ok().map(|scope| scope.scoped(cfg));
+    let cfg = display.as_ref().unwrap_or(cfg);
     let snapshot = fs::metadata(snapshot_path(cfg)).ok();
     let mut revisions: Vec<(u64, u64)> = fs::read_dir(cfg.dir.join("revisions"))
         .map(|entries| {
@@ -411,54 +413,43 @@ async fn rotate_password(State(state): State<Shared>, peer: Peer, headers: Heade
     }
 }
 
+fn panel_scope(cfg: &crate::Config) -> std::io::Result<crate::Scope> {
+    let scopes = crate::storage_scopes(cfg)?;
+    for scope in scopes.iter().filter(|scope| **scope != crate::Scope::Catalog).chain(scopes.iter().filter(|scope| **scope == crate::Scope::Catalog)) {
+        match fs::metadata(snapshot_path(&scope.scoped(cfg))) {
+            Ok(_) => return Ok(scope.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(crate::Scope::Personal)
+}
+
 fn rotate(state: &Shared, request: &Rotation) -> Result<String, &'static str> {
-    use crate::{active_config, durable_replace, logs_dir, sync_directory, ACTIVE_STORAGE, GENERATION_PREFIX};
+    use crate::{active_config, durable_replace, logs_dir, storage_scopes, sync_directory, ACTIVE_STORAGE, GENERATION_PREFIX, WORKSPACES};
     let _guard = state.write_lock.lock().map_err(|_| "storage")?;
     let cfg = active_config(&state.cfg).map_err(|_| "storage")?;
-    let original = current(&cfg).map_err(|_| "storage")?.ok_or("missing")?;
+    let selected = panel_scope(&cfg).map_err(|_| "storage")?;
+    let original = current(&selected.scoped(&cfg)).map_err(|_| "storage")?.ok_or("missing")?;
     if crate::digest(&original) != request.revision {
         return Err("revision");
     }
-    let snapshot = reencrypt(&original, request, cfg.limit)?;
+
     let stage = tempfile::Builder::new().prefix(GENERATION_PREFIX)
         .tempdir_in(&state.cfg.dir).map_err(|_| "storage")?;
-    durable_replace(stage.path(), &stage.path().join("snapshot.bin"), &snapshot).map_err(|_| "storage")?;
-    let mut replaced_files = vec![snapshot_path(&cfg)];
-    let source_logs = logs_dir(&cfg);
-    if source_logs.is_dir() {
-        let dest = stage.path().join("logs");
-        fs::create_dir(&dest).map_err(|_| "storage")?;
-        for entry in fs::read_dir(&source_logs).map_err(|_| "storage")? {
-            let entry = entry.map_err(|_| "storage")?;
-            if !crate::valid_log_name(&entry.file_name().to_string_lossy()) {
-                continue;
-            }
-            let blob = fs::read(entry.path()).map_err(|_| "storage")?;
-            let encrypted = reencrypt(&blob, request, cfg.limit).map_err(|_| "log")?;
-            let path = dest.join(entry.file_name());
-            durable_replace(&dest, &path, &encrypted).map_err(|_| "storage")?;
-            preserve_modified(&entry, path).map_err(|_| "storage")?;
-            replaced_files.push(entry.path());
+    let staged_cfg = crate::Config { dir: stage.path().to_owned(), ..cfg.clone() };
+    let scopes = storage_scopes(&cfg).map_err(|_| "storage")?;
+    let mut replaced_files = Vec::new();
+    let mut revision = None;
+    for scope in &scopes {
+        let staged = stage_rotation(&scope.scoped(&cfg), &scope.scoped(&staged_cfg), request, &mut replaced_files)?;
+        if *scope == selected {
+            revision = staged;
         }
-        sync_directory(&dest).map_err(|_| "storage")?;
     }
-    let old_revisions = cfg.dir.join("revisions");
-    if old_revisions.is_dir() {
-        let dest = stage.path().join("revisions");
-        fs::create_dir(&dest).map_err(|_| "storage")?;
-        for entry in fs::read_dir(&old_revisions).map_err(|_| "storage")? {
-            let entry = entry.map_err(|_| "storage")?;
-            if entry.path().extension().is_some_and(|ext| ext == "snapshot") {
-                let path = dest.join(entry.file_name());
-                if !entry.file_type().map_err(|_| "storage")?.is_file() { return Err("storage"); }
-                let bytes = fs::read(entry.path()).map_err(|_| "storage")?;
-                durable_replace(&dest, &path, &bytes).map_err(|_| "storage")?;
-                if fs::read(&path).map_err(|_| "storage")? != bytes { return Err("storage"); }
-                preserve_modified(&entry, path).map_err(|_| "storage")?;
-                replaced_files.push(entry.path());
-            }
-        }
-        sync_directory(&dest).map_err(|_| "storage")?;
+    let revision = revision.ok_or("missing")?;
+    if stage.path().join(WORKSPACES).is_dir() {
+        sync_directory(&stage.path().join(WORKSPACES)).map_err(|_| "storage")?;
     }
     sync_directory(stage.path()).map_err(|_| "storage")?;
     sync_directory(&state.cfg.dir).map_err(|_| "storage")?;
@@ -470,16 +461,80 @@ fn rotate(state: &Shared, request: &Rotation) -> Result<String, &'static str> {
             eprintln!("Could not remove superseded encrypted data after password rotation");
         }
     }
-    for dir in [&source_logs, &old_revisions] {
-        if dir.is_dir() {
-            let _ = sync_directory(dir);
-            let _ = fs::remove_dir(dir);
+    for scope in scopes {
+        let old = scope.scoped(&cfg);
+        for dir in [logs_dir(&old), old.dir.join("revisions")] {
+            if dir.is_dir() {
+                let _ = sync_directory(&dir);
+                let _ = fs::remove_dir(dir);
+            }
+        }
+        let _ = sync_directory(&old.dir);
+        if scope != crate::Scope::Personal {
+            let _ = fs::remove_dir(&old.dir);
         }
     }
+    let _ = fs::remove_dir(cfg.dir.join(WORKSPACES));
     let _ = sync_directory(&cfg.dir);
     if cfg.dir != state.cfg.dir { let _ = fs::remove_dir(&cfg.dir); }
     let _ = sync_directory(&state.cfg.dir);
-    Ok(crate::digest(&snapshot))
+    Ok(revision)
+}
+
+fn stage_rotation(
+    cfg: &crate::Config,
+    dest: &crate::Config,
+    request: &Rotation,
+    replaced: &mut Vec<std::path::PathBuf>,
+) -> Result<Option<String>, &'static str> {
+    use crate::{durable_replace, logs_dir, sync_directory};
+    fs::create_dir_all(&dest.dir).map_err(|_| "storage")?;
+    let revision = if let Some(original) = current(cfg).map_err(|_| "storage")? {
+        let snapshot = reencrypt(&original, request, cfg.limit)?;
+        durable_replace(&dest.dir, &snapshot_path(dest), &snapshot).map_err(|_| "storage")?;
+        replaced.push(snapshot_path(cfg));
+        Some(crate::digest(&snapshot))
+    } else {
+        None
+    };
+    let source_logs = logs_dir(cfg);
+    if source_logs.is_dir() {
+        let dir = logs_dir(dest);
+        fs::create_dir(&dir).map_err(|_| "storage")?;
+        for entry in fs::read_dir(&source_logs).map_err(|_| "storage")? {
+            let entry = entry.map_err(|_| "storage")?;
+            if !crate::valid_log_name(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            let blob = fs::read(entry.path()).map_err(|_| "storage")?;
+            let encrypted = reencrypt(&blob, request, cfg.limit).map_err(|_| "log")?;
+            let path = dir.join(entry.file_name());
+            durable_replace(&dir, &path, &encrypted).map_err(|_| "storage")?;
+            preserve_modified(&entry, path).map_err(|_| "storage")?;
+            replaced.push(entry.path());
+        }
+        sync_directory(&dir).map_err(|_| "storage")?;
+    }
+    let old_revisions = cfg.dir.join("revisions");
+    if old_revisions.is_dir() {
+        let dir = dest.dir.join("revisions");
+        fs::create_dir(&dir).map_err(|_| "storage")?;
+        for entry in fs::read_dir(&old_revisions).map_err(|_| "storage")? {
+            let entry = entry.map_err(|_| "storage")?;
+            if entry.path().extension().is_some_and(|ext| ext == "snapshot") {
+                let path = dir.join(entry.file_name());
+                if !entry.file_type().map_err(|_| "storage")?.is_file() { return Err("storage"); }
+                let bytes = fs::read(entry.path()).map_err(|_| "storage")?;
+                durable_replace(&dir, &path, &bytes).map_err(|_| "storage")?;
+                if fs::read(&path).map_err(|_| "storage")? != bytes { return Err("storage"); }
+                preserve_modified(&entry, path).map_err(|_| "storage")?;
+                replaced.push(entry.path());
+            }
+        }
+        sync_directory(&dir).map_err(|_| "storage")?;
+    }
+    sync_directory(&dest.dir).map_err(|_| "storage")?;
+    Ok(revision)
 }
 
 fn preserve_modified(entry: &fs::DirEntry, path: std::path::PathBuf) -> std::io::Result<()> {

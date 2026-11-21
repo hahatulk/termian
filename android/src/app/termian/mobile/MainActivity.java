@@ -2,8 +2,10 @@ package app.termian.mobile;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ActivityNotFoundException;
 import android.content.ClipData;
 import android.content.ClipboardManager;
+import android.content.Intent;
 import android.content.res.Configuration;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
@@ -11,6 +13,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -49,6 +52,11 @@ public final class MainActivity extends Activity {
     private LinearLayout root, titleBar, body, hosts, console, drawerRows;
     private ScrollView drawerPanel;
     private TextView pageTitle;
+    private View drawerButton, settingsBack;
+    private MobileSettings settings;
+    private MobileThemes themePicker;
+    private String settingsReturn="vault", previewAction="";
+    private boolean rightClickPaste, bellSound;
     private LinearLayout hostEditor;
     private java.util.function.BooleanSupplier hostEdited;
     private int terminalBackground = TermianStyle.BAR;
@@ -59,8 +67,11 @@ public final class MainActivity extends Activity {
     TermianStyle style;
     private JSONArray tabs = new JSONArray();
     private String tabId = "", page = "vault", vaultName = "";
-    private boolean wide, locked;
-    private LinearLayout privacy;
+    private boolean wide, locked = true, promptOnStart;
+    private DeviceAuth deviceAuth;
+    private ScrollView privacy;
+    private TextView privacyHint;
+    private Button privacyAction;
     private TerminalView terminal, secondaryTerminal;
     private LinearLayout terminalSurface;
     private String secondaryId = "";
@@ -99,6 +110,8 @@ public final class MainActivity extends Activity {
         setRussian(getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false));
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         style = new TermianStyle(this);
+        deviceAuth = new DeviceAuth(this, state);
+        promptOnStart = state == null;
         appFrame = new FrameLayout(this);
         root = column();
         root.setBackgroundColor(BACKGROUND);
@@ -114,9 +127,28 @@ public final class MainActivity extends Activity {
             }
             return Build.VERSION.SDK_INT >= 30 ? WindowInsets.CONSUMED : insets.consumeSystemWindowInsets();
         });
+        showPrivacy();
         setContentView(appFrame);
         if (Build.VERSION.SDK_INT >= 33) getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
             android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT, this::back);
+    }
+
+    @Override protected void onSaveInstanceState(Bundle state) {
+        super.onSaveInstanceState(state);
+        deviceAuth.save(state);
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        if (!locked) return;
+        refreshPrivacy();
+        if (promptOnStart && deviceAuth.secure()) {
+            promptOnStart = false;
+            deviceAuth.request();
+        }
+    }
+
+    private void openVault() {
         File data = new File(getNoBackupFilesDir(), "termian");
         try {
             if (!data.isDirectory() && !data.mkdirs()) throw new java.io.IOException(text("Не удалось создать каталог Vault."));
@@ -128,7 +160,6 @@ public final class MainActivity extends Activity {
             opened = true;
             vaultName=result.optString("vaultName");
             build();
-            updates = new MobileUpdates(this);
         } catch (Exception e) {
             root.addView(label("Termian", 24, ACCENT));
             root.addView(label(text("Не удалось открыть Vault. Данные не были сброшены."), 16, MUTED));
@@ -138,7 +169,7 @@ public final class MainActivity extends Activity {
     @Override public void onStart() {
         super.onStart();
         visible = true;
-        if (opened) handler.post(poll);
+        resumePolling();
         if (updates != null) updates.start();
     }
 
@@ -150,6 +181,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public void onDestroy() {
+        deviceAuth.cancelBiometric();
         handler.removeCallbacksAndMessages(null);
         if (question != null) question.dismiss();
         if (updates != null) updates.close();
@@ -211,7 +243,10 @@ public final class MainActivity extends Activity {
         titleBar.setBackgroundColor(TermianStyle.BAR);
         root.addView(titleBar,new LinearLayout.LayoutParams(-1,dp(56)));
 
-        titleBar.addView(style.iconAction("menu",text("Open navigation menu"),this::openDrawer));
+        drawerButton=style.iconAction("menu",text("Open navigation menu"),this::openDrawer);
+        settingsBack=style.iconAction("arrow_left",text("Back"),this::back);
+        titleBar.addView(drawerButton);
+        titleBar.addView(settingsBack);
         pageTitle=style.text("",16,TermianStyle.TEXT,500);
         pageTitle.setSingleLine(true);
         pageTitle.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -233,8 +268,7 @@ public final class MainActivity extends Activity {
 
         terminal=new TerminalView(this);
         secondaryTerminal=new TerminalView(this);
-        JSONObject settings=call("vault").optJSONObject("terminal");
-        if (settings!=null) applyTerminalFont(settings.optInt("font",14));
+        applyTerminalSettings(call("terminalSettings"));
         terminalSurface=new LinearLayout(this);
         console.addView(terminalSurface,new LinearLayout.LayoutParams(-1,0,1));
         arrangeTerminals();
@@ -255,6 +289,8 @@ public final class MainActivity extends Activity {
 
         vault=new MobileVault(this);
         files=new MobileFiles(this);
+        updates=new MobileUpdates(this);
+        settings=new MobileSettings(this,updates);
         redrawHosts();
         redrawNavigation();
         arrange();
@@ -262,7 +298,9 @@ public final class MainActivity extends Activity {
 
     private void arrange() {
         body.removeAllViews();
-        if (page.equals("terminal")) {
+        if (page.equals("settings")) {
+            body.addView(settings.view(),new LinearLayout.LayoutParams(-1,-1));
+        } else if (page.equals("terminal")) {
             arrangeTerminals();
             body.addView(console,new LinearLayout.LayoutParams(-1,-1));
         } else if (page.equals("sftp")) {
@@ -297,6 +335,8 @@ public final class MainActivity extends Activity {
 
     void page(String value) {
         closeDrawer();
+        if (page.equals("settings") && !value.equals("settings")) updates.detach();
+        if (page.equals("sftp") && !value.equals("sftp")) files.closePreview();
         if (!value.equals("terminal")) ime().hideSoftInputFromWindow(root.getWindowToken(),0);
         page=value;
         redrawHosts();
@@ -308,7 +348,10 @@ public final class MainActivity extends Activity {
         int bar=page.equals("terminal") ? terminalBackground : TermianStyle.BAR;
         titleBar.setBackgroundColor(bar);
         console.setBackgroundColor(bar);
-        String title=page.equals("sftp") ? "SFTP" : page.equals("new") ? text("New Tab") : vault.sectionTitle();
+        boolean inSettings=page.equals("settings");
+        drawerButton.setVisibility(inSettings ? View.GONE : View.VISIBLE);
+        settingsBack.setVisibility(inSettings ? View.VISIBLE : View.GONE);
+        String title=inSettings ? settings.title() : page.equals("sftp") ? "SFTP" : page.equals("new") ? text("New Tab") : vault.sectionTitle();
         if(page.equals("terminal")) {
             title=text("Terminal");
             for(int i=0;i<tabs.length();i++) {
@@ -374,12 +417,21 @@ public final class MainActivity extends Activity {
         header.addView(label("Termian",20,ACCENT),new LinearLayout.LayoutParams(0,-2,1));
         header.addView(style.iconAction("close",text("Close navigation menu"),this::closeDrawer));
         drawerRows.addView(header);
-        drawerRows.addView(label(text("Vaults"),12,MUTED));
+        JSONArray entries=settings.appItems();
+        for (int i=0;i<entries.length();i++) {
+            JSONObject item=entries.optJSONObject(i);
+            String title=text(item.optString("title"));
+            switch (item.optString("id")) {
+                case "settings": drawerEntry(drawerRows,"dots",title,false,this::openSettings,null); break;
+                case "vaults": drawerEntry(drawerRows,"vaults",title,page.equals("vault"),() -> page("vault"),null); break;
+                case "sftp": drawerEntry(drawerRows,"sftp",title,page.equals("sftp"),() -> page("sftp"),null); break;
+                case "quit": drawerEntry(drawerRows,"close",title,false,this::quit,null); break;
+            }
+        }
+        drawerRows.addView(label(text("Vault"),12,MUTED));
         drawerEntry(drawerRows,"vaults",vaultName,false,this::switchVault,null);
         vault.addSections(drawerRows,page.equals("vault"));
-        drawerEntry(drawerRows,"sftp","SFTP",page.equals("sftp"),() -> page("sftp"),null);
-
-        drawerRows.addView(label("Sessions",12,MUTED));
+        drawerRows.addView(label(text("Sessions"),12,MUTED));
         drawerEntry(drawerRows,"plus",text("New Tab"),page.equals("new"),this::newLauncher,null);
         drawerEntry(drawerRows,"terminal",text("Local Terminal"),false,this::localTerminal,null);
         for(int i=0;i<tabs.length();i++) {
@@ -390,10 +442,9 @@ public final class MainActivity extends Activity {
                 () -> selectTab(id),() -> closeTab(id));
         }
 
-        drawerRows.addView(label("Application",12,MUTED));
+        drawerRows.addView(label(text("Application"),12,MUTED));
         drawerEntry(drawerRows,"cloud_sync",text("Sync"),false,this::cloudMenu,null);
         drawerEntry(drawerRows,"privacy_lock",text("Lock"),false,this::lock,null);
-        drawerEntry(drawerRows,"dots",text("Settings"),false,this::appMenu,null);
         if(offset>0) {
             ScrollView panel=drawerPanel;
             panel.post(() -> { if(panel==drawerPanel) panel.scrollTo(0,offset); });
@@ -465,6 +516,7 @@ public final class MainActivity extends Activity {
         terminal.clear();
         secondaryTerminal.clear();
         vault=new MobileVault(this);
+        applyTerminalSettings(call("terminalSettings"));
         files.refreshChooser();
         page("vault");
         return true;
@@ -536,7 +588,28 @@ public final class MainActivity extends Activity {
 
     void openFiles(JSONObject host) { files.open(host); }
 
-    void applyTerminalFont(int size) { terminal.font(size); secondaryTerminal.font(size); }
+    MobileThemes themes() {
+        if (themePicker==null) themePicker=new MobileThemes(this);
+        return themePicker;
+    }
+
+    void applyTerminalSettings(JSONObject state) {
+        if (state.has("error")) return;
+        int size=state.optInt("font",14);
+        terminal.font(size);
+        secondaryTerminal.font(size);
+        rightClickPaste=state.optBoolean("rightClickPaste");
+        bellSound=state.optBoolean("bellSound");
+    }
+
+    boolean pasteByMouse(String id) {
+        if (!rightClickPaste || id.isEmpty()) return false;
+        if (!id.equals(tabId)) focusPane(id);
+        paste();
+        return true;
+    }
+
+    void sftpSettings(LinearLayout card) { files.settings(card); }
 
     void localTerminal() { useTab(call("local")); }
 
@@ -612,8 +685,17 @@ public final class MainActivity extends Activity {
     @Override public void onBackPressed() { back(); }
 
     private void back() {
-        if (locked) return;
+        if (locked) {
+            if (!opened) finish();
+            return;
+        }
         if(drawer!=null) { closeDrawer(); return; }
+        if (opened && page.equals("sftp") && files.closePreview()) return;
+        if (opened && page.equals("settings")) {
+            if (settings.back()) renderSettings();
+            else page(settingsReturn);
+            return;
+        }
         if (opened && page.equals("vault") && hostEditor!=null) confirmDiscard(this::closeHostEditor);
         else if (opened && !page.equals("vault")) page("vault");
         else if (opened && vault.back()) return;
@@ -630,13 +712,13 @@ public final class MainActivity extends Activity {
     }
 
     void typed(String value) {
-        if (!ready || value.isEmpty()) return;
+        if (locked || !ready || value.isEmpty()) return;
         if (control && value.codePointCount(0, value.length()) == 1) key(value, value, false, false, false);
         else call("text", "value", value);
     }
 
     void key(String key, String typed, boolean ctrl, boolean alt, boolean shift) {
-        if (!ready) return;
+        if (locked || !ready) return;
         call("key", "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
         if(control) setControl(false);
     }
@@ -656,10 +738,14 @@ public final class MainActivity extends Activity {
         if (text != null && text.length() <= 262144) call("paste", "value", text.toString());
     }
 
+    private void resumePolling() {
+        handler.removeCallbacks(poll);
+        if (visible && opened && !locked) handler.post(poll);
+    }
+
     private final Runnable poll = new Runnable() {
         @Override public void run() {
-            if (!visible || !opened) return;
-            if (locked) { handler.postDelayed(this,150); return; }
+            if (!visible || !opened || locked) return;
             if (active || syncing || files.polling || vault.forwarding) {
                 JSONObject info = call("poll");
                 JSONArray now = info.optJSONArray("tabs");
@@ -676,6 +762,8 @@ public final class MainActivity extends Activity {
                 JSONObject frame = info.optJSONObject("frame");
                 if (frame != null) {
                     terminal.frame(frame);
+                    if (bellSound && page.equals("terminal") && frame.optBoolean("bell"))
+                        terminal.playSoundEffect(android.view.SoundEffectConstants.CLICK);
                     int bg=0xff000000 | frame.optInt("bg",TermianStyle.BAR);
                     if(bg!=terminalBackground) {
                         terminalBackground=bg;
@@ -683,7 +771,11 @@ public final class MainActivity extends Activity {
                     }
                 }
                 JSONObject companion = info.optJSONObject("secondaryFrame");
-                if (companion != null) secondaryTerminal.frame(companion);
+                if (companion != null) {
+                    secondaryTerminal.frame(companion);
+                    if (bellSound && page.equals("terminal") && companion.optBoolean("bell"))
+                        secondaryTerminal.playSoundEffect(android.view.SoundEffectConstants.CLICK);
+                }
                 JSONArray events = info.optJSONArray("events");
                 if (events != null)
                     for (int i = 0; i < events.length(); i++) handle(events.optJSONObject(i), "answer", tabId);
@@ -885,12 +977,17 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
+        String originalTheme=host==null ? "" : fieldValue(host,"theme");
+        LinearLayout appearance=editorCard(form,text("Terminal theme"));
+        MobileThemes.Choice theme=themes().new Choice(originalTheme,call("terminalSettings").optString("theme"),nameValue -> true);
+        appearance.addView(theme);
         String originalAddress=value(address), originalName=value(name), originalPort=value(port), originalTags=value(tags), originalUser=value(user);
         String originalGroup=MobileVault.choice(group), originalIdentity=MobileVault.choice(identity), originalKey=MobileVault.choice(key);
         hostEdited=() -> !value(address).equals(originalAddress) || !value(name).equals(originalName) ||
             !value(port).equals(originalPort) || !value(tags).equals(originalTags) || !value(user).equals(originalUser) ||
             !MobileVault.choice(group).equals(originalGroup) || !MobileVault.choice(identity).equals(originalIdentity) ||
-            !MobileVault.choice(key).equals(originalKey) || password.length()!=0 || clear!=null && clear.isChecked();
+            !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) ||
+            password.length()!=0 || clear!=null && clear.isChecked();
         pane.addView(scroll(form),new LinearLayout.LayoutParams(-1,0,1));
 
         LinearLayout footer=new LinearLayout(this);
@@ -903,7 +1000,8 @@ public final class MainActivity extends Activity {
             JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
                 "port",value(port),"user",value(user),"password",value(password),
                 "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
-                "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags));
+                "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
+                "theme",theme.value().equals(originalTheme) ? null : theme.value());
             if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
             updateHosts(result);
         }));
@@ -922,13 +1020,32 @@ public final class MainActivity extends Activity {
         }).show();
     }
 
+    void editCloudSettings() {
+        if (syncing) toast(text("Cloud operation in progress."));
+        else cloudSettings(call("cloud"));
+    }
+
+    void cloudAction(String operation) {
+        if (syncing) { toast(text("Cloud operation in progress.")); return; }
+        allowNetwork(() -> {
+            previewAction=operation.startsWith("force") ? operation : "";
+            cloudOperation(previewAction.isEmpty() ? operation : "cloudPreview");
+        });
+    }
+
     private void cloudOperation(String operation) {
+        if (syncing) { toast(text("Cloud operation in progress.")); return; }
         JSONObject result = call(operation);
-        if (result.has("error")) toast(result.optString("error"));
+        if (result.has("error")) {
+            if (operation.equals("cloudPreview")) previewAction="";
+            toast(result.optString("error"));
+        }
         else { syncing = true; toast(operation.equals("cloudPreview") ? text("Checking changes…") : text("Sync in progress…")); }
     }
 
     private void showCloudPreview(JSONObject result) {
+        String requested=previewAction;
+        previewAction="";
         if (result.has("error")) {
             new AlertDialog.Builder(this).setTitle(text("Sync")).setMessage(result.optString("error"))
                 .setNegativeButton(text("Close"),null).setPositiveButton(text("Check again"),(d,w) -> cloudOperation("cloudPreview")).show();
@@ -937,6 +1054,10 @@ public final class MainActivity extends Activity {
         StringBuilder summary = new StringBuilder(result.optString("message"));
         JSONArray changes = result.optJSONArray("changes");
         if (changes != null) for (int i = 0; i < changes.length(); i++) summary.append("\n").append(changes.optString(i));
+        if (!requested.isEmpty() && result.optBoolean(requested.equals("forceUpload") ? "canUpload" : "canDownload")) {
+            confirmCloudReplacement(requested,summary.toString());
+            return;
+        }
         java.util.ArrayList<String> labels = new java.util.ArrayList<>();
         labels.add(text("Sync")); labels.add(text("Check again"));
         if (result.optBoolean("canUpload")) labels.add(text("Force upload"));
@@ -947,12 +1068,17 @@ public final class MainActivity extends Activity {
                 .setItems(labels.toArray(new String[0]),(x,y) -> {
                     String action = labels.get(y);
                     if (y < 2) cloudOperation(y == 0 ? "sync" : "cloudPreview");
-                    else new AlertDialog.Builder(this).setTitle(action + "?")
-                        .setMessage(action.equals(text("Force upload")) ? text("Replace the cloud snapshot with this device's Vault?")
-                            : text("Back up this device's Vault and replace its synced records with the cloud snapshot?"))
-                        .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Confirm"),(g,h) ->
-                            cloudOperation(action.equals(text("Force upload")) ? "forceUpload" : "forceDownload")).show();
+                    else confirmCloudReplacement(action.equals(text("Force upload")) ? "forceUpload" : "forceDownload", "");
                 }).show()).show();
+    }
+
+    private void confirmCloudReplacement(String operation, String summary) {
+        boolean upload=operation.equals("forceUpload");
+        String warning=text(upload ? "Replace the cloud snapshot with this device's Vault?"
+            : "Back up this device's Vault and replace its synced records with the cloud snapshot?");
+        new AlertDialog.Builder(this).setTitle(text(upload ? "Force upload" : "Force download"))
+            .setMessage(summary.isEmpty() ? warning : summary + "\n\n" + warning)
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Confirm"),(d,w) -> cloudOperation(operation)).show();
     }
 
     private void cloudSettings(JSONObject config) {
@@ -975,12 +1101,13 @@ public final class MainActivity extends Activity {
                 secret.getText().clear();
                 password.getText().clear();
                 dialog.dismiss();
+                renderSettings();
             }
         });
     }
-    @Override protected void onActivityResult(int request, int result, android.content.Intent data) {
+    @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request,result,data);
-        if (files != null) files.result(request,result,data);
+        if (!deviceAuth.result(request,result) && files != null) files.result(request,result,data);
     }
 
     void runSnippet(JSONObject snippet) {
@@ -991,93 +1118,156 @@ public final class MainActivity extends Activity {
 
     void refreshVault() { redrawHosts(); }
 
-    private void appMenu() {
-        String[] options=widthDp<380 ? new String[]{text("Sync"),text("Lock"),text("Settings")} : new String[]{text("Settings")};
-        new AlertDialog.Builder(this).setItems(options,(d,index) -> {
-            switch(options[index]) {
-                case "Sync": cloudMenu();break;
-                case "Lock": lock();break;
-                default: settings();break;
-            }
-        }).show();
+    private void openSettings() {
+        if (page.equals("settings")) return;
+        settingsReturn=page;
+        settings.open();
+        page("settings");
     }
 
-    private void settings() {
-        JSONObject state = call("vault");
-        new AlertDialog.Builder(this).setTitle(text("Settings")).setItems(new String[]{
-            text("Self-hosted cloud"), text("Terminal"), text("Session logging"), text("Clear logs"), text("Privacy password"), text("Version"), text("Language")
-        }, (d,i) -> {
-            if (i == 0) cloudSettings(call("cloud"));
-            if (i == 1) vault.terminalSettings(state.optJSONObject("terminal"));
-            if (i == 2) {
-                boolean enabled = state.optBoolean("logsEnabled");
-                new AlertDialog.Builder(this).setMessage(enabled ? text("Stop recording session logs?") : text("Record upcoming sessions?"))
-                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Apply"),(a,b) -> updateHosts(call("logsEnabled","enabled",!enabled))).show();
-            }
-            if (i == 3) new AlertDialog.Builder(this).setTitle(text("Clear logs")).setItems(new String[]{text("Last hour"),text("Last day"),text("Last week"),text("All")},(a,b) ->
-                new AlertDialog.Builder(this).setMessage(text("Delete session logs for this period?"))
-                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Delete"),(x,y) -> {
-                        JSONObject res = call("clearLogs","hours",new int[]{1,24,168,0}[b]);
-                        toast(res.optString(res.has("error") ? "error" : "message"));
-                        redrawHosts();
-                    }).show()).show();
-            if (i == 4) privacyPassword(false);
-            if (i == 5) updates.show();
-            if (i == 6) languageSettings();
-        }).show();
+    void renderSettings() {
+        if (!page.equals("settings")) return;
+        redrawNavigation();
+        arrange();
     }
 
-    private void languageSettings() {
-        boolean russian=getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false);
-        new AlertDialog.Builder(this).setTitle(text("Language"))
-            .setSingleChoiceItems(new String[]{"English","Русский"},russian ? 1 : 0,(dialog,index) -> {
-                boolean selected=index==1;
-                getPreferences(MODE_PRIVATE).edit().putBoolean("ui:russian",selected).apply();
-                setRussian(selected);
-                vaultName=call("vaultList").optString("vaultName",vaultName);
-                dialog.dismiss();
-                redrawHosts();
-                redrawNavigation();
-            }).setNegativeButton(text("Close"),null).show();
+    void setLanguage(boolean russian) {
+        if (getPreferences(MODE_PRIVATE).getBoolean("ui:russian",false)==russian) return;
+        getPreferences(MODE_PRIVATE).edit().putBoolean("ui:russian",russian).apply();
+        setRussian(russian);
+        vaultName=call("vaultList").optString("vaultName",vaultName);
+        drawerButton.setContentDescription(text("Open navigation menu"));
+        settingsBack.setContentDescription(text("Back"));
+        renderSettings();
     }
 
-    private void privacyPassword(boolean thenLock) {
-        LinearLayout form = column();
-        boolean set = call("vault").optBoolean("privacyConfigured");
-        EditText current = set ? field(form,text("Current password"),"",PASSWORD) : null;
-        EditText password = field(form,text("Lock password"),"",PASSWORD);
-        AlertDialog dialog = new AlertDialog.Builder(this).setTitle(text("Privacy lock")).setView(form)
-            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Save"),null).show();
-        dialog.getButton(-1).setOnClickListener(v -> {
-            JSONObject r = call("savePrivacy","password",value(password),"current",current == null ? "" : value(current));
-            if (r.has("error")) toast(r.optString("error"));
-            else { dialog.dismiss(); if (thenLock) lock(); }
-        });
+    private void quit() {
+        if (files.documentOperation()) { toast(text("Finish the current file operation first.")); return; }
+        if (syncing) { toast(text("Cloud operation in progress.")); return; }
+        confirmDiscard(() -> new AlertDialog.Builder(this).setTitle(text("Quit Termian"))
+            .setMessage(text("Close all sessions and quit Termian?"))
+            .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Quit Termian"),(d,w) -> finishAndRemoveTask()).show());
+    }
+
+    @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        if (opened && settings!=null && !locked && drawer==null && !page.equals("settings")
+            && !(getCurrentFocus() instanceof EditText) && event.getAction()==android.view.KeyEvent.ACTION_DOWN) {
+            String action=settings.shortcut(event);
+            if (!action.isEmpty() && runShortcut(action,event.getRepeatCount()==0)) return true;
+        }
+        return super.dispatchKeyEvent(event);
+    }
+
+    private boolean runShortcut(String action, boolean run) {
+        boolean current=page.equals("terminal") && !tabId.isEmpty();
+        switch (action) {
+            case "pasteToTerminal": if (!current) return false; if (run) paste(); return true;
+            case "localTerminal": if (run) localTerminal(); return true;
+            case "close": if (!current) return false; if (run) closeTab(tabId); return true;
+            case "bottom": case "top":
+                if (tabs.length()==0) return false;
+                if (run) cycleTerminal(action.equals("bottom") ? 1 : -1);
+                return true;
+            case "forwarding": if (run) vault.openSection("Port Forwarding"); return true;
+            case "newTab": if (run) newLauncher(); return true;
+            case "toggleSplitViewBroadcastMode":
+                if (!current || secondaryId.isEmpty()) return false;
+                if (run) useTab(call("broadcast","enabled",!broadcasting));
+                return true;
+            case "snippets": if (run) vault.openSection("Snippets"); return true;
+            default: return false;
+        }
+    }
+
+    private void cycleTerminal(int step) {
+        int current=-1;
+        for (int i=0;i<tabs.length();i++) if (tabId.equals(tabs.optJSONObject(i).optString("id"))) current=i;
+        int index=current<0 ? (step>0 ? 0 : tabs.length()-1) : (current+step+tabs.length())%tabs.length();
+        selectTab(tabs.optJSONObject(index).optString("id"));
     }
 
     boolean privacyLocked() { return locked; }
 
-    private void lock() {
-        if (updates != null) updates.dismiss();
-        if (!call("vault").optBoolean("privacyConfigured")) { privacyPassword(true); return; }
-        dismissQuestion();
+    void lock() {
+        if (!opened || locked) return;
         locked = true;
-        privacy = column();
-        privacy.setGravity(Gravity.CENTER);
+        handler.removeCallbacks(poll);
+        updates.detach();
+        dismissQuestion();
+        closeDrawer();
+        ime().hideSoftInputFromWindow(root.getWindowToken(), 0);
+        showPrivacy();
+    }
+
+    private void showPrivacy() {
+        root.setVisibility(View.GONE);
+        privacy = new ScrollView(this);
         privacy.setBackgroundColor(BACKGROUND);
-        privacy.setPadding(dp(30), dp(24), dp(30), dp(24));
-        privacy.addView(style.icon("privacy_lock",ACCENT), new LinearLayout.LayoutParams(dp(42),dp(42)));
-        privacy.addView(label(text("Termian is locked"),24,TermianStyle.TEXT));
-        EditText password = field(privacy,text("Password"),"",PASSWORD);
-        privacy.addView(button(text("Unlock"),() -> {
-            JSONObject r = call("unlock","password",value(password));
-            if (r.has("error")) { toast(r.optString("error")); return; }
-            locked = false;
-            setContentView(appFrame);
-            if (!tabId.isEmpty()) useTab(call("selectTab","id",tabId));
+        privacy.setFillViewport(true);
+        LinearLayout panel = column();
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(dp(24), dp(24), dp(24), dp(24));
+        panel.addView(style.icon("privacy_lock", ACCENT), new LinearLayout.LayoutParams(dp(42), dp(42)));
+        TextView title = label(text("Termian is locked"), 24, TermianStyle.TEXT);
+        title.setGravity(Gravity.CENTER);
+        panel.addView(title);
+        privacyHint = label("", 16, MUTED);
+        privacyHint.setGravity(Gravity.CENTER);
+        panel.addView(privacyHint);
+        privacyAction = button(text("Unlock"), this::requestAuthentication);
+        style.action(privacyAction, TermianStyle.ACTIVE);
+        privacyAction.setMinWidth(dp(160));
+        panel.addView(privacyAction, new LinearLayout.LayoutParams(-2, -2));
+        privacy.addView(panel, new ScrollView.LayoutParams(-1, -2));
+        appFrame.addView(privacy, new FrameLayout.LayoutParams(-1, -1));
+        refreshPrivacy();
+    }
+
+    private void refreshPrivacy() {
+        boolean secure = deviceAuth.secure();
+        privacyHint.setText(text(secure ? "Confirm with Android to continue." : "Set up a screen lock in Android to open Termian."));
+        privacyAction.setText(text(secure ? "Unlock" : "Open Android security settings"));
+    }
+
+    private void requestAuthentication() {
+        if (deviceAuth.secure()) {
+            promptOnStart = false;
+            deviceAuth.request();
+        } else {
+            try {
+                startActivity(new Intent(Settings.ACTION_SECURITY_SETTINGS));
+            } catch (ActivityNotFoundException | SecurityException e) {
+                toast(text("Android could not open the security settings."));
+            }
+        }
+    }
+
+    void authenticationUnavailable() {
+        if (!locked || isFinishing() || isDestroyed()) return;
+        refreshPrivacy();
+        toast(text("Authentication did not complete."));
+    }
+
+    void deviceAuthenticated() {
+        if (!locked || isFinishing() || isDestroyed()) return;
+        if (!deviceAuth.secure()) {
+            authenticationUnavailable();
+            return;
+        }
+        locked = false;
+        appFrame.removeView(privacy);
+        privacy = null;
+        privacyHint = null;
+        privacyAction = null;
+        root.setVisibility(View.VISIBLE);
+        if (!opened) {
+            openVault();
+            if (visible && updates != null) updates.start();
+        } else {
             redrawHosts();
-        }));
-        setContentView(privacy);
+            renderSettings();
+        }
+        resumePolling();
     }
 
 }
