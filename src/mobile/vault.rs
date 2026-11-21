@@ -413,14 +413,17 @@ impl App {
                 v.remove_log_bookmark(id()?);
             }
             "logsEnabled" => {
-                v.logs_disabled = args["enabled"] != true;
-                if v.logs_disabled {
+                let disabled = args["enabled"] != true;
+                self.vaults.update_settings(&mut self.vault, |vault| vault.logs_disabled = disabled)?;
+                if disabled {
                     for c in self.sessions.values_mut() {
                         if let Some(log) = c.log.take() {
                             log.finish();
                         }
                     }
                 }
+                self.ticket = None;
+                return Ok(self.lists());
             }
             "clearLogs" => {
                 if self.sessions.values().any(|c| c.log.is_some()) {

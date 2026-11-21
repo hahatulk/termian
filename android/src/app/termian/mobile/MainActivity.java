@@ -968,7 +968,22 @@ public final class MainActivity extends Activity {
         LinearLayout general=editorCard(form,text("General"));
         EditText name=field(general,text("Label"),host==null ? "" : host.optString("label"),InputType.TYPE_CLASS_TEXT);
         JSONObject data=call("vault");
-        android.widget.Spinner group=vault.pick(general,text("Parent Group"),data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
+        JSONObject vaultInfo=host==null ? new JSONObject() : call("vaultList");
+        String sourceVault=vaultInfo.optString("selected");
+        JSONArray entries=vaultInfo.optJSONArray("entries");
+        android.widget.Spinner destination=entries==null || entries.length()==0 ? null
+            : vault.pick(general,text("Vault"),entries,sourceVault,false);
+        if(destination==null) general.addView(label(text("Vault")+": "+vaultName,14,MUTED));
+        else destination.setEnabled(entries.length()>1);
+        LinearLayout groupRow=column();
+        general.addView(groupRow);
+        android.widget.Spinner group=vault.pick(groupRow,text("Parent Group"),data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
+        if(destination!=null) destination.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long selected) {
+                groupRow.setVisibility(MobileVault.choice(destination).equals(sourceVault) ? View.VISIBLE : View.GONE);
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
         EditText tags=field(general,text("Tags (comma-separated)"),host==null ? "" : MobileVault.joinTags(host.optJSONArray("tags")),InputType.TYPE_CLASS_TEXT);
         LinearLayout ssh=editorCard(form,"SSH");
         EditText port=field(ssh,text("Port"),host==null ? "22" : String.valueOf(host.optInt("port")),InputType.TYPE_CLASS_NUMBER);
@@ -997,6 +1012,7 @@ public final class MainActivity extends Activity {
             !value(port).equals(originalPort) || !value(tags).equals(originalTags) || !value(user).equals(originalUser) ||
             !MobileVault.choice(group).equals(originalGroup) || !MobileVault.choice(identity).equals(originalIdentity) ||
             !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) ||
+            (destination!=null && !MobileVault.choice(destination).equals(sourceVault)) ||
             password.length()!=0 || clear!=null && clear.isChecked();
         pane.addView(scroll(form),new LinearLayout.LayoutParams(-1,0,1));
 
@@ -1007,13 +1023,25 @@ public final class MainActivity extends Activity {
         footer.addView(button(text("Cancel"),() -> confirmDiscard(this::closeHostEditor)));
         footer.addView(style.tool("check",text("Save"),TermianStyle.GREEN,() -> {
             if(value(address).trim().isEmpty()) {address.setError(text("Enter a host address"));address.requestFocus();return;}
-            JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
-                "port",value(port),"user",value(user),"password",value(password),
-                "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
-                "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
-                "theme",theme.value().equals(originalTheme) ? null : theme.value());
-            if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
-            updateHosts(result);
+            String target=destination==null ? sourceVault : MobileVault.choice(destination);
+            boolean move=!target.equals(sourceVault);
+            Runnable save=() -> {
+                if(hostEditor!=pane || locked) return;
+                JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
+                    "port",value(port),"user",value(user),"password",value(password),
+                    "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
+                    "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
+                    "theme",theme.value().equals(originalTheme) ? null : theme.value(),
+                    "destinationVault",move ? target : null);
+                if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
+                updateHosts(result);
+            };
+            if(move) {
+                String question=text("Move this host to {vault}?").replace("{vault}",destination.getSelectedItem().toString());
+                new AlertDialog.Builder(this).setTitle(question)
+                    .setMessage(text("The host moves to the top level of the destination Vault. Saved credentials and the startup command are copied if needed. Logs and host trust stay in the source Vault. Rules, snippet targets, and workspace panes in that Vault will no longer use this host."))
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Move host"),(d,w) -> save.run()).show();
+            } else save.run();
         }));
         pane.addView(footer,new LinearLayout.LayoutParams(-1,dp(56)));
         if(!page.equals("vault")) page("vault"); else arrange();

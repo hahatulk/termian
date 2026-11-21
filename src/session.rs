@@ -365,7 +365,7 @@ impl Default for SshOptions {
 impl SshOptions {
     pub fn from_vault(vault: &crate::vault::Vault) -> Self {
         let terminal = &vault.terminal;
-        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false, ..Self::default() }
+        Self { term: terminal.emulation().to_owned(), keepalive: terminal.keep_alive, pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false, ..Self::default() }
     }
 
     /// Key exchanges to offer: russh's order, without the hybrid

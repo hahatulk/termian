@@ -26,7 +26,7 @@ use crate::{
     store::Store,
     terminal::{self, Modifiers, Terminal},
     vault::{Host, Vault},
-    vault_set::{Destination, VaultSet},
+    vault_set::{AppSettings, Destination, VaultSet},
 };
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
@@ -213,11 +213,14 @@ impl App {
             .ok()
             .filter(|p| *p > 0)
             .ok_or("Порт должен быть от 1 до 65535.")?;
-        let mut vault = self.vault.clone();
         let id = text(args, "id");
+        let destination = match args["destinationVault"].as_str() {
+            Some(value) => Some(value.parse::<uuid::Uuid>().map_err(|_| crate::language::text("Vault not found."))?),
+            None => None,
+        }.filter(|dest| *dest != self.vaults.selected());
         let mut h = if id.is_empty() {
             Host {
-                id: vault.next_id(),
+                id: self.vault.next_id(),
                 label: String::new(),
                 address: String::new(),
                 os: None,
@@ -231,7 +234,7 @@ impl App {
                 settings: Default::default(),
             }
         } else {
-            vault
+            self.vault
                 .host(id.parse().map_err(|_| "Некорректный хост.")?)
                 .cloned()
                 .ok_or("Хост не найден.")?
@@ -248,7 +251,7 @@ impl App {
             h.identity = vault::optional_id(args, "identity")?;
         }
         if let Some(identity) = h.identity {
-            if vault.identity(identity).is_none() {
+            if self.vault.identity(identity).is_none() {
                 return Err("Identity not found.".into());
             }
         }
@@ -287,7 +290,14 @@ impl App {
         } else {
             false
         };
+        if let Some(destination) = destination {
+            self.ticket = None;
+            self.vaults.move_host(&mut self.vault, h, destination)?;
+            return Ok(json!({"hosts":self.hosts(), "moved":true}));
+        }
+
         let id = h.id.to_string();
+        let mut vault = self.vault.clone();
         vault.save_host(h);
         self.save(vault)?;
         if theme_changed {
@@ -515,6 +525,7 @@ impl App {
             match response.and_then(|(vaults, mut vault, result)| {
                 self.vaults = vaults;
                 let message = result?;
+                AppSettings::from_vault(&self.vault).apply(&mut vault);
                 for old in &self.vault.history {
                     if let Some(row) = vault.history_entry_mut(old.id).filter(|row| row.log == old.log) {
                         row.disconnected_at = old.disconnected_at;

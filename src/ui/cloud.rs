@@ -13,6 +13,7 @@ use termian_native::log_backup;
 use termian_native::self_cloud::{self, ConfigChanges, Header, Preview, Status};
 use termian_native::theme;
 use termian_native::vault::Vault;
+use termian_native::vault_set::AppSettings;
 
 use super::assets::icon;
 use super::dialog::Key;
@@ -262,13 +263,10 @@ fn configured(vault: &Vault) -> bool {
 /// on it; then the old merge base stays and the next sync carries both the
 /// edit and what came from the cloud.
 fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
-    let edited = Vault {
-        history: Vec::new(),
-        update_channel: started.update_channel,
-        update_schedule: started.update_schedule,
-        language: started.language,
-        ..live.clone()
-    } != Vault { history: Vec::new(), ..started.clone() };
+    let mut before = Vault { history: Vec::new(), ..started.clone() };
+    let current = Vault { history: Vec::new(), ..live.clone() };
+    AppSettings::from_vault(live).apply(&mut before);
+    let edited = current != before;
     if edited || !live.history.iter().filter(|entry| entry.log.is_some())
         .eq(started.history.iter().filter(|entry| entry.log.is_some())) {
         return false;
@@ -284,9 +282,7 @@ fn adopt(live: &mut Vault, started: &Vault, mut synced: Vault) -> bool {
         synced.history.push(entry);
     }
     synced.history.sort_by_key(|entry| std::cmp::Reverse((entry.connected_at, entry.id)));
-    synced.update_channel = live.update_channel;
-    synced.update_schedule = live.update_schedule;
-    synced.language = live.language;
+    AppSettings::from_vault(live).apply(&mut synced);
     *live = synced;
     true
 }
@@ -1135,10 +1131,18 @@ mod tests {
             update_schedule: schedule,
             ..Vault::default()
         };
-        let synced = Vault { hosts: termian_native::vault::demo().hosts, ..Vault::default() };
+        live.terminal.font_size = 22;
+        live.terminal.keep_alive = 45;
+        let synced = Vault {
+            hosts: termian_native::vault::demo().hosts,
+            foreign: serde_json::json!({"settings": {"keep_alive_interval": "10"}}),
+            ..Vault::default()
+        };
         assert!(adopt(&mut live, &started, synced.clone()));
         assert_eq!(live.history[0].id, 7);
         assert_eq!(live.update_schedule, schedule);
+        assert_eq!(live.terminal.font_size, 22);
+        assert_eq!(live.terminal.keep_alive, 45);
         assert!(!live.hosts.is_empty());
         let mut edited = Vault { groups: termian_native::vault::demo().groups, ..Vault::default() };
         assert!(!adopt(&mut edited, &started, synced), "an edit made meanwhile is never overwritten");

@@ -45,8 +45,11 @@ const DETECT_OS_SCRIPT: &str = "# get the shell name to choose the script for de
 impl Shell {
     /// Changes Settings → Terminal and applies it to every open terminal.
     pub fn update_terminal(&mut self, change: impl FnOnce(&mut TerminalSettings), cx: &mut Context<Self>) {
-        change(&mut self.vault.terminal);
-        self.save_vault();
+        if let Err(error) = self.vaults.update_settings(&mut self.vault, |vault| change(&mut vault.terminal)) {
+            self.vault_error = Some(error);
+            cx.notify();
+            return;
+        }
         self.load_terminal_font(cx);
         let settings = self.vault.terminal.clone();
         for view in self.all_views() {
@@ -55,12 +58,9 @@ impl Shell {
         cx.notify();
     }
 
-    /// «Keepalive Interval» goes into the synced snapshot settings, as legacy keeps it.
     pub fn set_keep_alive(&mut self, seconds: u32, cx: &mut Context<Self>) {
-        if ts::keep_alive(&self.vault.foreign) != seconds {
-            ts::set_keep_alive(&mut self.vault.foreign, seconds);
-            self.save_vault();
-            cx.notify();
+        if self.vault.terminal.keep_alive != seconds {
+            self.update_terminal(|settings| settings.keep_alive = seconds, cx);
         }
     }
 
@@ -313,7 +313,7 @@ impl SettingsWindow {
 
     pub(super) fn render_terminal(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let t = self.terminal(cx);
-        let keep_alive = ts::keep_alive(&self.shell.read(cx).vault.foreign);
+        let keep_alive = self.shell.read(cx).vault.terminal.keep_alive;
 
         // Terminal settings
         let mut general = vec![

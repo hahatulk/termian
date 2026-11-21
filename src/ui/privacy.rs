@@ -385,12 +385,12 @@ impl Shell {
             let _ = this.update_in(cx, |shell, window, cx| {
                 shell.privacy.password_pending = false;
                 if let Some(verifier) = result {
-                    let previous = shell.vault.privacy_password.replace(verifier);
-                    if shell.store.save(&shell.vault).is_ok() {
+                    if shell.vaults.update_settings(&mut shell.vault, |vault| {
+                        vault.privacy_password = Some(verifier);
+                    }).is_ok() {
                         shell.activate_privacy_lock(window, cx);
                         return;
                     }
-                    shell.vault.privacy_password = previous;
                 }
                 shell.privacy.hint = tr("Could not save the lock password.");
                 shell.privacy_focus(window);

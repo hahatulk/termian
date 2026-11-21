@@ -9,7 +9,7 @@ use gpui::{
     MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, TextRun, Window,
 };
 use std::{cell::Cell, rc::Rc};
-use termian_native::login::{Answer, LoginEvent, LoginState, Stage};
+use termian_native::login::{Answer, LoginEvent, LoginProgress, LoginState, Stage};
 use termian_native::session::{self, Session, SessionEvent, SshTarget};
 use termian_native::terminal::mouse::{Button as TerminalButton, Event as TerminalMouse};
 use termian_native::terminal::{paste_bytes, Modifiers, Run, Terminal};
@@ -178,7 +178,7 @@ pub struct TerminalView {
     connection: Option<Connection>,
     login: Option<LoginState>,
     /// The shell became ready: the connection screen hands over (legacy animation).
-    connected: Option<(std::time::Instant, u64)>,
+    connected: Option<LoginProgress>,
     /// The host's «Backspace: Ctrl+H»: Backspace sends ^H instead of DEL.
     ctrl_h_backspace: bool,
     login_focus: FocusHandle,
@@ -478,20 +478,26 @@ impl TerminalView {
     fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) -> Option<Box<dyn FnOnce() + Send>> {
         match event {
             SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
-                // A first connection or a reconnect from the connection screen hands over with the legacy animation.
-                if self.login.take().is_some() {
-                    let key = self.generation;
-                    self.connected = Some((std::time::Instant::now(), key));
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(login_view::CONNECTED_TOTAL).await;
-                        let _ = this.update(cx, |view, cx| {
-                            if view.connected.is_some_and(|(_, k)| k == key) {
-                                view.connected = None;
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
+                if let Some(mut login) = self.login.take() {
+                    login.apply(LoginEvent::Stage(Stage::Ready));
+                    if super::motion::enabled() {
+                        let motion = login.motion;
+                        let key = self.generation;
+                        self.connected = Some(motion);
+                        if let Some(finish) = motion.finish_at() {
+                            let timer = cx.background_executor().timer(finish.saturating_duration_since(std::time::Instant::now()));
+                            cx.spawn(async move |this, cx| {
+                                timer.await;
+                                let _ = this.update(cx, |view, cx| {
+                                    if view.generation == key && view.connected == Some(motion) {
+                                        view.connected = None;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
+                    }
                 }
                 self.closed = false;
                 if !self.was_ready {
@@ -1197,6 +1203,7 @@ impl TerminalView {
     fn login_retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.clone() else { return };
         self.reconnect = None;
+        self.connected = None;
         self.generation += 1;
         self.session = session::ssh(connection.target, 80, 24);
         Self::listen(&mut self.session, self.generation, window, cx);
@@ -1430,9 +1437,9 @@ impl Render for TerminalView {
                     .text_size(px(12.)).text_color(rgb(termian_native::theme::TEXT))
                     .child(tr("Copied!")),
             )))
-            .children(self.connected.and_then(|(_, key)| {
+            .children(self.connected.as_ref().and_then(|progress| {
                 let connection = self.connection.as_ref()?;
-                Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), key))
+                Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), progress, window))
             }))
             .into_any_element()
     }

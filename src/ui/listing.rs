@@ -77,8 +77,11 @@ impl Shell {
     fn set_listing(&mut self, key: &str, change: impl FnOnce(&mut Listing), window: &mut Window, cx: &mut Context<Self>) {
         let mut listing = self.listing(key);
         change(&mut listing);
-        self.vault.listing.insert(key.to_owned(), listing);
-        self.save_vault();
+        if let Err(error) = self.vaults.update_settings(&mut self.vault, |vault| {
+            vault.listing.insert(key.to_owned(), listing);
+        }) {
+            self.vault_error = Some(error);
+        }
         self.close_list_menu(window, cx);
     }
 

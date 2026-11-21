@@ -161,7 +161,7 @@ impl Shell {
     /// Records sessions again, or stops and deletes this vault's logs.
     pub fn set_logs_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) -> Result<(), String> {
         if self.log_sync_busy() { return Err(tr("Дождитесь завершения синхронизации.").into()); }
-        self.vault.logs_disabled = !enabled;
+        self.vaults.update_settings(&mut self.vault, |vault| vault.logs_disabled = !enabled)?;
         let mut failed = 0;
         if !enabled {
             for pane in self.workspaces.values().flat_map(|w| w.panes.values()) {
@@ -170,7 +170,9 @@ impl Shell {
             failed = session_log::delete_all(&mut self.vault.history, &self.logs_dir).failed;
         }
         cx.notify();
-        self.store.save(&self.vault)?;
+        if !enabled {
+            self.store.save(&self.vault)?;
+        }
         if failed != 0 { return Err(termian_native::ui_format!("Could not save logs: {failed}. Recording is off.", "Запись отключена. Не удалось удалить журналов: {failed}.")); }
         Ok(())
     }
@@ -681,7 +683,9 @@ impl SettingsWindow {
     }
 
     fn render_logs(&self, cx: &mut Context<Self>) -> Vec<gpui::AnyElement> {
-        let enabled = !self.shell.read(cx).vault.logs_disabled;
+        let shell = self.shell.read(cx);
+        let enabled = !shell.vault.logs_disabled;
+        let vault_name = shell.vaults.selected_name().to_owned();
         let open = self.menu == Some(Menu::Logs);
         let mut card = vec![
             div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(tr("Logs retention policies")).into_any_element(),
@@ -700,7 +704,7 @@ impl SettingsWindow {
                         .text_size(px(14.))
                         .text_color(rgb(theme::TEXT))
                         .child(gpui::svg().path(super::assets::icon("vaults")).size(px(16.)).text_color(rgb(theme::TEXT)))
-                        .child(tr("Personal")),
+                        .child(tr("All Vaults")),
                 )
                 .child(
                     super::settings_terminal::picker("settings-logs", if enabled { tr("Enabled") } else { tr("Disabled") }, open)
@@ -743,14 +747,10 @@ impl SettingsWindow {
                     .text_size(px(14.))
                     .text_color(rgb(theme::TEXT))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(tr("Confirm disabling logs")))
-                    .child(
-                        div()
-                            .mt(px(10.))
-                            .flex()
-                            .child("Disabling logs will ")
-                            .child(div().font_weight(FontWeight::BOLD).child("delete the logs "))
-                            .child("from this vault: Personal"),
-                    )
+                    .child(div().mt(px(10.)).child(
+                        tr("Recording will stop in all Vaults. Only logs in {vault} will be deleted.")
+                            .replace("{vault}", &vault_name),
+                    ))
                     .child(
                         actions_row()
                             .justify_end()
@@ -783,18 +783,14 @@ impl SettingsWindow {
                 .when(value == active, |d| d.opacity(1.))
                 .when(value != active, |d| d.on_click(cx.listener(move |settings, _, window, cx| {
                     settings.language_error = settings.shell.update(cx, |shell, cx| {
-                        let old = std::mem::replace(&mut shell.vault.language, value);
-                        match shell.store.save(&shell.vault) {
+                        match shell.vaults.update_settings(&mut shell.vault, |vault| vault.language = value) {
                             Ok(()) => {
                                 language::set(value);
                                 cx.refresh_windows();
                                 cx.notify();
                                 None
                             }
-                            Err(error) => {
-                                shell.vault.language = old;
-                                Some(error)
-                            }
+                            Err(error) => Some(error),
                         }
                     });
                     window.set_window_title(language::text("Settings"));

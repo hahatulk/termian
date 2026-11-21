@@ -1,7 +1,6 @@
 //! Settings → Terminal, with the legacy defaults (`reducers$2` in the legacy
 //! bundle): emulation, font, theme, keyword highlighting, scrollback and the
-//! rest. Legacy keeps them on the device, so do we; only the keepalive
-//! interval travels in the snapshot (`settings.keep_alive_interval`).
+//! rest.
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
@@ -35,7 +34,7 @@ pub const FONT_FAMILIES: [&str; 17] = [
     "Meslo",
 ];
 /// The snapshot key legacy reads with `getKeepAliveInterval`.
-pub const KEEP_ALIVE_KEY: &str = "keep_alive_interval";
+const KEEP_ALIVE_KEY: &str = "keep_alive_interval";
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -64,6 +63,7 @@ pub struct TerminalSettings {
     pub custom_shells: Vec<String>,
     /// Lines kept; [`MAX_SCROLLBACK`] means «0» (as many as possible).
     pub scrollback: u64,
+    pub keep_alive: u32,
     pub pqc_kex: bool,
 }
 
@@ -87,6 +87,7 @@ impl Default for TerminalSettings {
             local_shell: None,
             custom_shells: Vec::new(),
             scrollback: 40_000,
+            keep_alive: 0,
             pqc_kex: true,
         }
     }
@@ -141,26 +142,10 @@ impl TerminalSettings {
     }
 }
 
-/// Keepalive seconds from the snapshot settings; 0 is off.
-pub fn keep_alive(foreign: &serde_json::Value) -> u32 {
+pub(crate) fn saved_keep_alive(foreign: &serde_json::Value) -> Option<u32> {
     let value = &foreign["settings"][KEEP_ALIVE_KEY];
-    value.as_str().and_then(|s| s.trim().parse().ok()).or_else(|| value.as_u64().map(|n| n.min(u32::MAX as u64) as u32)).unwrap_or(0)
-}
-
-/// Legacy writes the interval as a string and removes the key for 0.
-pub fn set_keep_alive(foreign: &mut serde_json::Value, seconds: u32) {
-    if !foreign.is_object() {
-        *foreign = serde_json::json!({});
-    }
-    if !foreign["settings"].is_object() {
-        foreign["settings"] = serde_json::json!({});
-    }
-    let settings = foreign["settings"].as_object_mut().expect("an object");
-    if seconds == 0 {
-        settings.remove(KEEP_ALIVE_KEY);
-    } else {
-        settings.insert(KEEP_ALIVE_KEY.into(), serde_json::Value::String(seconds.to_string()));
-    }
+    value.as_str().and_then(|s| s.trim().parse().ok())
+        .or_else(|| value.as_u64().map(|n| n.min(u32::MAX as u64) as u32))
 }
 
 /// Keepalive field text → seconds, as legacy cleans it (digits only, capped).
@@ -523,14 +508,11 @@ mod tests {
     }
 
     #[test]
-    fn keepalive_lives_in_the_snapshot_settings_as_legacy_writes_it() {
-        let mut foreign = serde_json::Value::Null;
-        assert_eq!(keep_alive(&foreign), 0);
-        set_keep_alive(&mut foreign, 45);
-        assert_eq!(foreign["settings"][KEEP_ALIVE_KEY], "45");
-        assert_eq!(keep_alive(&foreign), 45);
-        set_keep_alive(&mut foreign, 0);
-        assert!(foreign["settings"].get(KEEP_ALIVE_KEY).is_none());
+    fn keepalive_reads_saved_intervals_and_parses_input() {
+        assert_eq!(saved_keep_alive(&serde_json::Value::Null), None);
+        assert_eq!(saved_keep_alive(&serde_json::json!({"settings": {"keep_alive_interval": "45"}})), Some(45));
+        assert_eq!(saved_keep_alive(&serde_json::json!({"settings": {"keep_alive_interval": 20}})), Some(20));
+        assert_eq!(TerminalSettings::default().keep_alive, 0);
         assert_eq!(parse_keep_alive("1a2"), 12);
         assert_eq!(parse_keep_alive("99999999999"), i32::MAX as u32);
     }

@@ -166,13 +166,13 @@ final class MobileSettings {
         JSONObject state = app.call("settingsState");
         LinearLayout card = card(page, "Logs retention policies");
         description(card, "Control how logs are stored in your vaults.");
-        card.addView(app.label(state.optString("vaultName"), 14, TermianStyle.TEXT));
+        card.addView(app.label(text("All Vaults"), 14, TermianStyle.TEXT));
         boolean enabled = state.optBoolean("logsEnabled");
         action(card, enabled ? "Enabled" : "Disabled", () -> choose("Logs", new String[]{"Enabled", "Disabled"}, enabled ? 0 : 1, index -> {
             if (enabled == (index == 0)) return;
             if (index == 0) saveLogs(true);
             else new AlertDialog.Builder(app).setTitle(text("Disable Logs"))
-                .setMessage(text("Stop recording session logs?")).setNegativeButton(text("Cancel"), null)
+                .setMessage(text("Stop recording session logs in all Vaults?")).setNegativeButton(text("Cancel"), null)
                 .setPositiveButton(text("Disable Logs"), (d, w) -> saveLogs(false)).show();
         }));
     }

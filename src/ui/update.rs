@@ -29,9 +29,10 @@ impl Shell {
             || (self.update.status.state == State::Installed && channel != previous.0) {
             return;
         }
-        self.vault.update_channel = channel;
-        self.vault.update_schedule = schedule;
-        match self.store.save(&self.vault) {
+        match self.vaults.update_settings(&mut self.vault, |vault| {
+            vault.update_channel = channel;
+            vault.update_schedule = schedule;
+        }) {
             Ok(()) => {
                 self.update.settings_error = None;
                 if channel != previous.0 && self.update.status.state != State::Disabled {
@@ -42,7 +43,6 @@ impl Shell {
                 self.schedule_update_check(delay, cx);
             }
             Err(error) => {
-                (self.vault.update_channel, self.vault.update_schedule) = previous;
                 self.update.settings_error = Some(termian_native::ui_format!("Could not save update settings: {error}", "Не удалось сохранить настройки обновлений: {error}"));
             }
         }

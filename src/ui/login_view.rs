@@ -3,13 +3,13 @@
 //! terminal), the pending question and the connection log.
 
 use termian_native::language::text as tr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gpui::{
     div, percentage, prelude::*, px, rgb, svg, Animation, AnimationExt, AnyElement, Context, Div, FocusHandle, KeyDownEvent, SharedString, Stateful,
     Transformation, Window,
 };
-use termian_native::login::{Answer, HostKeyDecision, IdentityChoice, LoginState, LoginUi, Question, Stage};
+use termian_native::login::{Answer, HostKeyDecision, IdentityChoice, LoginProgress, LoginState, LoginUi, ProgressFrame, Question};
 use termian_native::theme;
 
 use super::text_input::{self, Mode};
@@ -71,30 +71,16 @@ fn button(id: &str, label: &str, primary: bool, enabled: bool) -> Stateful<Div> 
         .child(label.to_owned())
 }
 
-/// A progress point; the active one is circled by a spinning arc, as in the
-/// legacy connection screen.
-fn step(name: &str, color: u32, active: bool) -> Div {
+fn step(name: &str, color: u32) -> Div {
     div()
         .size(px(STEP))
         .flex_none()
-        .relative()
         .rounded_full()
         .flex()
         .items_center()
         .justify_center()
         .bg(rgb(color))
         .child(svg().path(icon(name)).size(px(12.)).text_color(rgb(0xffffff)))
-        .when(active, |d| {
-            d.child(
-                div().absolute().top(px(-6.)).left(px(-6.)).size(px(STEP + 12.)).child(
-                    svg().path(icon("spinner_arc")).size(px(STEP + 12.)).text_color(rgb(PROGRESS)).with_animation(
-                        SharedString::from(format!("step-spin-{name}")),
-                        Animation::new(Duration::from_millis(900)).repeat(),
-                        |arc, delta| arc.with_transformation(Transformation::rotate(percentage(delta))),
-                    ),
-                ),
-            )
-        })
 }
 
 fn paragraph(text: impl Into<SharedString>) -> Div {
@@ -136,83 +122,68 @@ pub fn edit<V: 'static>(state: &mut LoginState, event: &KeyDownEvent, cx: &mut C
     }
 }
 
-/// The progress bar. Past the connect stage a point (the fingerprint while
-/// the host key is checked) slides from the start to its place with the blue
-/// fill following it; the arc spins until a question or error stops it. A
-/// failure paints the whole bar red.
-fn progress_bar(state: &LoginState) -> Div {
+const CONNECTED: u32 = 0x4cae63;
+
+fn progress_bar(state: &LoginState, window: &Window) -> Div {
     if state.error.is_some() {
         return div().h(px(STEP)).flex().items_center()
-            .child(step("connect", FAILED, false))
+            .child(step("connect", FAILED))
             .child(div().flex_1().min_w_0().h(px(3.)).bg(rgb(FAILED)))
-            .child(step("terminal", FAILED, false));
+            .child(step("terminal", FAILED));
     }
-    let track = WIDTH - STEP;
-    let place = |d: Div, x: f32| d.absolute().top_0().left(px(x));
-    let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
-    let bar = div().relative().w(px(WIDTH)).h(px(STEP));
-    let progress = state.progress();
-    let spinning = state.question.is_none();
-    let head = match state.stage {
-        _ if state.asks_username() => Some("person"),
-        Stage::Connecting => None,
-        Stage::Verifying => Some("known_hosts"),
-        _ => Some("connect"),
-    };
-    let mut bar = bar
-        .child(line().w(px(track)).bg(rgb(theme::SURFACE_ACTIVE)))
-        .child(place(step("terminal", if progress >= 1. { PROGRESS } else { theme::SURFACE_ACTIVE }, false), track))
-        .child(place(step("connect", PROGRESS, spinning && head.is_none()), 0.));
-    if let Some(name) = head {
-        let target = (progress.min(1.) * track).min(track / 2.);
-        let slide = || Animation::new(Duration::from_millis(600)).with_easing(gpui::ease_in_out);
-        bar = bar
-            .child(line().bg(rgb(PROGRESS)).with_animation(SharedString::from(format!("login-fill-{name}")), slide(), move |d, t| d.w(px(t * target))))
-            .child(place(step(name, PROGRESS, spinning), 0.).with_animation(
-                SharedString::from(format!("login-head-{name}")),
-                slide(),
-                move |d, t| d.left(px(t * target)),
-            ));
-    }
-    bar
+    progress_track(&frame(&state.motion, window))
 }
 
-/// Green of the legacy bar once the shell is ready.
-const CONNECTED: u32 = 0x4cae63;
-/// The legacy hand-over to the terminal: the bar fills green, then the
-/// screen fades away over the shell.
-pub const CONNECTED_FILL: Duration = Duration::from_millis(300);
-pub const CONNECTED_TOTAL: Duration = Duration::from_millis(550);
+fn frame(motion: &LoginProgress, window: &Window) -> ProgressFrame {
+    let animate = super::motion::enabled();
+    let frame = motion.frame(Instant::now(), animate);
+    if animate && frame.opacity > 0. && (frame.rotation.is_some() || motion.finish_at().is_some()) {
+        window.request_animation_frame();
+    }
+    frame
+}
 
-/// The connection screen as the shell becomes ready, laid over the terminal.
-pub fn render_connected(label: &str, subtitle: String, os: Option<&str>, key: u64) -> AnyElement {
-    let track = WIDTH - STEP;
-    let fill = CONNECTED_FILL.as_secs_f32() / CONNECTED_TOTAL.as_secs_f32();
+fn progress_track(frame: &ProgressFrame) -> Div {
+    let color = if frame.position == 1. { CONNECTED } else { PROGRESS };
+    let line = || div().absolute().left_0().top(px((STEP - 3.) / 2.)).h(px(3.));
+    let place = |node: Div, at| div().absolute().top_0().left(gpui::relative(at)).child(node);
+    let mut track = div().absolute().top_0().bottom_0().left(px(STEP / 2.)).right(px(STEP / 2.))
+        .child(line().w_full().bg(rgb(theme::SURFACE_ACTIVE)))
+        .child(line().w(gpui::relative(frame.position)).bg(rgb(color)));
+    for (at, name) in [(0., "connect"), (0.5, "known_hosts"), (1., "terminal")] {
+        let node_color = if frame.position >= at { color } else { theme::SURFACE_ACTIVE };
+        track = track.child(place(step(name, node_color).absolute().left(px(-STEP / 2.)).top_0(), at));
+    }
+    if let Some(turns) = frame.rotation {
+        let diameter = STEP + 12.;
+        track = track.child(place(
+            div().absolute().left(px(-diameter / 2.)).top(px(-6.)).size(px(diameter))
+                .child(svg().path(icon("spinner_arc")).size(px(diameter)).text_color(rgb(PROGRESS))
+                    .with_transformation(Transformation::rotate(percentage(turns)))),
+            frame.position,
+        ));
+    }
+    div().relative().w_full().h(px(STEP)).child(track)
+}
+
+pub fn render_connected(label: &str, subtitle: String, os: Option<&str>, progress: &LoginProgress, window: &Window) -> AnyElement {
+    let frame = frame(progress, window);
     let header = div()
         .w_full()
         .flex()
         .items_center()
         .gap_3()
-        .child(os_tile(os).size(px(40.)))
-        .child(div().flex_1().flex().flex_col().child(div().text_color(rgb(theme::TEXT)).child(label.to_owned())).child(div().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
+        .child(os_tile(os).size(px(40.)).flex_none())
+        .child(div().flex_1().min_w_0().flex().flex_col().child(div().truncate().text_color(rgb(theme::TEXT)).child(label.to_owned())).child(div().truncate().text_xs().text_color(rgb(theme::TEXT_MUTED)).child(subtitle)))
         .child(button("connected-logs", tr("Show logs"), false, false));
-    let line = || div().absolute().top(px((STEP - 3.) / 2.)).left(px(STEP / 2.)).h(px(3.));
-    let bar = div()
-        .relative()
-        .w(px(WIDTH))
-        .h(px(STEP))
-        .child(line().w(px(track)).bg(rgb(theme::SURFACE_ACTIVE)))
-        .child(line().bg(rgb(CONNECTED)).with_animation(SharedString::from(format!("connected-fill-{key}")), Animation::new(CONNECTED_TOTAL), move |d, t| d.w(px((t / fill).min(1.) * track))))
-        .child(div().absolute().top_0().left_0().child(step("connect", CONNECTED, false)))
-        .child(div().absolute().top_0().left(px(track)).child(step("terminal", CONNECTED, false)));
     div()
         .absolute()
         .inset_0()
         .flex()
         .justify_center()
         .bg(rgb(theme::TITLE_BAR))
-        .child(div().w(px(WIDTH)).pt(px(110.)).flex().flex_col().child(header).child(div().w_full().pt_5().child(bar)))
-        .with_animation(SharedString::from(format!("connected-out-{key}")), Animation::new(CONNECTED_TOTAL), move |d, t| d.opacity(if t < fill { 1. } else { 1. - (t - fill) / (1. - fill) }))
+        .opacity(frame.opacity)
+        .child(div().w_full().max_w(px(WIDTH)).min_w_0().pt(px(110.)).flex().flex_col().child(header).child(div().w_full().pt_5().child(progress_track(&frame))))
         .into_any_element()
 }
 
@@ -254,7 +225,7 @@ pub fn render<V: 'static>(
         )
         .when(!state.asks_username(), |d| d.child(header_button));
 
-    let bar = progress_bar(state).mt_5();
+    let bar = progress_bar(state, window).mt_5();
 
     let log_box = |extra: Option<&String>| {
         div()
@@ -387,14 +358,18 @@ pub fn render<V: 'static>(
     }
 
     let failed = state.error.is_some();
-    let content = div()
-        .when(failed, |d| d.w_full().max_w(px(WIDTH)).min_w_0().pb_4())
-        .when(!failed, |d| d.w(px(WIDTH)))
-        .pt(px(110.)).flex().flex_col().child(header).child(bar).child(body).with_animation(
+    let content = div().w_full().max_w(px(WIDTH)).min_w_0()
+        .when(failed, |d| d.pb_4())
+        .pt(px(110.)).flex().flex_col().child(header).child(bar).child(body);
+    let content = if super::motion::enabled() {
+        content.with_animation(
             "login-in",
             Animation::new(Duration::from_millis(250)).with_easing(gpui::ease_out_quint()),
             |d, t| d.opacity(t),
-        );
+        ).into_any_element()
+    } else {
+        content.into_any_element()
+    };
     let screen = div().size_full().bg(rgb(theme::TITLE_BAR));
     if failed {
         screen.child(div().id("login-failure-scroll").size_full().overflow_y_scroll().px_4().flex().items_start().justify_center().child(content))
