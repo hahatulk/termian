@@ -11,6 +11,13 @@
 - Синхронизация зашифрованных данных со своим сервером между несколькими устройствами: трёхстороннее слияние автоматически разрешает конфликты; автосинхронизация раз в час (отключается в настройках). Сервер ограничивает подбор токена.
 - Автообновление из GitHub Releases с проверкой подписи: новая версия скачивается и устанавливается в фоне, перезапуск — по кнопке ([подробнее](spec.md#46-автообновление)).
 
+- <img width="939" height="1015" alt="image" src="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9" />
+<img width="1912" height="1242" alt="image" src="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e" />
+<img width="1280" height="764" alt="image" src="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117" />
+<img width="1243" height="1004" alt="image" src="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c" />
+<img width="786" height="504" alt="image" src="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f" />
+
+
 ## Быстрый старт
 
 Нужен Rust stable с Cargo. На macOS установите Xcode или Command Line Tools, на Windows установите Visual Studio Build Tools с компонентами C++ и Windows SDK.
