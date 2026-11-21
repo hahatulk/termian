@@ -119,6 +119,11 @@ fn is_local_network_host(url: &url::Url) -> bool {
     }
 }
 
+pub(crate) fn same_snapshot_endpoint(a: &str, b: &str) -> bool {
+    validate_url(a).ok().zip(validate_url(b).ok())
+        .is_some_and(|(a, b)| snapshot_endpoint(&a) == snapshot_endpoint(&b))
+}
+
 /// `https://host/base` → `https://host/base/v1/snapshot`.
 pub fn snapshot_endpoint(url: &url::Url) -> url::Url {
     let mut endpoint = url.clone();

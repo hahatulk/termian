@@ -318,9 +318,9 @@ pub fn candidate_config(vault: &Vault, changes: ConfigChanges) -> Result<cloud::
     let keep = |new: String, old: String| if new.is_empty() { old } else { new };
     let basic_user = changes.basic_user.trim().to_owned();
     let url = changes.url.trim().to_owned();
-    let same_server = url == saved.url;
+    let same_server = cloud::same_snapshot_endpoint(&url, &saved.url);
     let config = cloud::CloudConfig {
-        url,
+        url: if same_server { saved.url } else { url },
         token: keep(changes.token, if same_server { saved.token } else { String::new() }),
         passphrase: keep(changes.passphrase, if same_server { saved.passphrase } else { String::new() }),
         basic_password: if basic_user.is_empty() {
@@ -336,13 +336,7 @@ pub fn candidate_config(vault: &Vault, changes: ConfigChanges) -> Result<cloud::
 }
 
 pub fn verify_cloud_password(config: &cloud::CloudConfig) -> Result<(), String> {
-    if let Some(remote) = config.validate()?.fetch().map_err(|error| {
-        if error == cloud::WRONG_PASSPHRASE {
-            "Снимок на сервере ещё не открывается новым паролем. Сначала измените пароль в веб-панели сервера.".into()
-        } else {
-            config.redact(&error)
-        }
-    })? {
+    if let Some(remote) = config.validate()?.fetch().map_err(|error| config.redact(&error))? {
         sync::validate_snapshot(&remote.snapshot)?;
     }
     Ok(())
@@ -571,7 +565,7 @@ mod tests {
         let mut next = local.cloud.clone().unwrap();
         next.passphrase = "different test password".into();
         let before = stored.lock().unwrap().clone();
-        assert!(verify_cloud_password(&next).unwrap_err().contains("веб-панели"));
+        assert_eq!(verify_cloud_password(&next), Err(cloud::WRONG_PASSPHRASE.into()));
         assert_eq!(*stored.lock().unwrap(), before);
         assert_eq!(local, previous);
 
@@ -713,7 +707,15 @@ mod tests {
         };
         save_config(&mut vault, changes.clone()).unwrap();
         let same = ConfigChanges { url: changes.url.clone(), basic_user: changes.basic_user.clone(), ..ConfigChanges::default() };
-        assert_eq!(candidate_config(&vault, same.clone()).unwrap(), *vault.cloud.as_ref().unwrap());
+        let saved = vault.cloud.as_ref().unwrap();
+        for url in ["https://sync.example", "https://SYNC.EXAMPLE:443/", "https://sync.example/v1/snapshot/"] {
+            let equivalent = ConfigChanges { url: url.into(), ..same.clone() };
+            assert_eq!(&candidate_config(&vault, equivalent).unwrap(), saved);
+        }
+        for url in ["https://sync.example/another/", "https://sync.example:444/"] {
+            let different = ConfigChanges { url: url.into(), token: "other-token".into(), basic_user: String::new(), ..same.clone() };
+            assert!(candidate_config(&vault, different).unwrap().passphrase.is_empty());
+        }
         let other = ConfigChanges { url: "https://other.example".into(), ..same };
         assert!(save_config(&mut vault, other.clone()).is_err());
         assert!(candidate_config(&vault, ConfigChanges { token: changes.token.clone(), passphrase: changes.passphrase.clone(), ..other.clone() }).is_err());
@@ -721,6 +723,32 @@ mod tests {
         changes.url = other.url;
         save_config(&mut vault, changes).unwrap();
         assert_eq!(vault.cloud.unwrap().url, "https://other.example");
+    }
+
+    #[test]
+    fn equivalent_cloud_address_keeps_the_snapshot_password() {
+        let (url, stored) = crate::cloud::tests::server();
+        let mut local = vault(&url, &["local"]);
+        upload(&mut local).unwrap();
+        let before = stored.lock().unwrap().clone();
+        let baseline = local.sync_state.as_ref().unwrap().server.clone();
+
+        save_config(&mut local, ConfigChanges {
+            url: format!("{url}/v1/snapshot/"),
+            token: "test-token".into(),
+            ..ConfigChanges::default()
+        }).unwrap();
+
+        assert_eq!(preview(&local).unwrap(), Preview::Synced);
+        assert_eq!(sync::server_key(&local.cloud.as_ref().unwrap().url), baseline);
+
+        let passphrase = std::mem::take(&mut local.cloud.as_mut().unwrap().passphrase);
+        assert_eq!(preview(&local), Err(cloud::WRONG_PASSPHRASE.into()));
+        let corrected = candidate_config(&local, ConfigChanges { url, passphrase, ..ConfigChanges::default() }).unwrap();
+        verify_cloud_password(&corrected).unwrap();
+        local.cloud = Some(corrected);
+        assert_eq!(preview(&local).unwrap(), Preview::Synced);
+        assert_eq!(*stored.lock().unwrap(), before);
     }
 
     #[test]

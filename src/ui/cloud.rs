@@ -187,17 +187,21 @@ impl Run {
         self.checked_at = Some(at);
     }
 
-    /// Applies a finished operation; the status text is returned.
-    fn finished(&mut self, result: &Result<String, String>) -> Out {
+    fn finished(&mut self, result: &Result<String, String>) -> Option<Out> {
         self.toggled.clear();
         match result {
             Ok(text) => {
                 self.panel = Some(Status::Checked(Preview::Synced));
-                Out::Success(text.clone())
+                Some(Out::Success(text.clone()))
+            }
+            Err(error) if self_cloud::is_credential_error(error) => {
+                self.panel = Some(Status::Error { message: error.clone(), credentials: true });
+                self.confirm = false;
+                None
             }
             Err(error) => {
                 self.confirm = self.operation == Operation::Sync;
-                Out::Error(error.clone())
+                Some(Out::Error(error.clone()))
             }
         }
     }
@@ -540,7 +544,7 @@ impl Shell {
                 }
                 if let Some(dialog) = &mut shell.cloud.dialog {
                     if let Body::Run(run) = &mut dialog.body {
-                        dialog.out = Some(run.finished(&result));
+                        dialog.out = run.finished(&result);
                         dialog.busy = false;
                     }
                 }
@@ -597,8 +601,8 @@ impl Shell {
         }
         *busy = true;
         self.cloud.running = true;
-        let confirm = window.prompt(gpui::PromptLevel::Warning, "Сменить пароль шифрования?",
-            Some("Сначала перешифруйте снимок в веб-панели сервера. Клиент проверит новый пароль и будет использовать его для следующих отправок."),
+        let confirm = window.prompt(gpui::PromptLevel::Warning, "Проверить пароль шифрования?",
+            Some("Если на сервере есть снимок, Termian попробует открыть его этим паролем перед сохранением."),
             &["Проверить и сохранить", "Отмена"], cx);
         cx.spawn(async move |this, cx| {
             let result = if confirm.await == Ok(0) {
@@ -920,11 +924,8 @@ impl Shell {
             Body::Config(_) => (
                 "Своё облако",
                 self.render_cloud_config(cx),
-                vec![button("cloud-save", if self.vault.cloud.is_some() && matches!(&dialog.body, Body::Config(form) if !form.passphrase.is_empty()) {
-                    "Сменить пароль"
-                } else {
-                    "Сохранить настройки"
-                }, true, busy).on_click(cx.listener(|shell, _, window, cx| shell.save_cloud_config(window, cx))).into_any_element()],
+                vec![button("cloud-save", "Сохранить настройки", true, busy)
+                    .on_click(cx.listener(|shell, _, window, cx| shell.save_cloud_config(window, cx))).into_any_element()],
             ),
             Body::Run(run) => {
                 let mut fields: Vec<AnyElement> = self.render_cloud_panel(run, cx).into_iter().map(IntoElement::into_any_element).collect();
@@ -932,7 +933,8 @@ impl Shell {
                     fields.push(notice(run.operation.warning()).into_any_element());
                 }
                 let mut actions = Vec::new();
-                if !run.configured {
+                let credentials = matches!(run.panel, Some(Status::Error { credentials: true, .. }));
+                if !run.configured || credentials {
                     actions.push(
                         button("cloud-configure", "Настроить своё облако", true, busy)
                             .on_click(cx.listener(|shell, _, window, cx| {
@@ -942,7 +944,7 @@ impl Shell {
                             .into_any_element(),
                     );
                 }
-                if run.configured && !run.confirm && !busy && matches!(dialog.out, Some(Out::Error(_))) {
+                if run.configured && !credentials && !run.confirm && !busy && matches!(dialog.out, Some(Out::Error(_))) {
                     actions.push(button("cloud-recheck", "Проверить снова", true, false).on_click(cx.listener(|shell, _, _, cx| shell.check_cloud(true, cx))).into_any_element());
                 }
                 if run.confirm {
@@ -1101,10 +1103,14 @@ mod tests {
         assert!(run.confirm);
         run.checked(Status::Error { credentials: true, message: String::new() }, 1);
         assert!(!run.confirm);
-        assert_eq!(run.finished(&Ok("Готово".into())), Out::Success("Готово".into()));
+        assert_eq!(run.finished(&Ok("Готово".into())), Some(Out::Success("Готово".into())));
         assert_eq!(run.panel, Some(Status::Checked(Preview::Synced)));
-        assert_eq!(run.finished(&Err("сбой".into())), Out::Error("сбой".into()));
+        assert_eq!(run.finished(&Err("сбой".into())), Some(Out::Error("сбой".into())));
         assert!(run.confirm);
+        let wrong = termian_native::cloud::WRONG_PASSPHRASE.to_owned();
+        assert_eq!(run.finished(&Err(wrong.clone())), None);
+        assert!(!run.confirm);
+        assert_eq!(run.panel, Some(Status::Error { message: wrong, credentials: true }));
     }
 
     #[test]
