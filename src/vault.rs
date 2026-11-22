@@ -55,12 +55,32 @@ pub struct HostSettings {
     /// Snippet run once the shell is ready («Startup Command»).
     #[serde(default)]
     pub startup_snippet: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_command: Option<String>,
     /// The host's terminal theme as legacy stores it (a name or an object with `name`).
     #[serde(default)]
     pub color_scheme: Option<serde_json::Value>,
 }
 
 impl HostSettings {
+    pub fn set_startup_command(&mut self, command: String) {
+        self.startup_snippet = None;
+        self.startup_command = (!command.is_empty()).then_some(command);
+    }
+
+    pub fn startup_text<'a>(&'a self, vault: &'a Vault) -> &'a str {
+        self.startup_command.as_deref()
+            .or_else(|| self.startup_snippet.and_then(|id| vault.snippet(id)).map(|s| s.script.as_str()))
+            .unwrap_or_default()
+    }
+
+    pub fn ssh_startup(&self, vault: &Vault, explicit: Option<String>) -> Option<String> {
+        explicit.or_else(|| {
+            let text = self.startup_text(vault);
+            (!text.trim().is_empty()).then(|| text.to_owned())
+        })
+    }
+
     /// The theme name, when the host has its own.
     pub fn theme_name(&self) -> Option<&str> {
         match self.color_scheme.as_ref()? {

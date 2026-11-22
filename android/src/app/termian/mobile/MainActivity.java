@@ -873,7 +873,7 @@ public final class MainActivity extends Activity {
         input.setTextSize(14);
         input.setTypeface(style.text("",14,TermianStyle.TEXT,400).getTypeface());
         input.setContentDescription(label);
-        input.setSingleLine(true);
+        input.setSingleLine((type & InputType.TYPE_TEXT_FLAG_MULTI_LINE) == 0);
         input.setInputType(type);
         input.setText(initial);
         input.setSaveEnabled(false);
@@ -1002,6 +1002,30 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
+        String originalStartup=host==null ? "" : fieldValue(host,"startupCommand");
+        EditText startupCommand=field(ssh,text("Startup Command"),originalStartup,
+            InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        startupCommand.setHint(text("No startup command"));
+        startupCommand.setHintTextColor(MUTED);
+        startupCommand.setMinLines(2);
+        startupCommand.setMaxLines(6);
+        startupCommand.setGravity(Gravity.TOP | Gravity.START);
+        startupCommand.setTypeface(android.graphics.Typeface.MONOSPACE);
+        JSONArray snippets=data.optJSONArray("snippets");
+        boolean[] usedSnippet={false};
+        if(snippets!=null && snippets.length()>0) {
+            String[] labels=new String[snippets.length()];
+            for(int i=0;i<labels.length;i++) labels[i]=snippets.optJSONObject(i).optString("display");
+            ssh.addView(button(text("Use snippet"),() -> new AlertDialog.Builder(this).setTitle(text("Use snippet"))
+                .setItems(labels,(dialog,position) -> {
+                    if(hostEditor!=pane || locked) return;
+                    usedSnippet[0]=true;
+                    startupCommand.setText(snippets.optJSONObject(position).optString("script"));
+                    startupCommand.requestFocus();
+                    startupCommand.setSelection(startupCommand.length());
+                }).setNegativeButton(text("Cancel"),null).show()));
+        }
+        java.util.function.BooleanSupplier startupChanged=() -> usedSnippet[0] || !value(startupCommand).equals(originalStartup);
         String originalTheme=host==null ? "" : fieldValue(host,"theme");
         LinearLayout appearance=editorCard(form,text("Terminal theme"));
         MobileThemes.Choice theme=themes().new Choice(originalTheme,call("terminalSettings").optString("theme"),nameValue -> true);
@@ -1011,7 +1035,7 @@ public final class MainActivity extends Activity {
         hostEdited=() -> !value(address).equals(originalAddress) || !value(name).equals(originalName) ||
             !value(port).equals(originalPort) || !value(tags).equals(originalTags) || !value(user).equals(originalUser) ||
             !MobileVault.choice(group).equals(originalGroup) || !MobileVault.choice(identity).equals(originalIdentity) ||
-            !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) ||
+            !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) || startupChanged.getAsBoolean() ||
             (destination!=null && !MobileVault.choice(destination).equals(sourceVault)) ||
             password.length()!=0 || clear!=null && clear.isChecked();
         pane.addView(scroll(form),new LinearLayout.LayoutParams(-1,0,1));
@@ -1032,6 +1056,7 @@ public final class MainActivity extends Activity {
                     "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
                     "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
                     "theme",theme.value().equals(originalTheme) ? null : theme.value(),
+                    "startupCommand",startupChanged.getAsBoolean() ? value(startupCommand) : null,
                     "destinationVault",move ? target : null);
                 if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
                 updateHosts(result);

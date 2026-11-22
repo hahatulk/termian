@@ -1130,8 +1130,7 @@ impl TerminalView {
     pub fn run(&mut self, text: &str) {
         if !self.closed {
             self.terminal.scroll(i32::MIN / 2);
-            self.session.write(&paste_bytes(text, false));
-            self.session.write(b"\r");
+            self.session.run_command(text);
         }
     }
 

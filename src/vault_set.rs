@@ -600,6 +600,28 @@ mod tests {
     }
 
     #[test]
+    fn move_preserves_a_typed_startup_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = Store::new(directory.path().join("vault.bin"), [42; 32]);
+        let mut personal = Vault::default();
+        let mut host = crate::vault::tests::host(9, "Moved host", None);
+        let command = "printf ready\npwd";
+        host.settings.set_startup_command(command.into());
+        personal.save_host(host.clone());
+        let (mut set, _, _) = VaultSet::load(base, personal.clone()).unwrap();
+        let (destination, work) = set.select(&personal, Destination::New("Work")).unwrap();
+        let work_id = set.selected();
+        let (_, mut personal) = set.select(&work, Destination::Existing(Uuid::nil())).unwrap();
+
+        set.move_host(&mut personal, host, work_id).unwrap();
+
+        let moved = load_saved(&destination).unwrap();
+        assert!(moved.snippets.is_empty());
+        assert_eq!(moved.hosts[0].settings.ssh_startup(&moved, None).as_deref(), Some(command));
+        assert!(personal.hosts.is_empty());
+    }
+
+    #[test]
     fn move_keeps_source_when_destination_cannot_be_loaded() {
         let directory = tempfile::tempdir().unwrap();
         let base = Store::new(directory.path().join("vault.bin"), [42; 32]);

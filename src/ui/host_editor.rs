@@ -13,7 +13,7 @@ use termian_native::vault::{GroupId, Host, HostId};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_settings::CredentialsMenu;
+use super::host_settings::{CredentialsMenu, Picker};
 use super::hosts::host_tile;
 use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
@@ -30,9 +30,20 @@ pub enum Field {
     Port,
     Username,
     Password,
+    StartupCommand,
     /// A row of «Environment Variables».
     EnvName(usize),
     EnvValue(usize),
+}
+
+impl Field {
+    fn mode(self) -> Mode {
+        match self {
+            Self::StartupCommand => Mode::Multiline,
+            Self::Password => Mode::Secret,
+            _ => Mode::Line,
+        }
+    }
 }
 
 pub struct HostEditor {
@@ -55,7 +66,7 @@ pub struct HostEditor {
     /// «Do you want to discard changes?» is showing.
     confirm_discard: bool,
     /// The open menu of a setting row (Backspace, Agent Forwarding, ...).
-    pub(super) picker: Option<super::host_settings::Picker>,
+    pub(super) picker: Option<Picker>,
     /// The «Environment Variables» or «Select Color Theme» panel over the form.
     pub(super) panel: Option<super::host_settings::Panel>,
 }
@@ -299,6 +310,12 @@ impl Shell {
             return;
         }
         let stroke = &event.keystroke;
+        if editor.picker == Some(Picker::Startup) && stroke.key == "escape" {
+            editor.picker = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if editor.credentials_menu.is_some() {
             match stroke.key.as_str() {
                 "escape" => {
@@ -320,13 +337,14 @@ impl Shell {
         }
         let mods = stroke.modifiers;
         if stroke.key == "tab" && !mods.control && !mods.alt && !mods.platform {
-            const ORDER: [Field; 6] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password];
-            let order = if editor.host.identity.and_then(|id| self.vault.identity(id)).is_some() { &ORDER[..4] } else { &ORDER[..] };
-            let next = order.iter().position(|f| *f == editor.field)
+            const ORDER: [Field; 7] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password, Field::StartupCommand];
+            let using_identity = editor.host.identity.and_then(|id| self.vault.identity(id)).is_some();
+            let order = ORDER.into_iter().filter(|field| !using_identity || !matches!(field, Field::Username | Field::Password));
+            let next = order.clone().position(|f| f == editor.field)
                 .and_then(|at| if mods.shift { at.checked_sub(1) } else { Some(at + 1) })
-                .and_then(|at| order.get(at));
+                .and_then(|at| order.clone().nth(at));
             if let Some(next) = next {
-                editor.field = *next;
+                editor.field = next;
                 cx.stop_propagation();
                 cx.notify();
             } else {
@@ -334,6 +352,7 @@ impl Shell {
             }
             return;
         }
+        let mut startup = String::new();
         let value = match editor.field {
             Field::Address => &mut editor.host.address,
             Field::Label => &mut editor.host.label,
@@ -341,6 +360,10 @@ impl Shell {
             Field::Port => &mut editor.port,
             Field::Username => editor.host.username.get_or_insert_with(String::new),
             Field::Password => editor.host.password.get_or_insert_with(String::new),
+            Field::StartupCommand => {
+                startup.push_str(editor.host.settings.startup_text(&self.vault));
+                &mut startup
+            }
             Field::EnvName(i) | Field::EnvValue(i) => {
                 let env = &mut editor.host.settings.env;
                 if i >= env.len() {
@@ -349,8 +372,8 @@ impl Shell {
                 if matches!(editor.field, Field::EnvName(_)) { &mut env[i].name } else { &mut env[i].value }
             }
         };
-        let before = value.clone();
-        let key = text_input::edit(("host", editor.field), Some(value), &event.keystroke, if editor.field == Field::Password { Mode::Secret } else { Mode::Line }, cx);
+        let before = (editor.field == Field::Port).then(|| value.clone());
+        let key = text_input::edit(("host", editor.field), Some(value), stroke, editor.field.mode(), cx);
         if editor.field == Field::Port {
             editor.port.retain(|c| c.is_ascii_digit());
             editor.port.truncate(5);
@@ -366,7 +389,12 @@ impl Shell {
             Key::Edited => {
                 let changed = match editor.field {
                     Field::Tags => false,
-                    Field::Port => editor.port != before,
+                    Field::Port => before.as_ref() != Some(&editor.port),
+                    Field::StartupCommand => {
+                        editor.host.settings.set_startup_command(startup);
+                        editor.picker = None;
+                        true
+                    }
                     _ => true,
                 };
                 if changed {
@@ -383,7 +411,7 @@ impl Shell {
                 }
                 // Enter in the connection fields connects, as in the legacy form.
                 Field::Address | Field::Port | Field::Username | Field::Password => self.connect_from_editor(window, cx),
-                Field::Label | Field::EnvName(_) | Field::EnvValue(_) => {}
+                Field::Label | Field::StartupCommand | Field::EnvName(_) | Field::EnvValue(_) => {}
             },
             // Escape leaves a sub-panel first, then the form.
             Key::Escape if editor.panel.is_some() => editor.panel = None,
@@ -401,18 +429,22 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(editor) = &self.host_editor else { return div().id("none") };
         let focused = editor.field == field && self.editor_focus.is_focused(window);
-        let mode = if masked { Mode::Secret } else { Mode::Line };
+        let mode = field.mode();
         let key = ("host", field);
         let input = field_box(focused)
             .id(SharedString::from(format!("editor-{placeholder}")))
+            .when(matches!(mode, Mode::Multiline), |d| d.h_auto().min_h(px(64.)).max_h(px(144.)).flex_col().items_start().py_2().overflow_y_scroll())
             .child(text_input::text(key, value, placeholder, focused, mode, cx));
         text_input::field(input, key, mode, move |shell, window, _| {
             if let Some(editor) = &mut shell.host_editor {
                 editor.field = field;
                 editor.groups_open = false;
+                if editor.picker == Some(Picker::Startup) {
+                    editor.picker = None;
+                }
             }
             window.focus(&shell.editor_focus);
         }, cx)
@@ -551,7 +583,7 @@ impl Shell {
                 .items_center()
                 .gap_3()
                 .child(host_tile(host).size(px(36.)).rounded_lg())
-                .child(self.input(Field::Address, tr("IP or Hostname"), &host.address, false, window, cx).flex_1()),
+                .child(self.input(Field::Address, tr("IP or Hostname"), &host.address, window, cx).flex_1()),
         );
 
         let group_label = host.group.and_then(|g| self.vault.group(g)).map(|g| g.label.clone());
@@ -661,7 +693,7 @@ impl Shell {
         });
 
         let general = card(tr("General"))
-            .child(self.input(Field::Label, tr("Label"), &host.label, false, window, cx))
+            .child(self.input(Field::Label, tr("Label"), &host.label, window, cx))
             .child(self.host_vault_field(editor, cx))
             // Lists open over the form, like the legacy autocomplete menus.
             .child(div().relative().child(group_picker).children(groups.map(|list| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list)))))
@@ -686,14 +718,14 @@ impl Shell {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(theme::TEXT))
                     .child(tr("SSH on"))
-                    .child(self.input(Field::Port, "22", &editor.port, false, window, cx).w(px(90.)))
+                    .child(self.input(Field::Port, "22", &editor.port, window, cx).w(px(90.)))
                     .child("port"),
             )
             .child(divider())
             .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(tr("Credentials")))
             .children(self.render_credentials(window, cx))
             .child(divider())
-            .children(self.render_ssh_settings(cx));
+            .children(self.render_ssh_settings(window, cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(

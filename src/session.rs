@@ -53,6 +53,11 @@ impl Session {
         let _ = self.input.unbounded_send(Input::Data { bytes: bytes.to_vec(), raw: false });
     }
 
+    pub fn run_command(&self, command: &str) {
+        self.write(&crate::terminal::paste_bytes(command, false));
+        self.write(b"\r");
+    }
+
     pub fn write_raw(&self, bytes: Vec<u8>) {
         let _ = self.input.unbounded_send(Input::Data { bytes, raw: true });
     }
@@ -1944,8 +1949,10 @@ pub(crate) mod tests {
         assert!(output.contains("pty xterm-256color 100x30"), "{output:?}");
         assert!(!output.contains(server::PASSWORD), "password must not leak");
 
+        session.run_command("printf first\r\nprintf second");
         session.write(b"ls");
-        assert!(collect_until(&mut session, "echo:ls").contains("echo:ls"));
+        let output = collect_until(&mut session, "echo:ls");
+        assert!(output.contains("echo:printf first\rprintf secondecho:\recho:ls"), "{output:?}");
         assert!(std::fs::read_to_string(&known_hosts).unwrap().contains("ssh-ed25519"));
     }
 

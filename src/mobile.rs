@@ -54,6 +54,7 @@ struct Connection {
     screen: Terminal,
     ready: bool,
     backspace: bool,
+    startup: Option<String>,
     dirty: bool,
     title: String,
     source: Option<crate::workspace_template::Target>,
@@ -180,6 +181,7 @@ impl App {
             "os":h.os, "tags": h.tags, "keyId":h.key.map(|id| id.to_string()), "identityId":h.identity.map(|id| id.to_string()),
             "identity": h.identity.and_then(|id| self.vault.identity(id)).map(|i| i.label.as_str()),
             "theme": h.settings.theme_name().map(|name| crate::terminal_settings::theme(name).name.as_str()),
+            "startupCommand": h.settings.startup_text(&self.vault),
         })).collect::<Vec<_>>())
     }
 
@@ -280,6 +282,9 @@ impl App {
                 h.password = Some(password.to_owned());
             }
         }
+        if let Some(command) = args["startupCommand"].as_str() {
+            h.settings.set_startup_command(command.to_owned());
+        }
         let theme_changed = if let Some(theme) = args["theme"].as_str() {
             h.settings.color_scheme = if theme.is_empty() {
                 None
@@ -316,7 +321,7 @@ impl App {
         Ok(target)
     }
 
-    fn connect(&mut self, id: u64) -> Result<Value, String> {
+    fn connect(&mut self, id: u64, startup: Option<String>) -> Result<Value, String> {
         let target = self.target(id)?;
         let host = self.vault.host(id).ok_or("Host not found.")?;
         let (cols, rows) = self.size;
@@ -326,6 +331,7 @@ impl App {
             Some(id),
             host.settings.ctrl_h_backspace,
             false,
+            host.settings.ssh_startup(&self.vault, startup),
         )
     }
 
@@ -346,6 +352,7 @@ impl App {
         host: Option<u64>,
         backspace: bool,
         local: bool,
+        startup: Option<String>,
     ) -> Result<Value, String> {
         if self.sessions.len() >= 12 {
             return Err("Close a terminal tab before opening another.".into());
@@ -387,6 +394,7 @@ impl App {
                 screen: Terminal::with_settings(cols.into(), rows.into(), &settings::for_host(&self.vault, host)),
                 ready: local,
                 backspace,
+                startup,
                 dirty: true,
                 title,
                 source: if local {
@@ -477,7 +485,7 @@ impl App {
         command.cwd(&self.root);
         command.env("TERM", self.vault.terminal.emulation());
         let session = session::local_command(command, cols, rows)?;
-        self.new_terminal(session, "Local Terminal".into(), None, false, true)
+        self.new_terminal(session, "Local Terminal".into(), None, false, true, None)
     }
 
     fn poll(&mut self) -> Value {
@@ -607,7 +615,7 @@ impl App {
                 self.save(vault)?;
                 Ok(json!({"hosts":self.hosts()}))
             }
-            "connect" => self.connect(id()?),
+            "connect" => self.connect(id()?, None),
             "quickConnect" => {
                 if self.sync.is_some() {
                     return Err("Wait for synchronization.".into());
@@ -627,6 +635,7 @@ impl App {
                     None,
                     false,
                     false,
+                    None,
                 )
             }
             "local" => self.local(),
@@ -916,6 +925,11 @@ impl Connection {
                 }
                 SessionEvent::Login(LoginEvent::Stage(stage)) => {
                     self.ready = stage == Stage::Ready;
+                    if self.ready {
+                        if let (Some(session), Some(script)) = (&self.session, self.startup.take()) {
+                            session.run_command(&script);
+                        }
+                    }
                     notices.push(json!({"type":"status","ready":self.ready,"value":match stage {
                         Stage::Connecting => "Подключение…", Stage::Verifying => "Проверка ключа…",
                         Stage::Authenticating => "Вход…", Stage::Ready => "Подключено",
@@ -928,6 +942,7 @@ impl Connection {
                 }
                 SessionEvent::Closed(reason) => {
                     self.ready = false;
+                    self.startup = None;
                     self.session = None;
                     notices.push(json!({"type":"closed","value":reason.unwrap_or_else(|| "Сессия завершена".to_owned())}));
                     break;
