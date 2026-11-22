@@ -11,7 +11,7 @@ use crate::{
 };
 
 pub(super) fn menus() -> Value {
-    let pc = shortcuts::pc_preset(false);
+    let pc = shortcuts::pc_preset();
     let keys = shortcuts::ACTIONS
         .iter()
         .filter_map(|&(id, title)| {
@@ -78,13 +78,13 @@ impl App {
             "font":t.font_size, "minFont":ts::MIN_FONT_SIZE, "maxFont":ts::MAX_FONT_SIZE,
             "theme":t.theme().name, "emulation":t.emulation(), "emulations":ts::EMULATION_TYPES,
             "rightClickPaste":t.copy_on_select, "bellSound":t.bell_sound, "brightenBold":t.brighten_bold,
-            "keepAlive":ts::keep_alive(&self.vault.foreign),
+            "keepAlive":t.keep_alive,
             "scrollback":t.scrollback_field(), "pqc":t.pqc_kex,
         })
     }
 
     pub(super) fn save_terminal_setting(&mut self, args: &Value) -> Result<Value, String> {
-        let mut vault = self.vault.clone();
+        let mut settings = self.vault.terminal.clone();
         let value = &args["value"];
         let boolean = || {
             value
@@ -96,7 +96,7 @@ impl App {
                 .as_u64()
                 .ok_or_else(|| "Enter a non-negative whole number.".to_owned())
         };
-        let t = &mut vault.terminal;
+        let t = &mut settings;
         match text(args, "field") {
             "font" => t.set_font_size(number()?.min(u64::from(ts::MAX_FONT_SIZE)) as u32),
             "theme" => t.color_scheme = theme_name(text(args, "value"))?.to_lowercase(),
@@ -112,12 +112,10 @@ impl App {
             }
             "scrollback" => t.set_scrollback_field(number()?),
             "pqc" => t.pqc_kex = boolean()?,
-            "keepAlive" => {
-                ts::set_keep_alive(&mut vault.foreign, number()?.min(i32::MAX as u64) as u32)
-            }
+            "keepAlive" => t.keep_alive = number()?.min(i32::MAX as u64) as u32,
             _ => return Err("Unknown terminal setting.".into()),
         }
-        self.save(vault)?;
+        self.vaults.update_settings(&mut self.vault, |vault| vault.terminal = settings)?;
         self.apply_terminal_settings();
         Ok(self.terminal_settings())
     }

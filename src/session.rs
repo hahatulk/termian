@@ -36,7 +36,7 @@ pub enum SessionEvent {
 }
 
 enum Input {
-    Data(Vec<u8>),
+    Data { bytes: Vec<u8>, raw: bool },
     Answer(Answer),
     Resize(u16, u16),
     Close,
@@ -50,7 +50,16 @@ pub struct Session {
 
 impl Session {
     pub fn write(&self, bytes: &[u8]) {
-        let _ = self.input.unbounded_send(Input::Data(bytes.to_vec()));
+        let _ = self.input.unbounded_send(Input::Data { bytes: bytes.to_vec(), raw: false });
+    }
+
+    pub fn run_command(&self, command: &str) {
+        self.write(&crate::terminal::paste_bytes(command, false));
+        self.write(b"\r");
+    }
+
+    pub fn write_raw(&self, bytes: Vec<u8>) {
+        let _ = self.input.unbounded_send(Input::Data { bytes, raw: true });
     }
 
     /// Answers the pending login question.
@@ -169,7 +178,7 @@ fn local_command_with_history(command: portable_pty::CommandBuilder, columns: u1
     std::thread::spawn(move || {
         for input in futures::executor::block_on_stream(input_rx) {
             match input {
-                Input::Data(bytes) => {
+                Input::Data { bytes, .. } => {
                     if writer.write_all(&bytes).and_then(|_| writer.flush()).is_err() {
                         break;
                     }
@@ -276,8 +285,9 @@ pub fn serial(options: &crate::serial::SerialOptions) -> Result<Session, String>
         let charset = Charset::new(encoding);
         for input in futures::executor::block_on_stream(input_rx) {
             match input {
-                Input::Data(bytes) => {
-                    if port.write_all(&charset.encode(&bytes)).is_err() {
+                Input::Data { bytes, raw } => {
+                    let bytes = if raw { bytes } else { charset.encode(&bytes) };
+                    if port.write_all(&bytes).is_err() {
                         break;
                     }
                 }
@@ -360,7 +370,7 @@ impl Default for SshOptions {
 impl SshOptions {
     pub fn from_vault(vault: &crate::vault::Vault) -> Self {
         let terminal = &vault.terminal;
-        Self { term: terminal.emulation().to_owned(), keepalive: crate::terminal_settings::keep_alive(&vault.foreign), pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false, ..Self::default() }
+        Self { term: terminal.emulation().to_owned(), keepalive: terminal.keep_alive, pqc_kex: terminal.pqc_kex, detect_os: false, import_history: terminal.shell_history_import, verbose: false, ..Self::default() }
     }
 
     /// Key exchanges to offer: russh's order, without the hybrid
@@ -1123,10 +1133,10 @@ async fn pump(
                 _ => {}
             },
             item = input.next() => match item {
-                Some(Input::Data(bytes)) => {
-                    let bytes = match charset.as_ref() {
-                        Some(charset) => charset.encode(&bytes).into(),
-                        None => bytes,
+                Some(Input::Data { bytes, raw }) => {
+                    let bytes = match (charset.as_ref(), raw) {
+                        (Some(charset), false) => charset.encode(&bytes).into(),
+                        _ => bytes,
                     };
                     writer.data_bytes(bytes).await.map_err(|e| format!("{CONNECTION_LOST}: {e}"))?
                 }
@@ -1939,8 +1949,10 @@ pub(crate) mod tests {
         assert!(output.contains("pty xterm-256color 100x30"), "{output:?}");
         assert!(!output.contains(server::PASSWORD), "password must not leak");
 
+        session.run_command("printf first\r\nprintf second");
         session.write(b"ls");
-        assert!(collect_until(&mut session, "echo:ls").contains("echo:ls"));
+        let output = collect_until(&mut session, "echo:ls");
+        assert!(output.contains("echo:printf first\rprintf secondecho:\recho:ls"), "{output:?}");
         assert!(std::fs::read_to_string(&known_hosts).unwrap().contains("ssh-ed25519"));
     }
 

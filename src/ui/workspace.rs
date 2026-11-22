@@ -816,6 +816,24 @@ impl Shell {
         let (tab, at) = self.tab_menu?;
         let reopen = self.can_reopen(tab);
         let items = super::host_editor::menu_panel("tab-menu")
+            .when(self.focused_view(tab).is_some(), |menu| {
+                menu.child(super::host_editor::menu_row("tab-menu-copy".into(), tr("Copy from Terminal"), false, false)
+                    .on_click(cx.listener(move |shell, _, _, cx| {
+                        if let Some(view) = shell.focused_view(tab) {
+                            view.update(cx, |view, cx| view.copy_selection(cx));
+                        }
+                        shell.tab_menu = None;
+                        cx.notify();
+                    })))
+                    .child(super::host_editor::menu_row("tab-menu-paste".into(), tr("Paste to Terminal"), false, false)
+                        .on_click(cx.listener(move |shell, _, _, cx| {
+                            if let Some(view) = shell.focused_view(tab) {
+                                view.update(cx, |view, cx| view.paste_clipboard(cx));
+                            }
+                            shell.tab_menu = None;
+                            cx.notify();
+                        })))
+            })
             .child(super::host_editor::menu_row("tab-menu-duplicate".into(), tr("Duplicate"), false, !reopen).when(reopen, |d| {
                 d.on_click(cx.listener(move |shell, _, window, cx| {
                     shell.tab_menu = None;

@@ -99,13 +99,11 @@ pub fn mac_preset() -> Scheme {
     )
 }
 
-/// Legacy `PC_HOTKEYS`; on Windows copy and paste are Ctrl+C / Ctrl+V
-/// (`normalizeWindowsTerminalShortcuts`).
-pub fn pc_preset(windows: bool) -> Scheme {
+pub fn pc_preset() -> Scheme {
     preset(
         &[
-            ("copyFromTerminal", Some(if windows { "ctrl+c" } else { "ctrl+shift+c" })),
-            ("pasteToTerminal", Some(if windows { "ctrl+v" } else { "ctrl+shift+v" })),
+            ("copyFromTerminal", Some("ctrl+shift+c")),
+            ("pasteToTerminal", Some("ctrl+shift+v")),
             ("selectAllInTerminal", Some("ctrl+shift+a")),
             ("toggleSidepanel", Some("ctrl+s")),
             ("localTerminal", Some("ctrl+l")),
@@ -131,9 +129,9 @@ pub fn pc_preset(windows: bool) -> Scheme {
 /// Presets for this platform, first the default (legacy `defaultPresets`).
 pub fn presets() -> Vec<(&'static str, Scheme)> {
     if cfg!(target_os = "macos") {
-        vec![(MAC_PRESET, mac_preset()), (PC_PRESET, pc_preset(false))]
+        vec![(MAC_PRESET, mac_preset()), (PC_PRESET, pc_preset())]
     } else {
-        vec![(PC_PRESET, pc_preset(cfg!(windows)))]
+        vec![(PC_PRESET, pc_preset())]
     }
 }
 
@@ -406,9 +404,8 @@ mod tests {
     fn presets_match_the_legacy_tables() {
         let mac = mac_preset();
         assert_eq!((mac.shortcut("commandPalette"), mac.shortcut("terminals"), mac.tab_mod.as_str()), (Some("meta+k"), None, "meta"));
-        assert_eq!(pc_preset(true).shortcut("copyFromTerminal"), Some("ctrl+c"));
-        assert_eq!(pc_preset(false).shortcut("copyFromTerminal"), Some("ctrl+shift+c"));
-        for scheme in [mac, pc_preset(false)] {
+        assert_eq!(pc_preset().shortcut("copyFromTerminal"), Some("ctrl+shift+c"));
+        for scheme in [mac, pc_preset()] {
             assert_eq!(scheme.shortcuts.len(), ACTIONS.len());
             assert!(ACTIONS.iter().all(|(kind, _)| scheme.shortcuts.iter().any(|b| b.kind == *kind)));
         }

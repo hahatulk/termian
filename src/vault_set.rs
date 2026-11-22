@@ -10,7 +10,7 @@ use crate::{
     cloud::{self, CloudConfig, Condition},
     language, log_backup, self_cloud,
     store::Store,
-    vault::Vault,
+    vault::{Host, Vault},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +54,10 @@ impl Default for Catalog {
     }
 }
 
+mod app_settings;
+mod host_move;
+pub use app_settings::AppSettings;
+
 pub enum Destination<'a> {
     Existing(Uuid),
     New(&'a str),
@@ -87,6 +91,16 @@ impl VaultSet {
             load_saved(&store)?
         };
         set.migrate_cloud(&personal, &vault)?;
+        let settings = set.settings_store();
+        let settings = match settings.read_data::<AppSettings>()? {
+            Some(saved) => saved,
+            None => {
+                let initial = AppSettings::migrate(&vault);
+                settings.save_data(&initial)?;
+                initial
+            }
+        };
+        settings.apply(&mut vault);
         set.attach_cloud(set.selected(), &mut vault);
         Ok((set, store, vault))
     }
@@ -112,6 +126,23 @@ impl VaultSet {
         } else {
             self.base.at(scoped_path(&self.base, id))
         }
+    }
+
+    fn settings_store(&self) -> Store {
+        self.base
+            .at(self.base.path().with_file_name("app-settings.bin"))
+    }
+
+    pub fn update_settings(
+        &self,
+        vault: &mut Vault,
+        change: impl FnOnce(&mut AppSettings),
+    ) -> Result<(), String> {
+        let mut next = AppSettings::from_vault(vault);
+        change(&mut next);
+        self.settings_store().save_data(&next)?;
+        next.apply(vault);
+        Ok(())
     }
 
     pub fn select(
@@ -151,25 +182,51 @@ impl VaultSet {
         }
         let next = self.store_for(id);
         let mut vault = if created {
-            Vault {
-                logs_disabled: current.logs_disabled,
-                ..Vault::default()
-            }
+            Vault::default()
         } else {
             load_saved(&next)?
         };
+        self.settings_store()
+            .read_data::<AppSettings>()?
+            .ok_or_else(|| language::text("The app settings file is missing."))?
+            .apply(&mut vault);
         self.store_for(self.selected()).save(current)?;
-        vault.language = current.language;
-        vault.update_channel = current.update_channel;
-        vault.update_schedule = current.update_schedule;
-        vault.shortcuts = current.shortcuts.clone();
-        vault.privacy_password = current.privacy_password.clone();
         self.attach_cloud(id, &mut vault);
         next.save(&vault)?;
         catalog.selected = id;
         self.save_catalog(&catalog)?;
         self.catalog = catalog;
         Ok((next, vault))
+    }
+
+    pub fn move_host(&self, current: &mut Vault, host: Host, dest: Uuid) -> Result<(), String> {
+        if dest == self.selected() || !self.entries().iter().any(|entry| entry.id == dest) {
+            return Err(language::text("Choose another Vault.").into());
+        }
+        if current.host(host.id).is_none() || host.address.trim().is_empty() {
+            return Err(language::text("Save the host with an address before moving it.").into());
+        }
+        if current.secrets_missing {
+            return Err(language::text("The source Vault is missing saved credentials.").into());
+        }
+
+        let source = self.store_for(self.selected());
+        let target = self.store_for(dest);
+        let mut destination = load_saved(&target)?;
+        let id = host.id;
+        host_move::insert(current, &mut destination, host)?;
+        let mut remaining = current.clone();
+        remaining.remove_host(id);
+
+        target.save(&destination)?;
+        if let Err(error) = source.save(&remaining) {
+            return Err(format!(
+                "{} {error}",
+                language::text("The host was saved in the destination Vault, but the source could not be updated.")
+            ));
+        }
+        *current = remaining;
+        Ok(())
     }
 
     pub fn set_cloud(&mut self, vault: &mut Vault, config: CloudConfig) -> Result<(), String> {
@@ -410,6 +467,338 @@ fn load_saved(store: &Store) -> Result<Vault, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_reassigns_host_and_dependencies_without_switching_vaults() {
+        use crate::vault::{
+            ForwardingRule, Group, HistoryEntry, Identity, RuleKind, Snippet, SshKey,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let base = Store::new(directory.path().join("vault.bin"), [42; 32]);
+        let mut personal = Vault::default();
+        personal.groups.push(Group {
+            id: 2,
+            label: "Source group".into(),
+            parent: None,
+        });
+        personal.save_key(SshKey {
+            id: 3,
+            label: "Fixture key".into(),
+            certificate: Some("fixture certificate".into()),
+            ..SshKey::default()
+        });
+        personal.save_identity(Identity {
+            id: 4,
+            label: "Saved identity".into(),
+            username: "fixture".into(),
+            key: Some(3),
+            ..Identity::default()
+        });
+        personal.save_snippet(Snippet {
+            id: 5,
+            label: "Startup".into(),
+            script: "printf ready".into(),
+            targets: vec![9],
+            ..Snippet::default()
+        });
+        let mut host = crate::vault::tests::host(9, "Moved host", Some(2));
+        host.identity = Some(4);
+        host.key = Some(3);
+        host.settings.startup_snippet = Some(5);
+        host.settings.ctrl_h_backspace = true;
+        personal.save_host(host.clone());
+        let mut forwarding = ForwardingRule::new(10, RuleKind::Dynamic);
+        forwarding.host = Some(host.id);
+        personal.save_rule(forwarding);
+        personal.history.push(HistoryEntry {
+            id: 1,
+            host: Some(host.id),
+            label: host.label.clone(),
+            ..HistoryEntry::default()
+        });
+        let mut another = crate::vault::tests::host(11, "Second host", Some(2));
+        another.identity = host.identity;
+        personal.save_host(another.clone());
+
+        let (mut set, _, _) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        let (work_store, mut work) = set.select(&personal, Destination::New("Work")).unwrap();
+        let work_id = set.selected();
+        work.groups.push(Group {
+            id: 2,
+            label: "Destination group".into(),
+            parent: None,
+        });
+        work.save_key(SshKey {
+            id: 3,
+            label: "Fixture key".into(),
+            ..SshKey::default()
+        });
+        work.save_identity(Identity {
+            id: 4,
+            label: "Saved identity".into(),
+            username: "different".into(),
+            ..Identity::default()
+        });
+        let other = crate::vault::tests::host(9, "Unrelated host", Some(2));
+        work.save_host(other.clone());
+        let (_, mut personal) = set
+            .select(&work, Destination::Existing(Uuid::nil()))
+            .unwrap();
+
+        host.label = "Updated before move".into();
+        set.move_host(&mut personal, host.clone(), work_id).unwrap();
+
+        assert_eq!(set.selected(), Uuid::nil());
+        assert!(personal.host(9).is_none());
+        assert_eq!(personal.host(another.id), Some(&another));
+        assert_eq!(personal.history[0].host, Some(9));
+        assert_eq!(personal.rule(10).unwrap().host, None);
+        assert!(personal.snippet(5).unwrap().targets.is_empty());
+        assert!(personal.identity(4).is_some() && personal.key(3).is_some());
+        assert_eq!(load_saved(&base).unwrap(), personal);
+
+        let work = load_saved(&work_store).unwrap();
+        assert_eq!(work.host(9), Some(&other));
+        let moved = work.hosts.iter().find(|h| h.label == host.label).unwrap();
+        assert_ne!(moved.id, host.id);
+        assert_eq!(moved.group, None);
+        let key = work.key(moved.key.unwrap()).unwrap();
+        assert_ne!(key.id, 3);
+        assert_eq!(key.certificate, personal.key(3).unwrap().certificate);
+        let identity = work.identity(moved.identity.unwrap()).unwrap();
+        assert_ne!(identity.id, 4);
+        assert_eq!(identity.username, "fixture");
+        assert_eq!(identity.key, Some(key.id));
+        let startup = work
+            .snippet(moved.settings.startup_snippet.unwrap())
+            .unwrap();
+        assert_eq!(startup.script, "printf ready");
+        assert!(startup.targets.is_empty());
+        assert!(moved.settings.ctrl_h_backspace);
+        assert!(work.history.is_empty());
+
+        let (mut set, _, mut work) = VaultSet::load(base.clone(), personal.clone())
+            .and_then(|(mut set, _, personal)| {
+                let (store, work) = set.select(&personal, Destination::Existing(work_id))?;
+                Ok((set, store, work))
+            })
+            .unwrap();
+        let moved = work.host(moved.id).unwrap().clone();
+        set.move_host(&mut work, moved, Uuid::nil()).unwrap();
+        let (_, back) = set
+            .select(&work, Destination::Existing(Uuid::nil()))
+            .unwrap();
+        let returned = back.hosts.iter().find(|h| h.label == host.label).unwrap();
+        assert!(returned.id > another.id);
+        assert_eq!(returned.key, Some(3));
+        assert_eq!(returned.identity, Some(4));
+        assert_eq!(returned.settings.startup_snippet, Some(5));
+        assert_eq!(back.keys.len(), 1);
+        assert_eq!(back.identities.len(), 1);
+        assert_eq!(back.snippets.len(), 1);
+    }
+
+    #[test]
+    fn move_preserves_a_typed_startup_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = Store::new(directory.path().join("vault.bin"), [42; 32]);
+        let mut personal = Vault::default();
+        let mut host = crate::vault::tests::host(9, "Moved host", None);
+        let command = "printf ready\npwd";
+        host.settings.set_startup_command(command.into());
+        personal.save_host(host.clone());
+        let (mut set, _, _) = VaultSet::load(base, personal.clone()).unwrap();
+        let (destination, work) = set.select(&personal, Destination::New("Work")).unwrap();
+        let work_id = set.selected();
+        let (_, mut personal) = set.select(&work, Destination::Existing(Uuid::nil())).unwrap();
+
+        set.move_host(&mut personal, host, work_id).unwrap();
+
+        let moved = load_saved(&destination).unwrap();
+        assert!(moved.snippets.is_empty());
+        assert_eq!(moved.hosts[0].settings.ssh_startup(&moved, None).as_deref(), Some(command));
+        assert!(personal.hosts.is_empty());
+    }
+
+    #[test]
+    fn move_keeps_source_when_destination_cannot_be_loaded() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = Store::new(directory.path().join("vault.bin"), [42; 32]);
+        let host = crate::vault::tests::host(9, "Retained", None);
+        let personal = Vault {
+            hosts: vec![host.clone()],
+            ..Vault::default()
+        };
+        let (mut set, _, _) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        let (work_store, work) = set.select(&personal, Destination::New("Work")).unwrap();
+        let work_id = set.selected();
+        let (_, mut personal) = set
+            .select(&work, Destination::Existing(Uuid::nil()))
+            .unwrap();
+        std::fs::write(work_store.path(), b"damaged fixture").unwrap();
+
+        assert!(set.move_host(&mut personal, host.clone(), work_id).is_err());
+        assert_eq!(personal.host(9), Some(&host));
+        assert_eq!(load_saved(&base).unwrap(), personal);
+        assert_eq!(
+            std::fs::read(work_store.path()).unwrap(),
+            b"damaged fixture"
+        );
+    }
+
+    #[test]
+    fn move_keeps_destination_copy_if_source_save_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let base = Store::new(directory.path().join("vault.bin"), [42; 32]);
+        let host = crate::vault::tests::host(9, "Retained", None);
+        let personal = Vault {
+            hosts: vec![host.clone()],
+            ..Vault::default()
+        };
+        let (mut set, _, _) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        let (work_store, work) = set.select(&personal, Destination::New("Work")).unwrap();
+        let work_id = set.selected();
+        let (_, mut personal) = set
+            .select(&work, Destination::Existing(Uuid::nil()))
+            .unwrap();
+        let preserved = base.path().with_file_name("preserved.bin");
+        std::fs::rename(base.path(), &preserved).unwrap();
+        std::fs::create_dir(base.path()).unwrap();
+
+        assert!(set.move_host(&mut personal, host.clone(), work_id).is_err());
+        assert_eq!(personal.host(9), Some(&host));
+        assert_eq!(load_saved(&base.at(preserved)).unwrap(), personal);
+        let work = load_saved(&work_store).unwrap();
+        assert_eq!(work.hosts.len(), 1);
+        assert_eq!(work.hosts[0].address, host.address);
+    }
+
+    #[test]
+    fn settings_are_shared_across_vaults_and_restarts() {
+        use crate::{
+            listing::{Listing, SortOrder, ViewMode},
+            vault::{HistoryEntry, Identity},
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let base = Store::new(dir.path().join("vault.bin"), [42; 32]);
+        let work_id = Uuid::new_v4();
+        let mut catalog = Catalog::default();
+        catalog.entries.push(VaultEntry {
+            id: work_id,
+            name: "Work".into(),
+        });
+        catalog.selected = work_id;
+        base.at(base.path().with_file_name("vaults.bin"))
+            .save_data(&catalog)
+            .unwrap();
+
+        let mut personal = one_host("Personal host");
+        personal.terminal.color_scheme = "dracula".into();
+        personal.identities.push(Identity {
+            id: 2,
+            label: "Personal identity".into(),
+            ..Identity::default()
+        });
+        personal.history.push(HistoryEntry {
+            id: 1,
+            label: "Personal session".into(),
+            ..HistoryEntry::default()
+        });
+        base.save(&personal).unwrap();
+
+        let mut work = one_host("Work host");
+        work.terminal.color_scheme = "nord".into();
+        work.terminal.font_size = 17;
+        work.foreign = serde_json::json!({"settings": {"keep_alive_interval": "45"}});
+        let work_store = base.at(scoped_path(&base, work_id));
+        work_store.save(&work).unwrap();
+
+        let (mut set, _, mut work) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        assert_eq!(
+            (
+                work.terminal.color_scheme.as_str(),
+                work.terminal.font_size,
+                work.terminal.keep_alive
+            ),
+            ("nord", 17, 45)
+        );
+        let initial_vault_file = std::fs::read(work_store.path()).unwrap();
+        let layout = Listing {
+            view: ViewMode::List,
+            sort: SortOrder::AZ,
+        };
+        set.update_settings(&mut work, |vault| {
+            vault.terminal.color_scheme = "monokai".into();
+            vault.terminal.font_family = "Fira Code".into();
+            vault.terminal.font_size = 21;
+            vault.terminal.keep_alive = 0;
+            vault.listing.insert("hosts".into(), layout);
+            vault.language = crate::language::Language::Russian;
+            vault.logs_disabled = true;
+            vault.shortcuts.current = crate::shortcuts::Current::Disabled;
+        })
+        .unwrap();
+        assert_eq!(
+            std::fs::read(work_store.path()).unwrap(),
+            initial_vault_file
+        );
+        let (_, _, running) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        assert_eq!(
+            running.terminal, work.terminal,
+            "editing settings persists even before switching"
+        );
+
+        let (_, restored) = set
+            .select(&work, Destination::Existing(Uuid::nil()))
+            .unwrap();
+        assert_eq!(restored.hosts, personal.hosts);
+        assert_eq!(restored.history, personal.history);
+        assert_eq!(restored.identities, personal.identities);
+        assert_eq!(restored.terminal, work.terminal);
+        assert_eq!(restored.listing.get("hosts"), Some(&layout));
+        assert_eq!(restored.language, crate::language::Language::Russian);
+        assert!(restored.logs_disabled);
+        assert_eq!(restored.shortcuts, work.shortcuts);
+
+        let (_, reopened) = set
+            .select(&restored, Destination::Existing(work_id))
+            .unwrap();
+        assert_eq!(reopened.terminal.keep_alive, 0);
+        assert_eq!(
+            crate::session::SshOptions::from_vault(&reopened).keepalive,
+            0
+        );
+        assert_eq!(reopened.foreign["settings"]["keep_alive_interval"], "45");
+        assert_eq!(reopened.hosts, work.hosts);
+        assert!(reopened.history.is_empty() && reopened.identities.is_empty());
+        let (_, blank) = set.select(&reopened, Destination::New("New")).unwrap();
+        assert!(blank.hosts.is_empty() && blank.history.is_empty() && blank.identities.is_empty());
+        assert_eq!(blank.terminal, work.terminal);
+        assert_eq!(blank.listing.get("hosts"), Some(&layout));
+    }
+
+    #[test]
+    fn failed_settings_write_leaves_vault_and_active_settings_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = Store::new(dir.path().join("vault.bin"), [42; 32]);
+        let personal = one_host("Only host");
+        base.save(&personal).unwrap();
+        let (set, _, mut active) = VaultSet::load(base.clone(), personal.clone()).unwrap();
+        let settings = set.settings_store();
+        let preserved = settings.path().with_file_name("preserved-settings.bin");
+        let original = std::fs::read(base.path()).unwrap();
+        std::fs::rename(settings.path(), &preserved).unwrap();
+        std::fs::create_dir(settings.path()).unwrap();
+        assert!(set
+            .update_settings(&mut active, |vault| vault.terminal.font_size = 21)
+            .is_err());
+        assert_eq!(active.terminal, personal.terminal);
+        assert_eq!(std::fs::read(base.path()).unwrap(), original);
+        assert!(VaultSet::load(base, personal).is_err());
+        assert!(settings.path().is_dir());
+    }
 
     #[test]
     fn switching_keeps_records_and_log_paths_in_their_vaults() {

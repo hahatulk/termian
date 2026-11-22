@@ -1,6 +1,8 @@
 //! What the connection screen shows while an SSH login is in progress:
 //! the current stage, a log, and the question waiting for the user.
 
+use std::time::{Duration, Instant};
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Stage {
     Connecting,
@@ -8,6 +10,70 @@ pub enum Stage {
     Verifying,
     Authenticating,
     Ready,
+}
+
+const FIRST_STAGE: Duration = Duration::from_millis(140);
+const TO_CENTER: Duration = Duration::from_millis(340);
+const CENTER_STAGE: Duration = Duration::from_millis(100);
+const TO_END: Duration = Duration::from_millis(300);
+const END_STAGE: Duration = Duration::from_millis(120);
+const FADE: Duration = Duration::from_millis(230);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LoginProgress {
+    started: Instant,
+    center: Option<Instant>,
+    end: Option<Instant>,
+}
+
+pub struct ProgressFrame {
+    pub position: f32,
+    pub rotation: Option<f32>,
+    pub opacity: f32,
+}
+
+impl LoginProgress {
+    fn new(started: Instant) -> Self {
+        Self { started, center: None, end: None }
+    }
+
+    fn advance(&mut self, stage: Stage, now: Instant) {
+        if stage >= Stage::Verifying {
+            let center = *self.center.get_or_insert(now.max(self.started + FIRST_STAGE));
+            if stage == Stage::Ready {
+                self.end.get_or_insert(now.max(center + TO_CENTER + CENTER_STAGE));
+            }
+        }
+    }
+
+    pub fn finish_at(&self) -> Option<Instant> {
+        self.end.map(|start| start + TO_END + END_STAGE + FADE)
+    }
+
+    pub fn frame(&self, now: Instant, animate: bool) -> ProgressFrame {
+        let fraction = |start: Instant, duration: Duration| {
+            (now.saturating_duration_since(start).as_secs_f32() / duration.as_secs_f32()).min(1.)
+        };
+        let ease = |t: f32| t * t * (3. - 2. * t);
+        let position = if animate {
+            let center = self.center.map_or(0., |start| ease(fraction(start, TO_CENTER)));
+            let end = self.end.map_or(0., |start| ease(fraction(start, TO_END)));
+            (center + end) / 2.
+        } else if self.end.is_some() {
+            1.
+        } else if self.center.is_some() {
+            0.5
+        } else {
+            0.
+        };
+        let rotation = (position < 1.).then(|| {
+            if animate { (now.saturating_duration_since(self.started).as_secs_f32() / 0.9).fract() } else { 0. }
+        });
+        let opacity = self.end.map_or(1., |start| {
+            if animate { 1. - fraction(start + TO_END + END_STAGE, FADE) } else { 0. }
+        });
+        ProgressFrame { position, rotation, opacity }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +124,7 @@ pub enum Question {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LoginState {
     pub stage: Stage,
+    pub motion: LoginProgress,
     pub logs: Vec<String>,
     pub question: Option<Question>,
     /// What the user has typed for a text question.
@@ -77,6 +144,7 @@ impl Default for LoginState {
     fn default() -> Self {
         Self {
             stage: Stage::Connecting,
+            motion: LoginProgress::new(Instant::now()),
             logs: Vec::new(),
             question: None,
             input: String::new(),
@@ -93,10 +161,10 @@ impl Default for LoginState {
 impl LoginState {
     pub fn apply(&mut self, event: LoginEvent) {
         match event {
-            LoginEvent::Stage(stage) => self.stage = stage,
+            LoginEvent::Stage(stage) => self.advance(stage),
             LoginEvent::Log(line) => self.logs.push(line),
             LoginEvent::HostKey(info) => {
-                self.stage = Stage::Verifying;
+                self.advance(Stage::Verifying);
                 self.question = Some(Question::HostKey(info));
             }
             LoginEvent::Prompt { text, echo } => {
@@ -105,6 +173,11 @@ impl LoginState {
             }
             LoginEvent::HostKeyChanged(info) => self.changed_key = Some(info),
         }
+    }
+
+    fn advance(&mut self, stage: Stage) {
+        self.stage = self.stage.max(stage);
+        self.motion.advance(self.stage, Instant::now());
     }
 
     /// The login ended without a shell.
@@ -142,18 +215,9 @@ impl LoginState {
         }
     }
 
-    /// Progress of the three-step bar (connect, host key, terminal) as 0.0..=1.0.
     /// The Username question, which offers saved identities.
     pub fn asks_username(&self) -> bool {
         matches!(&self.question, Some(Question::Text { prompt, echo: true }) if prompt == "Username")
-    }
-
-    pub fn progress(&self) -> f32 {
-        match self.stage {
-            Stage::Connecting => 0.,
-            Stage::Verifying | Stage::Authenticating => 0.5,
-            Stage::Ready => 1.,
-        }
     }
 }
 
@@ -226,10 +290,52 @@ mod tests {
         state.apply(LoginEvent::Log("Connecting".into()));
         state.apply(LoginEvent::HostKey(key()));
         assert_eq!(state.stage, Stage::Verifying);
-        assert_eq!(state.progress(), 0.5);
+        assert_eq!(state.motion.frame(Instant::now(), false).position, 0.5);
         assert_eq!(state.answer(Answer::HostKey(HostKeyDecision::Save)), Some(Answer::HostKey(HostKeyDecision::Save)));
         assert_eq!(state.answer(Answer::HostKey(HostKeyDecision::Save)), None, "no question left");
         assert_eq!(state.logs, ["Connecting"]);
+    }
+
+    #[test]
+    fn progress_uses_all_three_stages_when_events_arrive_together() {
+        let start = Instant::now();
+        let mut progress = LoginProgress::new(start);
+        let ready = start + Duration::from_millis(30);
+        progress.advance(Stage::Ready, ready);
+        let middle = start + FIRST_STAGE;
+        let end = middle + TO_CENTER + CENTER_STAGE;
+        assert_eq!(progress.frame(ready, true).position, 0.);
+        assert_eq!(progress.frame(middle + TO_CENTER / 2, true).position, 0.25);
+        assert_eq!(progress.frame(end, true).position, 0.5);
+        assert_eq!(progress.frame(end + TO_END / 2, true).position, 0.75);
+        let landed = progress.frame(end + TO_END, true);
+        assert_eq!(landed.position, 1.);
+        assert!(landed.rotation.is_none());
+        assert_eq!(landed.opacity, 1.);
+        assert_eq!(progress.frame(end + TO_END + END_STAGE + FADE / 2, true).opacity, 0.5);
+        assert_eq!(progress.frame(progress.finish_at().unwrap(), true).opacity, 0.);
+    }
+
+    #[test]
+    fn prompts_and_later_stage_events_do_not_restart_the_motion() {
+        let start = Instant::now();
+        let mut login = LoginState { motion: LoginProgress::new(start), ..LoginState::default() };
+        login.apply(LoginEvent::Stage(Stage::Verifying));
+        let motion = login.motion;
+        login.apply(LoginEvent::HostKey(key()));
+        login.answer(Answer::HostKey(HostKeyDecision::Once));
+        login.apply(LoginEvent::Stage(Stage::Authenticating));
+        login.apply(LoginEvent::Prompt { text: "Password:".into(), echo: false });
+        login.apply(LoginEvent::Stage(Stage::Connecting));
+        assert_eq!(login.stage, Stage::Authenticating);
+        assert_eq!(login.motion, motion);
+        let now = start + Duration::from_millis(700);
+        let frame = login.motion.frame(now, true);
+        assert_eq!(frame.position, 0.5);
+        assert_eq!(frame.rotation, motion.frame(now, true).rotation);
+        let frame = login.motion.frame(now, false);
+        assert_eq!(frame.position, 0.5);
+        assert_eq!(frame.rotation, Some(0.));
     }
 
     #[test]

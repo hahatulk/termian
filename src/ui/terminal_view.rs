@@ -9,9 +9,10 @@ use gpui::{
     MouseUpEvent, Pixels, Point, ScrollDelta, ScrollWheelEvent, SharedString, TextRun, Window,
 };
 use std::{cell::Cell, rc::Rc};
-use termian_native::login::{Answer, LoginEvent, LoginState, Stage};
+use termian_native::login::{Answer, LoginEvent, LoginProgress, LoginState, Stage};
 use termian_native::session::{self, Session, SessionEvent, SshTarget};
-use termian_native::terminal::{key_bytes, paste_bytes, Modifiers, Run, Terminal};
+use termian_native::terminal::mouse::{Button as TerminalButton, Event as TerminalMouse};
+use termian_native::terminal::{paste_bytes, Modifiers, Run, Terminal};
 use termian_native::terminal_settings::{font_face, TerminalSettings};
 
 use super::pointer::PointerFeedback;
@@ -87,6 +88,27 @@ impl CellGrid {
         )
     }
 
+    fn contains(self, position: Point<Pixels>, rows: usize, columns: usize) -> bool {
+        let offset = position - self.origin;
+        offset.x >= px(0.) && offset.y >= px(0.)
+            && offset.x < self.cell_width * columns && offset.y < self.line_height * rows
+    }
+
+    fn edge_scroll_lines(self, y: Pixels, rows: usize) -> i32 {
+        let y = f32::from(y - self.origin.y);
+        let line_height = f32::from(self.line_height);
+        let edge = line_height * 0.25;
+        let bottom = line_height * rows as f32 - edge;
+        let (distance, direction) = if y < edge {
+            (edge - y, 1)
+        } else if y >= bottom {
+            (y - bottom, -1)
+        } else {
+            return 0;
+        };
+        direction * (1 + (distance / 8.).min(23.) as i32)
+    }
+
     fn hit(self, position: Point<Pixels>, rows: usize, columns: usize) -> (usize, usize, Side) {
         let local = position - self.origin;
         let row = ((local.y / self.line_height).floor() as usize).min(rows - 1);
@@ -143,16 +165,20 @@ pub struct TerminalView {
     terminal: Terminal,
     session: Session,
     focus: FocusHandle,
+    _keyboard: gpui::Subscription,
+    _selection_blur: gpui::Subscription,
     closed: bool,
     cell_width: Option<f32>,
     grid_origin: Rc<Cell<Point<Pixels>>>,
-    selecting: bool,
+    selection_drag: Option<SelectionDrag>,
+    mouse_scroll: Point<f32>,
+    local_scroll: f32,
     copied: Option<gpui::Task<()>>,
     /// SSH tabs show the connection screen until the shell is ready.
     connection: Option<Connection>,
     login: Option<LoginState>,
     /// The shell became ready: the connection screen hands over (legacy animation).
-    connected: Option<(std::time::Instant, u64)>,
+    connected: Option<LoginProgress>,
     /// The host's «Backspace: Ctrl+H»: Backspace sends ^H instead of DEL.
     ctrl_h_backspace: bool,
     login_focus: FocusHandle,
@@ -188,6 +214,11 @@ pub struct TerminalView {
     autocomplete: Autocomplete,
 }
 
+#[derive(Default)]
+struct SelectionDrag {
+    autoscroll: Option<gpui::Task<()>>,
+}
+
 /// The inline autocomplete popup of this terminal.
 #[derive(Default)]
 struct Autocomplete {
@@ -196,7 +227,6 @@ struct Autocomplete {
     candidates: std::sync::Arc<termian_native::autocomplete::Candidates>,
     line: termian_native::autocomplete::Line,
     shown: Vec<termian_native::autocomplete::Suggestion>,
-    selected: Option<usize>,
     dismissed: bool,
 }
 
@@ -231,14 +261,30 @@ impl TerminalView {
         let login_focus = cx.focus_handle();
         window.focus(if connection.is_some() { &login_focus } else { &focus });
         Self::listen(&mut session, 0, window, cx);
+        let keyboard_focus = focus.clone();
+        let view = cx.weak_entity();
+        let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
+            if keyboard_focus.is_focused(window) && !event.keystroke.modifiers.platform
+                && event.context_stack.iter().any(|context| context.contains("Terminal"))
+            {
+                let _ = view.update(cx, |view, cx| view.input_key(&event.keystroke, cx));
+            }
+        });
+        let selection_blur = cx.on_blur(&focus, window, |view, _, _| {
+            view.selection_drag = None;
+        });
         Self {
             terminal: Terminal::with_settings(80, 24, settings),
             session,
             focus,
+            _keyboard: keyboard,
+            _selection_blur: selection_blur,
             closed: false,
             cell_width: None,
             grid_origin: Rc::default(),
-            selecting: false,
+            selection_drag: None,
+            mouse_scroll: point(0., 0.),
+            local_scroll: 0.,
             copied: None,
             login: connection.as_ref().map(|_| LoginState::default()),
             connected: None,
@@ -432,20 +478,26 @@ impl TerminalView {
     fn handle(&mut self, event: SessionEvent, window: &mut Window, cx: &mut Context<Self>) -> Option<Box<dyn FnOnce() + Send>> {
         match event {
             SessionEvent::Login(LoginEvent::Stage(Stage::Ready)) => {
-                // A first connection or a reconnect from the connection screen hands over with the legacy animation.
-                if self.login.take().is_some() {
-                    let key = self.generation;
-                    self.connected = Some((std::time::Instant::now(), key));
-                    cx.spawn(async move |this, cx| {
-                        cx.background_executor().timer(login_view::CONNECTED_TOTAL).await;
-                        let _ = this.update(cx, |view, cx| {
-                            if view.connected.is_some_and(|(_, k)| k == key) {
-                                view.connected = None;
-                                cx.notify();
-                            }
-                        });
-                    })
-                    .detach();
+                if let Some(mut login) = self.login.take() {
+                    login.apply(LoginEvent::Stage(Stage::Ready));
+                    if super::motion::enabled() {
+                        let motion = login.motion;
+                        let key = self.generation;
+                        self.connected = Some(motion);
+                        if let Some(finish) = motion.finish_at() {
+                            let timer = cx.background_executor().timer(finish.saturating_duration_since(std::time::Instant::now()));
+                            cx.spawn(async move |this, cx| {
+                                timer.await;
+                                let _ = this.update(cx, |view, cx| {
+                                    if view.generation == key && view.connected == Some(motion) {
+                                        view.connected = None;
+                                        cx.notify();
+                                    }
+                                });
+                            })
+                            .detach();
+                        }
+                    }
                 }
                 self.closed = false;
                 if !self.was_ready {
@@ -642,65 +694,124 @@ impl TerminalView {
         Some(text_input::field(field, "terminal-search", Mode::Line, |view, window, _| window.focus(&view.search_focus), cx))
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.closed {
+    fn accepts_input(&self) -> bool {
+        !self.closed && self.login.is_none() && self.serial_form.is_none()
+    }
+
+    fn input_key(&mut self, keystroke: &gpui::Keystroke, cx: &mut Context<Self>) {
+        if !self.accepts_input() {
             return;
         }
-        let keystroke = &event.keystroke;
+        cx.stop_propagation();
         let mods = keystroke.modifiers;
-        if mods.platform {
-            if keystroke.key == "c" {
-                if let Some(text) = self.terminal.selection_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            } else if keystroke.key == "v" {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    let bytes = paste_bytes(&text, self.terminal.bracketed_paste());
-                    self.session.write(&bytes);
-                    cx.emit(TerminalEvent::Input(bytes));
-                    self.autocomplete.line.insert(&text);
-                    self.refresh_suggestions();
-                }
+        let character = keystroke.key == "space" || keystroke.key.chars().count() == 1;
+        let alt = mods.alt && (!cfg!(target_os = "macos") || self.settings.option_is_meta || mods.control || !character);
+        let typed = if cfg!(target_os = "macos") && alt && character {
+            None
+        } else {
+            keystroke.key_char.as_deref()
+        };
+        let mods = Modifiers { control: mods.control, alt, shift: mods.shift };
+        if let Some(bytes) = self.terminal.key_input(&keystroke.key, typed, mods, self.ctrl_h_backspace) {
+            self.selection_drag = None;
+            self.terminal.scroll(i32::MIN / 2);
+            self.terminal.clear_selection();
+            if bytes.is_ascii() {
+                self.session.write_raw(bytes.clone());
+            } else {
+                self.session.write(&bytes);
             }
-            return; // other Cmd shortcuts belong to the app
+            cx.emit(TerminalEvent::Input(bytes));
+            self.autocomplete.line.key(&keystroke.key, typed, mods.control || mods.alt);
+            if keystroke.key == "escape" {
+                self.autocomplete.dismissed = true;
+            }
+            self.refresh_suggestions();
+            cx.notify();
         }
-        if !mods.control && !mods.alt && self.autocomplete_key(&keystroke.key, cx) {
-            cx.stop_propagation();
+    }
+
+    pub(super) fn copy_selection(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.terminal.selection_text() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    pub(super) fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
+        if !self.accepts_input() {
             return;
         }
-        // Without «Use Option as Meta key» Option types the character macOS composes.
-        let arrow = matches!(keystroke.key.as_str(), "up" | "down" | "left" | "right");
-        let alt = mods.alt && (self.settings.option_is_meta || arrow || !cfg!(target_os = "macos"));
-        let mods = Modifiers { control: mods.control, alt, shift: mods.shift };
-        if let Some(mut bytes) = key_bytes(&keystroke.key, keystroke.key_char.as_deref(), mods, self.terminal.app_cursor()) {
-            if self.ctrl_h_backspace && bytes == [0x7f] {
-                bytes = vec![0x08];
-            }
-            self.terminal.scroll(i32::MIN / 2); // typing jumps back to the prompt
-            self.terminal.clear_selection();
+        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+            self.terminal.scroll(i32::MIN / 2);
+            let bytes = paste_bytes(&text, self.terminal.bracketed_paste());
             self.session.write(&bytes);
             cx.emit(TerminalEvent::Input(bytes));
-            self.autocomplete.line.key(&keystroke.key, keystroke.key_char.as_deref(), mods.control || mods.alt);
+            self.autocomplete.line.insert(&text);
             self.refresh_suggestions();
-            cx.stop_propagation();
             cx.notify();
+        }
+    }
+
+    fn grid(&self) -> CellGrid {
+        CellGrid {
+            origin: self.grid_origin.get(),
+            cell_width: px(self.cell_width.unwrap_or(8.)),
+            line_height: px(self.line_height()),
         }
     }
 
     fn selection_cell(&self, position: Point<Pixels>) -> (usize, usize, Side) {
         let (columns, rows) = self.terminal.size();
-        CellGrid {
-            origin: self.grid_origin.get(),
-            cell_width: px(self.cell_width.unwrap_or(8.)),
-            line_height: px(self.line_height()),
-        }.hit(position, rows, columns)
+        self.grid().hit(position, rows, columns)
+    }
+
+    fn mouse_tracking(&self) -> bool {
+        !self.closed && self.frozen.is_none() && self.terminal.mouse_tracking()
+    }
+
+    fn send_mouse(&mut self, event: TerminalMouse, position: Point<Pixels>, modifiers: gpui::Modifiers, clamp: bool) -> bool {
+        if self.closed || self.frozen.is_some() {
+            return false;
+        }
+        let (columns, rows) = self.terminal.size();
+        let grid = self.grid();
+        if !clamp && !grid.contains(position, rows, columns) {
+            return false;
+        }
+        let (row, column, _) = grid.hit(position, rows, columns);
+        let mods = Modifiers { control: modifiers.control, alt: modifiers.alt, shift: modifiers.shift };
+        if let Some(bytes) = self.terminal.mouse_input(event, (row, column), mods) {
+            self.session.write_raw(bytes);
+            return true;
+        }
+        false
     }
 
     fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(button) = terminal_button(event.button) else { return };
         window.focus(&self.focus);
+        if self.mouse_tracking() && !event.modifiers.shift {
+            if self.send_mouse(TerminalMouse::Press(button), event.position, event.modifiers, false) {
+                self.selection_drag = None;
+                self.terminal.clear_selection();
+                cx.stop_propagation();
+                cx.notify();
+            }
+            return;
+        }
+        if button == TerminalButton::Right {
+            self.paste_on_right_click(cx);
+            return;
+        }
+        if button != TerminalButton::Left {
+            return;
+        }
         let (row, column, side) = self.selection_cell(event.position);
-        self.terminal.start_selection(row, column, side, event.click_count == 2);
-        self.selecting = true;
+        if !event.modifiers.shift || !self.terminal.extend_selection(row, column, side) {
+            self.terminal.start_selection(row, column, side, event.click_count == 2);
+        }
+        self.selection_drag = Some(SelectionDrag::default());
+        self.local_scroll = 0.;
         cx.notify();
     }
 
@@ -709,15 +820,79 @@ impl TerminalView {
         self.terminal.extend_selection(row, column, side);
     }
 
-    fn on_mouse_move(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if self.selecting && event.pressed_button == Some(MouseButton::Left) {
-            self.extend_selection_at(event.position);
+    fn scroll_selection(&mut self, lines: i32, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let (row, column, side) = self.selection_cell(position);
+        if self.terminal.scroll_selection(lines, row, column, side) {
             cx.notify();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn start_selection_autoscroll(&mut self, position: Point<Pixels>, window: &Window, cx: &mut Context<Self>) {
+        if self.grid().edge_scroll_lines(position.y, self.terminal.size().1) == 0 {
+            return;
+        }
+        let Some(drag) = self.selection_drag.as_mut().filter(|drag| drag.autoscroll.is_none()) else { return };
+        drag.autoscroll = Some(cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(32)).await;
+                let scrolling = this.update_in(cx, |view, window, cx| {
+                    let active = window.is_window_active() && view.focus.is_focused(window);
+                    let position = window.mouse_position();
+                    let lines = view.grid().edge_scroll_lines(position.y, view.terminal.size().1);
+                    if active && lines != 0 && view.scroll_selection(lines, position, cx) {
+                        return true;
+                    }
+                    if let Some(task) = view.selection_drag.as_mut().and_then(|drag| drag.autoscroll.take()) {
+                        task.detach();
+                    }
+                    if !active {
+                        view.selection_drag = None;
+                    }
+                    false
+                });
+                if !matches!(scrolling, Ok(true)) {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn on_mouse_drag(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection_drag.is_some() {
+            if event.pressed_button == Some(MouseButton::Left) {
+                self.extend_selection_at(event.position);
+                self.start_selection_autoscroll(event.position, window, cx);
+                cx.notify();
+                return;
+            }
+            self.selection_drag = None;
+        }
+        if let Some(button) = event.pressed_button.and_then(terminal_button) {
+            if self.terminal.mouse_pressed(button) {
+                self.send_mouse(TerminalMouse::Move(Some(button)), event.position, event.modifiers, true);
+            }
+        }
+    }
+
+    fn on_mouse_hover(&mut self, event: &MouseMoveEvent, _: &mut Window, _: &mut Context<Self>) {
+        if event.pressed_button.is_none() && self.mouse_tracking() {
+            self.send_mouse(TerminalMouse::Move(None), event.position, event.modifiers, false);
         }
     }
 
     fn on_mouse_up(&mut self, event: &MouseUpEvent, _: &mut Window, cx: &mut Context<Self>) {
-        if event.button != MouseButton::Left || !std::mem::take(&mut self.selecting) {
+        if let Some(button) = terminal_button(event.button) {
+            if self.terminal.mouse_pressed(button) {
+                if self.send_mouse(TerminalMouse::Release(button), event.position, event.modifiers, true) {
+                    cx.stop_propagation();
+                }
+                return;
+            }
+        }
+        if event.button != MouseButton::Left || self.selection_drag.take().is_none() {
             return;
         }
         self.extend_selection_at(event.position);
@@ -732,14 +907,11 @@ impl TerminalView {
                     cx.notify();
                 });
             }));
-        } else {
-            self.terminal.clear_selection();
         }
         cx.notify();
     }
 
-    fn on_right_click(&mut self, _: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        window.focus(&self.focus);
+    fn paste_on_right_click(&mut self, cx: &mut Context<Self>) {
         if self.closed || !self.settings.copy_on_select {
             return;
         }
@@ -760,7 +932,11 @@ impl TerminalView {
     pub fn write_input(&mut self, bytes: &[u8]) {
         if !self.closed && self.serial_form.is_none() && self.login.is_none() {
             self.terminal.scroll(i32::MIN / 2);
-            self.session.write(bytes);
+            if bytes.is_ascii() {
+                self.session.write_raw(bytes.to_vec());
+            } else {
+                self.session.write(bytes);
+            }
         }
     }
 
@@ -876,52 +1052,14 @@ impl TerminalView {
             Some(typed) if a.enabled && !a.dismissed => a.candidates.matching(typed),
             _ => Vec::new(),
         };
-        if a.selected.is_some_and(|i| i >= a.shown.len()) {
-            a.selected = None;
-        }
     }
 
-    /// Keys the open popup takes: ↑/↓ choose, Tab or → insert, Enter runs a
-    /// chosen suggestion, Escape closes it until the next prompt.
-    fn autocomplete_key(&mut self, key: &str, cx: &mut Context<Self>) -> bool {
+    fn accept_suggestion(&mut self, index: usize, cx: &mut Context<Self>) {
         let a = &mut self.autocomplete;
-        if a.shown.is_empty() {
-            return false;
-        }
-        let count = a.shown.len();
-        match key {
-            "down" => a.selected = Some(a.selected.map_or(0, |i| (i + 1) % count)),
-            "up" => a.selected = Some(a.selected.map_or(count - 1, |i| (i + count - 1) % count)),
-            "escape" => {
-                a.dismissed = true;
-                a.selected = None;
-                a.shown.clear();
-            }
-            "tab" | "right" => {
-                let index = a.selected.unwrap_or(0);
-                self.accept_suggestion(index, false, cx);
-            }
-            "enter" if a.selected.is_some() => {
-                let index = a.selected.unwrap_or(0);
-                self.accept_suggestion(index, true, cx);
-            }
-            _ => return false,
-        }
-        cx.notify();
-        true
-    }
-
-    fn accept_suggestion(&mut self, index: usize, run: bool, cx: &mut Context<Self>) {
-        let a = &mut self.autocomplete;
-        let (Some(typed), Some(suggestion)) = (a.line.text().map(str::to_owned), a.shown.get(index).cloned()) else { return };
-        let rest = suggestion.rest(&typed).to_owned();
+        let (Some(typed), Some(suggestion)) = (a.line.text(), a.shown.get(index)) else { return };
+        let rest = suggestion.rest(typed).to_owned();
         a.line.insert(&rest);
-        a.selected = None;
-        let mut bytes = rest.into_bytes();
-        if run {
-            bytes.push(b'\r');
-            self.autocomplete.line.stop();
-        }
+        let bytes = rest.into_bytes();
         self.terminal.scroll(i32::MIN / 2);
         self.session.write(&bytes);
         cx.emit(TerminalEvent::Input(bytes));
@@ -943,7 +1081,6 @@ impl TerminalView {
         let below = PADDING + (row + 1) as f32 * line_height;
         let top = if row + 1 + (height / line_height).ceil() as usize > rows { (PADDING + row as f32 * line_height - height).max(0.) } else { below };
         let rows = a.shown.iter().enumerate().map(|(i, s)| {
-            let selected = a.selected == Some(i);
             let source = match &s.source {
                 termian_native::autocomplete::Source::History => "history".to_owned(),
                 termian_native::autocomplete::Source::Snippet(label) => label.clone(),
@@ -956,12 +1093,12 @@ impl TerminalView {
                 .items_center()
                 .gap_3()
                 .rounded_sm()
-                .when(selected, |d| d.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
+                .hover(|style| style.bg(rgb(termian_native::theme::SURFACE_ACTIVE)))
                 .child(div().flex_1().min_w_0().truncate().child(div().flex().child(div().text_color(rgb(termian_native::theme::TEXT)).child(typed.to_owned())).child(div().text_color(rgb(termian_native::theme::TEXT_MUTED)).child(s.rest(typed).to_owned()))))
                 .child(div().flex_none().text_xs().font_family(".SystemUIFont").text_color(rgb(termian_native::theme::TEXT_MUTED)).child(source))
                 .on_mouse_down(MouseButton::Left, cx.listener(move |view, _, _, cx| {
                     cx.stop_propagation();
-                    view.accept_suggestion(i, false, cx);
+                    view.accept_suggestion(i, cx);
                     cx.notify();
                 }))
         });
@@ -993,8 +1130,7 @@ impl TerminalView {
     pub fn run(&mut self, text: &str) {
         if !self.closed {
             self.terminal.scroll(i32::MIN / 2);
-            self.session.write(&paste_bytes(text, false));
-            self.session.write(b"\r");
+            self.session.run_command(text);
         }
     }
 
@@ -1066,9 +1202,11 @@ impl TerminalView {
     fn login_retry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.clone() else { return };
         self.reconnect = None;
+        self.connected = None;
         self.generation += 1;
         self.session = session::ssh(connection.target, 80, 24);
         Self::listen(&mut self.session, self.generation, window, cx);
+        self.selection_drag = None;
         self.terminal = Terminal::with_settings(80, 24, &self.settings);
         self.closed = false;
         let show_logs = self.login.as_ref().is_some_and(|l| l.show_logs);
@@ -1084,13 +1222,58 @@ impl TerminalView {
         cx.notify();
     }
 
+    fn wheel_delta(&self, event: &ScrollWheelEvent) -> Point<f32> {
+        match event.delta {
+            ScrollDelta::Lines(delta) => delta,
+            ScrollDelta::Pixels(delta) => point(
+                f32::from(delta.x) / self.cell_width.unwrap_or(8.),
+                f32::from(delta.y) / self.line_height(),
+            ),
+        }
+    }
+
+    fn on_selection_wheel(&mut self, event: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.selection_drag.is_none() || !window.is_window_active() || !self.focus.is_focused(window) {
+            return;
+        }
+        let rows = self.local_wheel_rows(event, self.wheel_delta(event));
+        if rows != 0 {
+            self.scroll_selection(rows, event.position, cx);
+        }
+        cx.stop_propagation();
+    }
+
+    fn local_wheel_rows(&mut self, event: &ScrollWheelEvent, delta: Point<f32>) -> i32 {
+        self.mouse_scroll = point(0., 0.);
+        if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+            self.local_scroll = 0.;
+        }
+        self.local_scroll += if event.modifiers.shift && delta.y == 0. { delta.x } else { delta.y };
+        let rows = self.local_scroll as i32;
+        self.local_scroll -= rows as f32;
+        rows
+    }
+
     fn on_scroll(&mut self, event: &ScrollWheelEvent, _: &mut Window, cx: &mut Context<Self>) {
-        let lines = match event.delta {
-            ScrollDelta::Lines(delta) => delta.y,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / self.line_height(),
-        };
-        self.terminal.scroll(lines.round() as i32);
-        cx.notify();
+        let delta = self.wheel_delta(event);
+        if self.mouse_tracking() && !event.modifiers.shift {
+            self.local_scroll = 0.;
+            if matches!(event.touch_phase, gpui::TouchPhase::Started) {
+                self.mouse_scroll = point(0., 0.);
+            }
+            self.mouse_scroll = self.mouse_scroll + delta;
+            let (columns, rows) = (self.mouse_scroll.x as i32, self.mouse_scroll.y as i32);
+            self.mouse_scroll = self.mouse_scroll - point(columns as f32, rows as f32);
+            if columns != 0 || rows != 0 {
+                self.send_mouse(TerminalMouse::Scroll { columns, rows }, event.position, event.modifiers, false);
+            }
+            cx.stop_propagation();
+            return;
+        }
+        let rows = self.local_wheel_rows(event, delta);
+        if rows != 0 && self.terminal.scroll(rows) {
+            cx.notify();
+        }
     }
 
     /// Fits the grid to the space under the tab bar.
@@ -1161,7 +1344,10 @@ impl Render for TerminalView {
         let regular = Font { weight: gpui::FontWeight(weight), ..font(family.clone()) };
         let bold = Font { weight: gpui::FontWeight(bold_weight), ..font(bold_family) };
         let grid_origin = self.grid_origin.clone();
-        let drag = cx.listener(Self::on_mouse_move);
+        let selecting = self.selection_drag.is_some();
+        let drag = cx.listener(Self::on_mouse_drag);
+        let release = cx.listener(Self::on_mouse_up);
+        let selection_wheel = cx.listener(Self::on_selection_wheel);
         let background = look.background;
         let cursor_color: gpui::Hsla = rgb(look.cursor).into();
         let grid = canvas(
@@ -1193,8 +1379,18 @@ impl Render for TerminalView {
                     });
                 }
                 window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
-                    if phase == DispatchPhase::Capture && event.pressed_button == Some(MouseButton::Left) {
+                    if phase == DispatchPhase::Capture && (selecting || event.pressed_button.is_some()) {
                         drag(event, window, cx);
+                    }
+                });
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        release(event, window, cx);
+                    }
+                });
+                window.on_mouse_event(move |event: &ScrollWheelEvent, phase, window, cx| {
+                    if phase == DispatchPhase::Capture {
+                        selection_wheel(event, window, cx);
                     }
                 });
             },
@@ -1204,33 +1400,24 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .key_context("Terminal")
-            .on_key_down(cx.listener(Self::on_key))
-            .on_action(cx.listener(|view, _: &CopyFromTerminal, _, cx| {
-                if let Some(text) = view.terminal.selection_text() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                }
-            }))
-            .on_action(cx.listener(|view, _: &PasteToTerminal, _, cx| {
-                if let (false, Some(text)) = (view.closed, cx.read_from_clipboard().and_then(|item| item.text())) {
-                    view.terminal.scroll(i32::MIN / 2);
-                    let bytes = paste_bytes(&text, view.terminal.bracketed_paste());
-                    view.session.write(&bytes);
-                    cx.emit(TerminalEvent::Input(bytes));
-                }
-            }))
+            .on_action(cx.listener(|view, _: &CopyFromTerminal, _, cx| view.copy_selection(cx)))
+            .on_action(cx.listener(|view, _: &PasteToTerminal, _, cx| view.paste_clipboard(cx)))
             .on_action(cx.listener(|view, _: &SelectAllInTerminal, _, cx| {
+                view.selection_drag = None;
                 view.terminal.select_all();
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &ClearTerminalBuffer, _, cx| {
+                view.selection_drag = None;
                 view.terminal.clear_buffer();
                 cx.notify();
             }))
             .on_action(cx.listener(|view, _: &OpenTerminalSearch, window, cx| view.open_search(window, cx)))
             .on_scroll_wheel(cx.listener(Self::on_scroll))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .capture_any_mouse_up(cx.listener(Self::on_mouse_up))
-            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_click))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_mouse_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_mouse_down))
+            .on_mouse_move(cx.listener(Self::on_mouse_hover))
             .relative()
             .size_full()
             .p(px(PADDING))
@@ -1249,11 +1436,20 @@ impl Render for TerminalView {
                     .text_size(px(12.)).text_color(rgb(termian_native::theme::TEXT))
                     .child(tr("Copied!")),
             )))
-            .children(self.connected.and_then(|(_, key)| {
+            .children(self.connected.as_ref().and_then(|progress| {
                 let connection = self.connection.as_ref()?;
-                Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), key))
+                Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), progress, window))
             }))
             .into_any_element()
+    }
+}
+
+fn terminal_button(button: MouseButton) -> Option<TerminalButton> {
+    match button {
+        MouseButton::Left => Some(TerminalButton::Left),
+        MouseButton::Middle => Some(TerminalButton::Middle),
+        MouseButton::Right => Some(TerminalButton::Right),
+        MouseButton::Navigate(_) => None,
     }
 }
 
@@ -1271,6 +1467,22 @@ mod tests {
         assert_eq!(grid.hit(span.origin + point(px(10.), px(1.)), 8, 80), (2, 42, Side::Left));
         assert_eq!(grid.hit(point(px(200.), px(10.)), 8, 80), (0, 0, Side::Left));
         assert_eq!(grid.hit(point(px(1200.), px(500.)), 8, 80), (7, 79, Side::Right));
+        assert!(grid.contains(span.origin + point(px(6.), px(18.)), 8, 80));
+        assert!(!grid.contains(point(px(317.), px(83.)), 8, 80));
+        assert!(!grid.contains(grid.span(8, 0, 1).origin, 8, 80));
+    }
+
+    #[test]
+    fn selection_autoscroll_tracks_the_grid_edges() {
+        let grid = CellGrid { origin: point(px(200.), px(80.)), cell_width: px(8.), line_height: px(20.) };
+        assert_eq!(grid.edge_scroll_lines(px(85.), 10), 0);
+        assert_eq!(grid.edge_scroll_lines(px(274.), 10), 0);
+        assert_eq!(grid.edge_scroll_lines(px(81.), 10), 1);
+        assert_eq!(grid.edge_scroll_lines(px(278.), 10), -1);
+        assert_eq!(grid.edge_scroll_lines(px(64.), 10), 3);
+        assert_eq!(grid.edge_scroll_lines(px(296.), 10), -3);
+        assert_eq!(grid.edge_scroll_lines(px(-500.), 10), 24);
+        assert_eq!(grid.edge_scroll_lines(px(800.), 10), -24);
     }
 }
 

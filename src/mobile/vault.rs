@@ -123,8 +123,7 @@ impl App {
                 .filter(|c| c.ready)
                 .and_then(|c| c.session.as_ref())
                 .ok_or("Select a connected terminal.")?;
-            connection.write(crate::terminal::paste_bytes(&snippet.script, false).as_slice());
-            connection.write(b"\r");
+            connection.run_command(&snippet.script);
             return Ok(json!({}));
         }
         if op == "forwardAnswer" {
@@ -232,6 +231,7 @@ impl App {
                     screen: Terminal::with_settings(x.into(), y.into(), &self.vault.terminal),
                     ready: false,
                     backspace: false,
+                    startup: None,
                     dirty: true,
                     title,
                     source: None,
@@ -254,7 +254,7 @@ impl App {
             let targets = template
                 .workspace_terminals
                 .iter()
-                .filter_map(|pane| pane.target(&self.vault))
+                .filter_map(|pane| pane.target(&self.vault).map(|target| (target, pane.startup())))
                 .collect::<Vec<_>>();
             if targets.is_empty() {
                 return Err("No available terminals in this workspace.".into());
@@ -263,9 +263,9 @@ impl App {
                 return Err("Close terminal tabs before opening this workspace.".into());
             }
             let mut opened = Vec::new();
-            for target in targets {
+            for (target, startup) in targets {
                 match target {
-                    Target::Host(id) => self.connect(id)?,
+                    Target::Host(id) => self.connect(id, startup)?,
                     Target::Local => self.local()?,
                 };
                 if let Some(id) = self.selected {
@@ -413,14 +413,17 @@ impl App {
                 v.remove_log_bookmark(id()?);
             }
             "logsEnabled" => {
-                v.logs_disabled = args["enabled"] != true;
-                if v.logs_disabled {
+                let disabled = args["enabled"] != true;
+                self.vaults.update_settings(&mut self.vault, |vault| vault.logs_disabled = disabled)?;
+                if disabled {
                     for c in self.sessions.values_mut() {
                         if let Some(log) = c.log.take() {
                             log.finish();
                         }
                     }
                 }
+                self.ticket = None;
+                return Ok(self.lists());
             }
             "clearLogs" => {
                 if self.sessions.values().any(|c| c.log.is_some()) {

@@ -349,6 +349,7 @@ fn host_settings(host: &Value, config: Option<&Value>, cipher: &FieldCipher) -> 
             .filter(|v| !v.name.is_empty())
             .collect(),
         startup_snippet: link(config, "startup_snippet"),
+        startup_command: None,
         color_scheme: config.get("color_scheme").map(to_json).filter(|c| !c.is_null()),
     }
 }

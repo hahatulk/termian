@@ -26,7 +26,7 @@ use crate::{
     store::Store,
     terminal::{self, Modifiers, Terminal},
     vault::{Host, Vault},
-    vault_set::{Destination, VaultSet},
+    vault_set::{AppSettings, Destination, VaultSet},
 };
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
@@ -54,6 +54,7 @@ struct Connection {
     screen: Terminal,
     ready: bool,
     backspace: bool,
+    startup: Option<String>,
     dirty: bool,
     title: String,
     source: Option<crate::workspace_template::Target>,
@@ -180,6 +181,7 @@ impl App {
             "os":h.os, "tags": h.tags, "keyId":h.key.map(|id| id.to_string()), "identityId":h.identity.map(|id| id.to_string()),
             "identity": h.identity.and_then(|id| self.vault.identity(id)).map(|i| i.label.as_str()),
             "theme": h.settings.theme_name().map(|name| crate::terminal_settings::theme(name).name.as_str()),
+            "startupCommand": h.settings.startup_text(&self.vault),
         })).collect::<Vec<_>>())
     }
 
@@ -213,11 +215,14 @@ impl App {
             .ok()
             .filter(|p| *p > 0)
             .ok_or("Порт должен быть от 1 до 65535.")?;
-        let mut vault = self.vault.clone();
         let id = text(args, "id");
+        let destination = match args["destinationVault"].as_str() {
+            Some(value) => Some(value.parse::<uuid::Uuid>().map_err(|_| crate::language::text("Vault not found."))?),
+            None => None,
+        }.filter(|dest| *dest != self.vaults.selected());
         let mut h = if id.is_empty() {
             Host {
-                id: vault.next_id(),
+                id: self.vault.next_id(),
                 label: String::new(),
                 address: String::new(),
                 os: None,
@@ -231,7 +236,7 @@ impl App {
                 settings: Default::default(),
             }
         } else {
-            vault
+            self.vault
                 .host(id.parse().map_err(|_| "Некорректный хост.")?)
                 .cloned()
                 .ok_or("Хост не найден.")?
@@ -248,7 +253,7 @@ impl App {
             h.identity = vault::optional_id(args, "identity")?;
         }
         if let Some(identity) = h.identity {
-            if vault.identity(identity).is_none() {
+            if self.vault.identity(identity).is_none() {
                 return Err("Identity not found.".into());
             }
         }
@@ -277,6 +282,9 @@ impl App {
                 h.password = Some(password.to_owned());
             }
         }
+        if let Some(command) = args["startupCommand"].as_str() {
+            h.settings.set_startup_command(command.to_owned());
+        }
         let theme_changed = if let Some(theme) = args["theme"].as_str() {
             h.settings.color_scheme = if theme.is_empty() {
                 None
@@ -287,7 +295,14 @@ impl App {
         } else {
             false
         };
+        if let Some(destination) = destination {
+            self.ticket = None;
+            self.vaults.move_host(&mut self.vault, h, destination)?;
+            return Ok(json!({"hosts":self.hosts(), "moved":true}));
+        }
+
         let id = h.id.to_string();
+        let mut vault = self.vault.clone();
         vault.save_host(h);
         self.save(vault)?;
         if theme_changed {
@@ -306,7 +321,7 @@ impl App {
         Ok(target)
     }
 
-    fn connect(&mut self, id: u64) -> Result<Value, String> {
+    fn connect(&mut self, id: u64, startup: Option<String>) -> Result<Value, String> {
         let target = self.target(id)?;
         let host = self.vault.host(id).ok_or("Host not found.")?;
         let (cols, rows) = self.size;
@@ -316,6 +331,7 @@ impl App {
             Some(id),
             host.settings.ctrl_h_backspace,
             false,
+            host.settings.ssh_startup(&self.vault, startup),
         )
     }
 
@@ -336,6 +352,7 @@ impl App {
         host: Option<u64>,
         backspace: bool,
         local: bool,
+        startup: Option<String>,
     ) -> Result<Value, String> {
         if self.sessions.len() >= 12 {
             return Err("Close a terminal tab before opening another.".into());
@@ -377,6 +394,7 @@ impl App {
                 screen: Terminal::with_settings(cols.into(), rows.into(), &settings::for_host(&self.vault, host)),
                 ready: local,
                 backspace,
+                startup,
                 dirty: true,
                 title,
                 source: if local {
@@ -467,7 +485,7 @@ impl App {
         command.cwd(&self.root);
         command.env("TERM", self.vault.terminal.emulation());
         let session = session::local_command(command, cols, rows)?;
-        self.new_terminal(session, "Local Terminal".into(), None, false, true)
+        self.new_terminal(session, "Local Terminal".into(), None, false, true, None)
     }
 
     fn poll(&mut self) -> Value {
@@ -515,6 +533,7 @@ impl App {
             match response.and_then(|(vaults, mut vault, result)| {
                 self.vaults = vaults;
                 let message = result?;
+                AppSettings::from_vault(&self.vault).apply(&mut vault);
                 for old in &self.vault.history {
                     if let Some(row) = vault.history_entry_mut(old.id).filter(|row| row.log == old.log) {
                         row.disconnected_at = old.disconnected_at;
@@ -596,7 +615,7 @@ impl App {
                 self.save(vault)?;
                 Ok(json!({"hosts":self.hosts()}))
             }
-            "connect" => self.connect(id()?),
+            "connect" => self.connect(id()?, None),
             "quickConnect" => {
                 if self.sync.is_some() {
                     return Err("Wait for synchronization.".into());
@@ -616,6 +635,7 @@ impl App {
                     None,
                     false,
                     false,
+                    None,
                 )
             }
             "local" => self.local(),
@@ -767,13 +787,19 @@ impl App {
                 }
                 Ok(json!({}))
             }
+            "mouse" => {
+                let target = vault::optional_id(args, "id")?;
+                let handled = target.and_then(|id| self.sessions.get_mut(&id)).is_some_and(|c| c.mouse(args));
+                Ok(json!({"handled":handled}))
+            }
             "text" | "paste" | "key" | "trust" | "answer" | "scroll" => {
                 let target = vault::optional_id(args, "id")?.or(self.selected);
                 if let Some(c) = target.and_then(|id| self.sessions.get_mut(&id)) {
                     c.input(op, args);
                 }
                 if self.broadcast && matches!(op, "text" | "paste" | "key") {
-                    if let Some(c) = self.secondary.and_then(|id| self.sessions.get_mut(&id)) {
+                    let other = if target == self.secondary { self.selected } else { self.secondary };
+                    if let Some(c) = other.filter(|id| Some(*id) != target).and_then(|id| self.sessions.get_mut(&id)) {
                         c.input(op, args);
                     }
                 }
@@ -807,16 +833,55 @@ impl Connection {
                     alt: args["alt"] == true,
                     shift: args["shift"] == true,
                 };
-                if key == "backspace" && self.backspace {
-                    s.write(b"\x08");
-                } else if let Some(bytes) =
-                    terminal::key_bytes(key, args["typed"].as_str(), mods, self.screen.app_cursor())
-                {
-                    s.write(&bytes);
+                if let Some(bytes) = self.screen.key_input(key, args["typed"].as_str(), mods, self.backspace) {
+                    if bytes.is_ascii() {
+                        s.write_raw(bytes);
+                    } else {
+                        s.write(&bytes);
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    fn mouse(&mut self, args: &Value) -> bool {
+        use terminal::mouse::{Button, Event};
+
+        let Some(session) = self.session.as_ref().filter(|_| self.ready) else { return false };
+        let cell = |field: &str| args[field].as_u64().and_then(|n| usize::try_from(n).ok());
+        let (Some(row), Some(column)) = (cell("row"), cell("column")) else { return false };
+        let button = match args["button"].as_i64() {
+            Some(0) => Some(Button::Left),
+            Some(1) => Some(Button::Middle),
+            Some(2) => Some(Button::Right),
+            _ => None,
+        };
+        let kind = text(args, "kind");
+        let delta = |field: &str| args[field].as_i64().unwrap_or(0).clamp(-64, 64) as i32;
+        let event = match kind {
+            "press" | "tap" => button.map(Event::Press),
+            "release" => button.map(Event::Release),
+            "move" => Some(Event::Move(button)),
+            "scroll" => Some(Event::Scroll { columns: delta("dx"), rows: delta("dy") }),
+            _ => None,
+        };
+        let Some(event) = event else { return false };
+        let mods = Modifiers {
+            control: args["ctrl"] == true,
+            alt: args["alt"] == true,
+            shift: args["shift"] == true,
+        };
+        let Some(mut bytes) = self.screen.mouse_input(event, (row, column), mods) else { return false };
+        if kind == "tap" {
+            if let Event::Press(button) = event {
+                if let Some(release) = self.screen.mouse_input(Event::Release(button), (row, column), mods) {
+                    bytes.extend_from_slice(&release);
+                }
+            }
+        }
+        session.write_raw(bytes);
+        true
     }
 
     fn scroll(&mut self, args: &Value) {
@@ -860,6 +925,11 @@ impl Connection {
                 }
                 SessionEvent::Login(LoginEvent::Stage(stage)) => {
                     self.ready = stage == Stage::Ready;
+                    if self.ready {
+                        if let (Some(session), Some(script)) = (&self.session, self.startup.take()) {
+                            session.run_command(&script);
+                        }
+                    }
                     notices.push(json!({"type":"status","ready":self.ready,"value":match stage {
                         Stage::Connecting => "Подключение…", Stage::Verifying => "Проверка ключа…",
                         Stage::Authenticating => "Вход…", Stage::Ready => "Подключено",
@@ -872,6 +942,7 @@ impl Connection {
                 }
                 SessionEvent::Closed(reason) => {
                     self.ready = false;
+                    self.startup = None;
                     self.session = None;
                     notices.push(json!({"type":"closed","value":reason.unwrap_or_else(|| "Сессия завершена".to_owned())}));
                     break;
@@ -895,7 +966,7 @@ impl Connection {
             .collect();
         Some(
             json!({"lines":lines, "cursor":frame.cursor, "bg":self.screen.look().background,
-            "cursorColor":self.screen.look().cursor, "bell":bell}),
+            "cursorColor":self.screen.look().cursor, "bell":bell, "mouseTracking":self.ready && self.screen.mouse_tracking()}),
         )
     }
 }

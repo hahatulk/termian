@@ -65,6 +65,7 @@ fn host_settings(host: &Value, config: &Value) -> HostSettings {
             .filter(|v| !v.name.is_empty())
             .collect(),
         startup_snippet: None,
+        startup_command: optional(config, "startup_command"),
         color_scheme: config.get("color_scheme").filter(|c| !c.is_null()).cloned(),
     }
 }
@@ -161,7 +162,7 @@ pub fn export(vault: &Vault, now: &str) -> Value {
             None => None,
         };
         let settings = &host.settings;
-        let config = overlay(vault, &key("sshConfigs-of-host", host.id), json!({
+        let mut config = overlay(vault, &key("sshConfigs-of-host", host.id), json!({
             "local_id": links.config,
             "port": host.port.unwrap_or(22),
             "identity": reference(identity),
@@ -171,6 +172,11 @@ pub fn export(vault: &Vault, now: &str) -> Value {
             "startup_snippet": reference(settings.startup_snippet.filter(|id| vault.snippets.iter().any(|s| s.id == *id))),
             "color_scheme": settings.color_scheme,
         }));
+        if let Some(command) = &settings.startup_command {
+            config["startup_command"] = json!(command);
+        } else if let Some(fields) = config.as_object_mut() {
+            fields.remove("startup_command");
+        }
         configs.push(config.clone());
         hosts.push(overlay(vault, &key("hosts", host.id), json!({
             "local_id": host.id,
@@ -418,7 +424,10 @@ pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Valu
         portable.insert(key("snippets", id), raw);
     }
     for (host, snippet) in startup_snippets {
-        hosts[host].settings.startup_snippet = ids.get(&("snippets", token(&snippet))).copied();
+        let settings = &mut hosts[host].settings;
+        if settings.startup_command.is_none() {
+            settings.startup_snippet = ids.get(&("snippets", token(&snippet))).copied();
+        }
     }
     let mut rules = Vec::new();
     for raw in list("portForwardingRules") {
@@ -696,6 +705,7 @@ mod tests {
             charset: Some("KOI8-R".into()),
             env: vec![EnvVar { name: "LANG".into(), value: "C".into() }],
             startup_snippet: Some(7),
+            startup_command: None,
             color_scheme: Some(json!("Night Owl")),
         };
         let snapshot = validate_snapshot(&export(&vault, NOW)).unwrap();
@@ -711,6 +721,42 @@ mod tests {
         let snippet = copy.snippets.iter().find(|s| s.label == "top").unwrap().id;
         assert_eq!(web.settings, HostSettings { startup_snippet: Some(snippet), ..vault.hosts[0].settings.clone() });
         assert_eq!(copy.hosts.iter().find(|h| h.label == "api").unwrap().settings, HostSettings::default(), "defaults stay empty");
+    }
+
+    #[test]
+    fn startup_command_round_trips_and_can_be_cleared() {
+        let command = "  printf '%s\\n' ready\npwd\n";
+        let mut vault = sample();
+        vault.hosts[0].settings.startup_snippet = Some(7);
+        assert_eq!(vault.hosts[0].settings.startup_text(&vault), "top");
+        vault.hosts[0].settings.set_startup_command(command.into());
+        vault.remove_snippet(7);
+
+        let snapshot = validate_snapshot(&export(&vault, NOW)).unwrap();
+        let config = &snapshot["hosts"][0]["ssh_config"];
+        assert_eq!(config["startup_command"], command);
+        assert!(config["startup_snippet"].is_null());
+        let sync = crate::sync::to_sync_form(&snapshot, &mut Ids::new());
+        let mut copy = Vault::default();
+        import(&mut copy, &sync, &Ids::new()).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::new(dir.path().join("vault.bin"), [7; 32]);
+        store.save(&copy).unwrap();
+        let mut reopened = store.load().unwrap().unwrap();
+        let index = reopened.hosts.iter().position(|h| h.label == "web").unwrap();
+        let settings = &reopened.hosts[index].settings;
+        assert_eq!(settings.startup_snippet, None);
+        assert_eq!(settings.ssh_startup(&reopened, None).as_deref(), Some(command));
+        assert_eq!(settings.ssh_startup(&reopened, Some("pwd".into())).as_deref(), Some("pwd"));
+
+        reopened.hosts[index].settings.set_startup_command("  \n".into());
+        assert_eq!(reopened.hosts[index].settings.ssh_startup(&reopened, None), None);
+        reopened.hosts[index].settings.set_startup_command(String::new());
+        let snapshot = validate_snapshot(&export(&reopened, NOW)).unwrap();
+        let web = snapshot["hosts"].as_array().unwrap().iter().find(|h| h["label"] == "web").unwrap();
+        assert!(web["ssh_config"].get("startup_command").is_none());
+        assert!(web["ssh_config"]["startup_snippet"].is_null());
     }
 
     #[test]

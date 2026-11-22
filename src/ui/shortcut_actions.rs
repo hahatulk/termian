@@ -165,9 +165,10 @@ impl Shell {
 
     /// Settings → Shortcuts changed: saves and rebinds the keys.
     pub fn update_shortcuts(&mut self, change: impl FnOnce(&mut ShortcutSettings), cx: &mut Context<Self>) {
-        change(&mut self.vault.shortcuts);
-        self.save_vault();
-        bind(&self.vault.shortcuts, cx);
+        match self.vaults.update_settings(&mut self.vault, |vault| change(&mut vault.shortcuts)) {
+            Ok(()) => bind(&self.vault.shortcuts, cx),
+            Err(error) => self.vault_error = Some(error),
+        }
         cx.notify();
     }
 

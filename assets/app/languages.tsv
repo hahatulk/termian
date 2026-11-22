@@ -8,6 +8,8 @@
 6 h	6 ч
 6 hours	6 часов
 A Vault with this name already exists.	Vault с таким названием уже существует.
+A credential or startup command for this host is missing.	Не найдены учётные данные или команда запуска этого хоста.
+Choose another Vault.	Выберите другой Vault.
 A folder with this name already exists.	Папка с таким именем уже существует.
 A to Z	От А до Я
 Access token	Токен доступа
@@ -30,6 +32,7 @@ Agent Forwarding	Проброс SSH-агента
 All	Все
 All hosts	Все хосты
 All snippets	Все сниппеты
+All Vaults	Все Vault
 Allow installs from Termian in system settings, then return and tap Install.	Разрешите установку из Termian в настройках Android, затем вернитесь и нажмите "Установить".
 And these hosts:	И эти хосты:
 And this host:	И этот хост:
@@ -367,6 +370,9 @@ Modified	Изменено
 More	Ещё
 More terminal keys	Дополнительные клавиши терминала
 Move focus between Split View panes	Перенести фокус между панелями
+Move host	Переместить хост
+Move this host to {vault}?	Переместить хост в "{vault}"?
+Save the host with an address before moving it.	Сохраните хост с адресом перед перемещением.
 NEW FORWARDING	НОВЫЙ ПРОБРОС
 NEW HOST	НОВЫЙ ХОСТ
 NEW SNIPPET	НОВЫЙ СНИППЕТ
@@ -473,6 +479,7 @@ Recent connections	Недавние подключения
 Recent connections appear here after you open a terminal.	Недавние подключения появятся после открытия терминала.
 Recent sessions	Недавние сеансы
 Record session logs	Записывать журналы сеансов
+Recording will stop in all Vaults. Only logs in {vault} will be deleted.	Запись сеансов остановится во всех Vault. Удалятся только журналы в "{vault}".
 Record upcoming sessions?	Записывать следующие сеансы?
 Redo	Повторить
 Refresh	Обновить
@@ -601,6 +608,7 @@ Stop	Остановить
 Stop bits	Стоповые биты
 Stop broadcast	Отключить общий ввод
 Stop recording session logs?	Отключить запись сеансов?
+Stop recording session logs in all Vaults?	Остановить запись сеансов во всех Vault?
 Store your most used commands to reuse them in one click.	Сохраняйте команды, чтобы запускать их одним нажатием.
 Switch	Переключить
 Switch SFTP host?	Сменить SFTP-хост?
@@ -649,7 +657,11 @@ The new version starts after a restart. Restarting closes open SSH sessions.	Н�
 The password is too long.	Пароль слишком длинный.
 The passwords do not match.	Пароли не совпадают.
 The provider returned a repeated directory.	Поставщик файлов вернул папку повторно.
+The host moves to the top level of the destination Vault. Saved credentials and the startup command are copied if needed. Logs and host trust stay in the source Vault. Rules, snippet targets, and workspace panes in that Vault will no longer use this host.	Хост появится в корне выбранного Vault. Сохранённые учётные данные и команда запуска копируются при необходимости. Журналы и доверенные ключи сервера останутся в исходном Vault. Его правила проброса, цели сниппетов и панели рабочих областей больше не будут использовать этот хост.
+The host was saved in the destination Vault, but the source could not be updated.	Хост сохранён в выбранном Vault, но исходный Vault не удалось обновить.
 The selected Vault file is missing.	Файл выбранного Vault отсутствует.
+The app settings file is missing.	Файл общих настроек приложения отсутствует.
+The source Vault is missing saved credentials.	В исходном Vault отсутствуют сохранённые учётные данные.
 Themes	Темы
 This deletes the folder and its contents.	Папка и её содержимое будут удалены.
 This deletes the remote entry.	Объект на сервере будет удалён.
@@ -698,6 +710,7 @@ Use Touch ID or Mac password	Использовать Touch ID или парол
 Use an empty snapshot password	Использовать пустой пароль снимка
 Use bright colours for bold text	Яркие цвета для полужирного текста
 Use screen lock	Использовать блокировку экрана
+Use snippet	Взять из сниппета
 User	Пользователь
 Username	Имя пользователя
 Value	Значение
@@ -713,6 +726,7 @@ Wait for log upload to finish, then try again.	Дождитесь отправк
 Wait for sync to finish, then clear the logs again.	Дождитесь завершения синхронизации и повторите очистку.
 Wait for sync to finish.	Дождитесь завершения синхронизации.
 Wait for the cloud operation to finish, then try again.	Дождитесь завершения операции с облаком и повторите.
+Wait for synchronization to finish before moving the host.	Дождитесь завершения синхронизации перед перемещением хоста.
 Wait for the current operation to finish before switching Vaults.	Дождитесь завершения операции перед сменой Vault.
 Waiting for macOS…	Ожидание ответа macOS…
 Waiting to ping	В очереди на проверку

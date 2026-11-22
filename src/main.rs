@@ -527,8 +527,7 @@ impl Shell {
     pub fn connect_host_with(&mut self, host: HostId, startup: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         let Some(entry) = self.vault.hosts.iter().find(|h| h.id == host) else { return };
         let target = SshTarget::for_host(entry, &self.vault);
-        // «Startup Command»: the host's snippet, unless a snippet is being run on it.
-        let startup = startup.or_else(|| entry.settings.startup_snippet.and_then(|id| self.vault.snippets.iter().find(|s| s.id == id)).map(|s| s.script.clone()));
+        let startup = entry.settings.ssh_startup(&self.vault, startup);
         let (label, os) = (entry.display_label().to_owned(), entry.os.clone());
         self.open_ssh_for(Some(host), label, os, target, startup, window, cx);
     }

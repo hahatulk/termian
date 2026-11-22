@@ -342,6 +342,7 @@ public final class MainActivity extends Activity {
         redrawHosts();
         redrawNavigation();
         arrange();
+        if (page.equals("terminal")) terminal.requestFocus();
     }
 
     private void redrawNavigation() {
@@ -711,15 +712,24 @@ public final class MainActivity extends Activity {
         }
     }
 
-    void typed(String value) {
-        if (locked || !ready || value.isEmpty()) return;
-        if (control && value.codePointCount(0, value.length()) == 1) key(value, value, false, false, false);
-        else call("text", "value", value);
+    private boolean terminalInput(String id) {
+        return !locked && drawer == null && page.equals("terminal") && !id.isEmpty()
+            && (id.equals(tabId) || id.equals(secondaryId));
+    }
+
+    void typed(String id, String value) {
+        if (!terminalInput(id) || value.isEmpty()) return;
+        if (control && value.codePointCount(0, value.length()) == 1) key(id, value, value, false, false, false);
+        else call("text", "id", id, "value", value);
     }
 
     void key(String key, String typed, boolean ctrl, boolean alt, boolean shift) {
-        if (locked || !ready) return;
-        call("key", "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
+        key(tabId, key, typed, ctrl, alt, shift);
+    }
+
+    void key(String id, String key, String typed, boolean ctrl, boolean alt, boolean shift) {
+        if (!terminalInput(id)) return;
+        call("key", "id", id, "value", key, "typed", typed, "ctrl", ctrl || control, "alt", alt, "shift", shift);
         if(control) setControl(false);
     }
 
@@ -863,7 +873,7 @@ public final class MainActivity extends Activity {
         input.setTextSize(14);
         input.setTypeface(style.text("",14,TermianStyle.TEXT,400).getTypeface());
         input.setContentDescription(label);
-        input.setSingleLine(true);
+        input.setSingleLine((type & InputType.TYPE_TEXT_FLAG_MULTI_LINE) == 0);
         input.setInputType(type);
         input.setText(initial);
         input.setSaveEnabled(false);
@@ -958,7 +968,22 @@ public final class MainActivity extends Activity {
         LinearLayout general=editorCard(form,text("General"));
         EditText name=field(general,text("Label"),host==null ? "" : host.optString("label"),InputType.TYPE_CLASS_TEXT);
         JSONObject data=call("vault");
-        android.widget.Spinner group=vault.pick(general,text("Parent Group"),data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
+        JSONObject vaultInfo=host==null ? new JSONObject() : call("vaultList");
+        String sourceVault=vaultInfo.optString("selected");
+        JSONArray entries=vaultInfo.optJSONArray("entries");
+        android.widget.Spinner destination=entries==null || entries.length()==0 ? null
+            : vault.pick(general,text("Vault"),entries,sourceVault,false);
+        if(destination==null) general.addView(label(text("Vault")+": "+vaultName,14,MUTED));
+        else destination.setEnabled(entries.length()>1);
+        LinearLayout groupRow=column();
+        general.addView(groupRow);
+        android.widget.Spinner group=vault.pick(groupRow,text("Parent Group"),data.optJSONArray("groups"),host==null ? vault.groupId() : fieldValue(host,"groupId"));
+        if(destination!=null) destination.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long selected) {
+                groupRow.setVisibility(MobileVault.choice(destination).equals(sourceVault) ? View.VISIBLE : View.GONE);
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
+        });
         EditText tags=field(general,text("Tags (comma-separated)"),host==null ? "" : MobileVault.joinTags(host.optJSONArray("tags")),InputType.TYPE_CLASS_TEXT);
         LinearLayout ssh=editorCard(form,"SSH");
         EditText port=field(ssh,text("Port"),host==null ? "22" : String.valueOf(host.optInt("port")),InputType.TYPE_CLASS_NUMBER);
@@ -977,6 +1002,30 @@ public final class MainActivity extends Activity {
             }
             @Override public void onNothingSelected(android.widget.AdapterView<?> parent) {}
         });
+        String originalStartup=host==null ? "" : fieldValue(host,"startupCommand");
+        EditText startupCommand=field(ssh,text("Startup Command"),originalStartup,
+            InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        startupCommand.setHint(text("No startup command"));
+        startupCommand.setHintTextColor(MUTED);
+        startupCommand.setMinLines(2);
+        startupCommand.setMaxLines(6);
+        startupCommand.setGravity(Gravity.TOP | Gravity.START);
+        startupCommand.setTypeface(android.graphics.Typeface.MONOSPACE);
+        JSONArray snippets=data.optJSONArray("snippets");
+        boolean[] usedSnippet={false};
+        if(snippets!=null && snippets.length()>0) {
+            String[] labels=new String[snippets.length()];
+            for(int i=0;i<labels.length;i++) labels[i]=snippets.optJSONObject(i).optString("display");
+            ssh.addView(button(text("Use snippet"),() -> new AlertDialog.Builder(this).setTitle(text("Use snippet"))
+                .setItems(labels,(dialog,position) -> {
+                    if(hostEditor!=pane || locked) return;
+                    usedSnippet[0]=true;
+                    startupCommand.setText(snippets.optJSONObject(position).optString("script"));
+                    startupCommand.requestFocus();
+                    startupCommand.setSelection(startupCommand.length());
+                }).setNegativeButton(text("Cancel"),null).show()));
+        }
+        java.util.function.BooleanSupplier startupChanged=() -> usedSnippet[0] || !value(startupCommand).equals(originalStartup);
         String originalTheme=host==null ? "" : fieldValue(host,"theme");
         LinearLayout appearance=editorCard(form,text("Terminal theme"));
         MobileThemes.Choice theme=themes().new Choice(originalTheme,call("terminalSettings").optString("theme"),nameValue -> true);
@@ -986,7 +1035,8 @@ public final class MainActivity extends Activity {
         hostEdited=() -> !value(address).equals(originalAddress) || !value(name).equals(originalName) ||
             !value(port).equals(originalPort) || !value(tags).equals(originalTags) || !value(user).equals(originalUser) ||
             !MobileVault.choice(group).equals(originalGroup) || !MobileVault.choice(identity).equals(originalIdentity) ||
-            !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) ||
+            !MobileVault.choice(key).equals(originalKey) || !theme.value().equals(originalTheme) || startupChanged.getAsBoolean() ||
+            (destination!=null && !MobileVault.choice(destination).equals(sourceVault)) ||
             password.length()!=0 || clear!=null && clear.isChecked();
         pane.addView(scroll(form),new LinearLayout.LayoutParams(-1,0,1));
 
@@ -997,13 +1047,26 @@ public final class MainActivity extends Activity {
         footer.addView(button(text("Cancel"),() -> confirmDiscard(this::closeHostEditor)));
         footer.addView(style.tool("check",text("Save"),TermianStyle.GREEN,() -> {
             if(value(address).trim().isEmpty()) {address.setError(text("Enter a host address"));address.requestFocus();return;}
-            JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
-                "port",value(port),"user",value(user),"password",value(password),
-                "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
-                "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
-                "theme",theme.value().equals(originalTheme) ? null : theme.value());
-            if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
-            updateHosts(result);
+            String target=destination==null ? sourceVault : MobileVault.choice(destination);
+            boolean move=!target.equals(sourceVault);
+            Runnable save=() -> {
+                if(hostEditor!=pane || locked) return;
+                JSONObject result=call("saveHost","id",id,"label",value(name),"address",value(address),
+                    "port",value(port),"user",value(user),"password",value(password),
+                    "clearPassword",clear!=null && clear.isChecked(),"group",MobileVault.choice(group),
+                    "identity",MobileVault.choice(identity),"key",MobileVault.choice(key),"tags",value(tags),
+                    "theme",theme.value().equals(originalTheme) ? null : theme.value(),
+                    "startupCommand",startupChanged.getAsBoolean() ? value(startupCommand) : null,
+                    "destinationVault",move ? target : null);
+                if(!result.has("error")) { password.getText().clear(); closeHostEditor(); }
+                updateHosts(result);
+            };
+            if(move) {
+                String question=text("Move this host to {vault}?").replace("{vault}",destination.getSelectedItem().toString());
+                new AlertDialog.Builder(this).setTitle(question)
+                    .setMessage(text("The host moves to the top level of the destination Vault. Saved credentials and the startup command are copied if needed. Logs and host trust stay in the source Vault. Rules, snippet targets, and workspace panes in that Vault will no longer use this host."))
+                    .setNegativeButton(text("Cancel"),null).setPositiveButton(text("Move host"),(d,w) -> save.run()).show();
+            } else save.run();
         }));
         pane.addView(footer,new LinearLayout.LayoutParams(-1,dp(56)));
         if(!page.equals("vault")) page("vault"); else arrange();
@@ -1150,8 +1213,10 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        View focus = getCurrentFocus();
+        if (page.equals("terminal") && focus instanceof TerminalView) return super.dispatchKeyEvent(event);
         if (opened && settings!=null && !locked && drawer==null && !page.equals("settings")
-            && !(getCurrentFocus() instanceof EditText) && event.getAction()==android.view.KeyEvent.ACTION_DOWN) {
+            && !(focus instanceof EditText) && event.getAction()==android.view.KeyEvent.ACTION_DOWN) {
             String action=settings.shortcut(event);
             if (!action.isEmpty() && runShortcut(action,event.getRepeatCount()==0)) return true;
         }

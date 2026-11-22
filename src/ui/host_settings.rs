@@ -14,6 +14,7 @@ use termian_native::vault::{EnvVar, Identity, SshKey};
 use super::pointer::PointerFeedback;
 use super::assets::icon;
 use super::host_editor::{card, field_box, menu_row, Field};
+use super::text_input;
 use crate::Shell;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -318,8 +319,8 @@ impl Shell {
         };
 
         vec![
-            credentials_picker(self.input(Field::Username, tr("Username"), username, false, window, cx), suggestions, false, cx),
-            self.input(Field::Password, tr("Password"), host.password.as_deref().unwrap_or(""), true, window, cx).into_any_element(),
+            credentials_picker(self.input(Field::Username, tr("Username"), username, window, cx), suggestions, false, cx),
+            self.input(Field::Password, tr("Password"), host.password.as_deref().unwrap_or(""), window, cx).into_any_element(),
             key_field,
         ]
     }
@@ -362,7 +363,7 @@ impl Shell {
     }
 
     /// The SSH card's rows after the credentials, in the legacy order.
-    pub(super) fn render_ssh_settings(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(super) fn render_ssh_settings(&self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(editor) = &self.host_editor else { return Vec::new() };
         let settings = &editor.host.settings;
         let mut rows = Vec::new();
@@ -376,20 +377,32 @@ impl Shell {
         };
         rows.push(self.with_picker(Picker::Agent, agent_row, agent_menu, cx).into_any_element());
 
-        let snippet = settings.startup_snippet.and_then(|id| self.vault.snippets.iter().find(|s| s.id == id));
-        let title = snippet.map_or_else(|| "Startup Command".to_owned(), |s| if s.label.is_empty() { s.script.clone() } else { s.label.clone() });
-        let startup_row = row("editor-startup", "snippets", title, None, snippet.is_some());
-        let chosen = settings.startup_snippet;
-        let startup_menu = |cx: &mut Context<Self>| {
-            let mut menu = list("editor-startup-list").child(choice("startup-none".into(), tr("No startup command"), None, chosen.is_none()).on_click(cx.listener(|shell, _, _, cx| shell.change_host_settings(|s| s.startup_snippet = None, cx))));
-            for snippet in &self.vault.snippets {
-                let id = snippet.id;
-                let label = if snippet.label.is_empty() { snippet.script.as_str() } else { snippet.label.as_str() };
-                menu = menu.child(choice(format!("startup-{id}"), label, None, chosen == Some(id)).on_click(cx.listener(move |shell, _, _, cx| shell.change_host_settings(|s| s.startup_snippet = Some(id), cx))));
-            }
-            menu
-        };
-        rows.push(self.with_picker(Picker::Startup, startup_row, startup_menu, cx).into_any_element());
+        let mut startup = div().flex().flex_col().gap_1()
+            .child(div().text_sm().text_color(rgb(theme::TEXT)).child(tr("Startup Command")))
+            .child(self.input(Field::StartupCommand, tr("No startup command"), settings.startup_text(&self.vault), window, cx));
+        if !self.vault.snippets.is_empty() {
+            let pick = row("editor-startup-snippets", "snippets", tr("Use snippet").into(), None, false)
+                .h(px(30.))
+                .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)));
+            let menu = |cx: &mut Context<Self>| {
+                list("editor-startup-list").children(self.vault.snippets.iter().map(|snippet| {
+                    let id = snippet.id;
+                    menu_row(format!("startup-{id}"), "", false, false)
+                        .child(div().flex_1().min_w_0().truncate().child(snippet.display_label().to_owned()))
+                        .on_click(cx.listener(move |shell, _, window, cx| {
+                            let Some(script) = shell.vault.snippet(id).map(|snippet| snippet.script.clone()) else { return };
+                            if let Some(editor) = &mut shell.host_editor {
+                                editor.field = Field::StartupCommand;
+                            }
+                            text_input::reset(cx);
+                            window.focus(&shell.editor_focus);
+                            shell.change_host_settings(|s| s.set_startup_command(script), cx);
+                        }))
+                }))
+            };
+            startup = startup.child(self.with_picker(Picker::Startup, pick, menu, cx));
+        }
+        rows.push(startup.into_any_element());
 
         // Legacy shows the variables as `NAME=value, …`.
         let env_text = settings.env.iter().map(|v| format!("{}={}", v.name, v.value)).collect::<Vec<_>>().join(", ");
@@ -510,8 +523,8 @@ impl Shell {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(self.input(Field::EnvName(i), "Variable", &var.name, false, window, cx).flex_1())
-                    .child(self.input(Field::EnvValue(i), tr("Value"), &var.value, false, window, cx).flex_1())
+                    .child(self.input(Field::EnvName(i), "Variable", &var.name, window, cx).flex_1())
+                    .child(self.input(Field::EnvValue(i), tr("Value"), &var.value, window, cx).flex_1())
                     .child(remove),
             );
         }

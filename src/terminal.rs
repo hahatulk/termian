@@ -15,6 +15,9 @@ use alacritty_terminal::Term;
 
 use crate::terminal_settings::{self, TerminalSettings};
 
+mod keyboard;
+pub mod mouse;
+
 /// Colours and colour rules of a terminal, from Settings → Terminal: the
 /// theme as legacy hands it to xterm (`Ale`), bright bold and highlighting.
 #[derive(Clone, Debug, PartialEq)]
@@ -130,6 +133,8 @@ pub struct Terminal {
     parser: Processor,
     listener: Listener,
     look: Look,
+    mouse: mouse::State,
+    pointer_selection: bool,
     /// «Search terminal»: the query's compiled search and the current match.
     search: Option<(String, RegexSearch)>,
     found: Option<Match>,
@@ -156,7 +161,7 @@ impl Terminal {
         let listener = Listener::default();
         let config = Config { scrolling_history: settings.scrollback_lines(), ..Config::default() };
         let size = Size { columns: columns.max(2), lines: lines.max(1) };
-        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings), search: None, found: None }
+        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings), mouse: mouse::State::default(), pointer_selection: false, search: None, found: None }
     }
 
     /// New Settings → Terminal values for an open terminal.
@@ -175,11 +180,36 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
+        let selection = if self.pointer_selection {
+            self.term.selection.clone().map(|selection| (selection, self.selection_space()))
+        } else {
+            None
+        };
         self.parser.advance(&mut self.term, bytes);
+        if let Some((selection, space)) = selection {
+            if self.term.selection.is_none() && space == self.selection_space() {
+                self.term.selection = Some(selection);
+            }
+        }
+        if !self.term.mode().intersects(TermMode::MOUSE_MODE) {
+            self.mouse = mouse::State::default();
+        }
+    }
+
+    fn selection_space(&self) -> (bool, usize, usize, *const alacritty_terminal::term::cell::Cell) {
+        let grid = self.term.grid();
+        let live_row = self.term.bottommost_line();
+        (
+            self.alt_screen(),
+            grid.history_size(),
+            grid.display_offset(),
+            std::ptr::from_ref(&grid[live_row][Column(0)]),
+        )
     }
 
     pub fn resize(&mut self, columns: usize, lines: usize) {
         self.term.resize(Size { columns: columns.max(2), lines: lines.max(1) });
+        self.mouse.cell = None;
     }
 
     pub fn size(&self) -> (usize, usize) {
@@ -196,8 +226,14 @@ impl Terminal {
     }
 
     /// Scrolls the viewport through history; positive values go back in time.
-    pub fn scroll(&mut self, lines: i32) {
+    pub fn scroll(&mut self, lines: i32) -> bool {
+        let offset = self.term.grid().display_offset() as i32;
+        let lines = lines.clamp(-offset, self.term.history_size() as i32 - offset);
+        if lines == 0 {
+            return false;
+        }
         self.term.scroll_display(Scroll::Delta(lines));
+        true
     }
 
     pub fn app_cursor(&self) -> bool {
@@ -218,13 +254,25 @@ impl Terminal {
         let (point, side) = self.selection_edge(row, column, side);
         let kind = if word { SelectionType::Semantic } else { SelectionType::Simple };
         self.term.selection = Some(Selection::new(kind, point, side));
+        self.pointer_selection = true;
     }
 
-    pub fn extend_selection(&mut self, row: usize, column: usize, side: Side) {
-        let (point, side) = self.selection_edge(row, column, side);
-        if let Some(selection) = self.term.selection.as_mut() {
-            selection.update(point, side);
+    pub fn extend_selection(&mut self, row: usize, column: usize, side: Side) -> bool {
+        if !self.pointer_selection {
+            return false;
         }
+        let (point, side) = self.selection_edge(row, column, side);
+        let Some(selection) = self.term.selection.as_mut() else { return false };
+        selection.update(point, side);
+        true
+    }
+
+    pub fn scroll_selection(&mut self, lines: i32, row: usize, column: usize, side: Side) -> bool {
+        if !self.scroll(lines) {
+            return false;
+        }
+        self.extend_selection(row, column, side);
+        true
     }
 
     fn selection_edge(&self, row: usize, column: usize, side: Side) -> (Point, Side) {
@@ -241,6 +289,7 @@ impl Terminal {
 
     /// «Select All in Terminal»: history and screen.
     pub fn select_all(&mut self) {
+        self.pointer_selection = false;
         let start = Point::new(alacritty_terminal::index::Line(-(self.term.history_size() as i32)), Column(0));
         let end = Point::new(alacritty_terminal::index::Line(self.term.screen_lines() as i32 - 1), Column(self.term.columns() - 1));
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
@@ -251,13 +300,13 @@ impl Terminal {
     /// «Clear Terminal Buffer», as xterm's `clear()`: the cursor line moves to
     /// the top and everything else, history included, goes.
     pub fn clear_buffer(&mut self) {
+        self.clear_selection();
         let row = self.term.grid().cursor.point.line.0.max(0);
         self.term.scroll_display(Scroll::Bottom);
         if row > 0 {
             self.feed(format!("\x1b[{row}S\x1b[{row}A").as_bytes());
         }
         self.feed(b"\x1b[3J");
-        self.term.selection = None;
     }
 
     /// xterm's search addon as legacy uses it: case-insensitive literal text,
@@ -296,6 +345,7 @@ impl Terminal {
     }
 
     fn select_found(&mut self) -> bool {
+        self.pointer_selection = false;
         match self.found.clone() {
             Some(found) => {
                 let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
@@ -317,6 +367,7 @@ impl Terminal {
     }
 
     pub fn clear_selection(&mut self) {
+        self.pointer_selection = false;
         self.term.selection = None;
     }
 
@@ -434,65 +485,6 @@ pub struct Modifiers {
     pub control: bool,
     pub alt: bool,
     pub shift: bool,
-}
-
-/// Bytes to send for a key; `key` uses GPUI key names (`enter`, `up`, `a`).
-/// The QWERTY key under a ЙЦУКЕН letter, so control shortcuts work in any layout.
-fn latin_key(c: char) -> char {
-    const RU: &str = "йцукенгшщзхъфывапролджэячсмитьбю";
-    const EN: &str = "qwertyuiop[]asdfghjkl;'zxcvbnm,.";
-    let lower = c.to_lowercase().next().unwrap_or(c);
-    match RU.chars().position(|r| r == lower) {
-        Some(at) => EN.chars().nth(at).unwrap_or(lower),
-        None => lower.to_ascii_lowercase(),
-    }
-}
-
-pub fn key_bytes(key: &str, typed: Option<&str>, mods: Modifiers, app_cursor: bool) -> Option<Vec<u8>> {
-    let arrow = |code: u8| {
-        if mods.shift || mods.control || mods.alt {
-            let m = 1 + mods.shift as u8 + 2 * mods.alt as u8 + 4 * mods.control as u8;
-            format!("\x1b[1;{m}{}", code as char).into_bytes()
-        } else if app_cursor {
-            vec![0x1b, b'O', code]
-        } else {
-            vec![0x1b, b'[', code]
-        }
-    };
-    let bytes = match key {
-        "enter" => vec![b'\r'],
-        "backspace" => vec![0x7f],
-        "tab" if mods.shift => b"\x1b[Z".to_vec(),
-        "tab" => vec![b'\t'],
-        "escape" => vec![0x1b],
-        "up" => arrow(b'A'),
-        "down" => arrow(b'B'),
-        "right" => arrow(b'C'),
-        "left" => arrow(b'D'),
-        "home" => b"\x1b[H".to_vec(),
-        "end" => b"\x1b[F".to_vec(),
-        "pageup" => b"\x1b[5~".to_vec(),
-        "pagedown" => b"\x1b[6~".to_vec(),
-        "delete" => b"\x1b[3~".to_vec(),
-        "space" if mods.control => vec![0],
-        _ if mods.control && key.chars().count() == 1 => {
-            // With a Russian layout Ctrl+C arrives as Ctrl+С: use the Latin key in that place.
-            let c = latin_key(key.chars().next().unwrap_or(' ')) as u8;
-            match c {
-                b'a'..=b'z' => vec![c - b'a' + 1],
-                b'[' => vec![0x1b],
-                b'\\' => vec![0x1c],
-                b']' => vec![0x1d],
-                _ => return None,
-            }
-        }
-        _ => typed.filter(|t| !t.is_empty())?.as_bytes().to_vec(),
-    };
-    Some(if mods.alt && !matches!(key, "up" | "down" | "left" | "right") {
-        [vec![0x1b], bytes].concat()
-    } else {
-        bytes
-    })
 }
 
 /// Wraps pasted text in bracketed-paste markers when the program asked for them.
@@ -676,23 +668,42 @@ mod tests {
     }
 
     #[test]
-    fn maps_keys_to_bytes() {
-        let none = Modifiers::default();
-        let ctrl = Modifiers { control: true, ..none };
-        let alt = Modifiers { alt: true, ..none };
-        assert_eq!(key_bytes("enter", None, none, false).unwrap(), b"\r");
-        assert_eq!(key_bytes("up", None, none, false).unwrap(), b"\x1b[A");
-        assert_eq!(key_bytes("up", None, none, true).unwrap(), b"\x1bOA");
-        assert_eq!(key_bytes("c", Some("c"), ctrl, false).unwrap(), [3]);
-        assert_eq!(key_bytes("b", Some("b"), alt, false).unwrap(), b"\x1bb");
-        assert_eq!(key_bytes("left", None, ctrl, false).unwrap(), b"\x1b[1;5D");
-        assert_eq!(key_bytes("ж", Some("ж"), none, false).unwrap(), "ж".as_bytes());
-        // Russian layout: Ctrl+С, Ctrl+В, Ctrl+Л are Ctrl+C, Ctrl+D, Ctrl+K.
-        assert_eq!(key_bytes("с", Some("с"), ctrl, false).unwrap(), [3]);
-        assert_eq!(key_bytes("В", None, ctrl, false).unwrap(), [4]);
-        assert_eq!(key_bytes("л", None, ctrl, false).unwrap(), [11]);
-        assert_eq!(key_bytes("х", None, ctrl, false).unwrap(), [0x1b], "Ctrl+[");
-        assert_eq!(key_bytes("f13", None, none, false), None);
+    fn drag_selection_reaches_the_oldest_line_and_can_shrink() {
+        let mut t = Terminal::new(12, 4);
+        let history = (0..300).map(|i| format!("line {i:03}")).collect::<Vec<_>>();
+        t.feed(history.join("\r\n").as_bytes());
+        t.start_selection(3, 7, Side::Right, false);
+
+        for _ in (0..history.len() - t.size().1).step_by(11) {
+            assert!(t.scroll_selection(11, 0, 0, Side::Left));
+        }
+        assert!(!t.scroll_selection(11, 0, 0, Side::Left));
+        assert_eq!(t.selection_text().as_deref(), Some(history.join("\n").as_str()));
+        let snapshot = t.snapshot();
+        assert_eq!(snapshot.lines[0][0].bg, t.look().selection);
+
+        assert!(t.scroll_selection(-1, 0, 5, Side::Left));
+        let expected = format!("001\n{}", history[2..].join("\n"));
+        assert_eq!(t.selection_text().as_deref(), Some(expected.as_str()));
+        assert!(t.scroll_selection(i32::MIN, 3, 5, Side::Left));
+        assert_eq!(t.selection_text().as_deref(), Some("299"));
+        assert!(!t.scroll_selection(-1, 3, 0, Side::Left));
+    }
+
+    #[test]
+    fn redrawing_the_live_row_keeps_the_selection_anchor() {
+        let mut t = Terminal::new(12, 4);
+        let history = (0..300).map(|i| format!("line {i:03}")).collect::<Vec<_>>();
+        t.feed(history.join("\r\n").as_bytes());
+        t.start_selection(3, 7, Side::Right, false);
+        assert!(t.scroll_selection(8, 0, 0, Side::Left));
+        t.feed(b"\x1b[4;1H\x1b[2Kline 299");
+        assert!(t.scroll_selection(288, 0, 0, Side::Left));
+        assert_eq!(t.selection_text().as_deref(), Some(history.join("\n").as_str()));
+
+        t.feed(b"\x1b[3J");
+        assert!(!t.extend_selection(0, 0, Side::Left));
+        assert!(t.selection_text().is_none());
     }
 
     #[test]

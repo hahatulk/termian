@@ -562,11 +562,15 @@ final class MobileVault {
     }
 
     Spinner pick(LinearLayout form,String title,JSONArray choices,String initial) {
+        return pick(form,title,choices,initial,true);
+    }
+
+    Spinner pick(LinearLayout form,String title,JSONArray choices,String initial,boolean optional) {
         ArrayList<String> names=new ArrayList<>(), ids=new ArrayList<>();
-        names.add(text("None")); ids.add("");
+        if(optional) { names.add(text("None")); ids.add(""); }
         if(choices!=null) for(int i=0;i<choices.length();i++) {
             JSONObject row=choices.optJSONObject(i);
-            names.add(row.optString("label"));
+            names.add(row.optString("label",row.optString("name")));
             ids.add(row.optString("id"));
         }
         Spinner spin=spinner(form,title,names.toArray(new String[0]));

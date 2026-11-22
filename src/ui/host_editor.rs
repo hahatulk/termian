@@ -13,7 +13,7 @@ use termian_native::vault::{GroupId, Host, HostId};
 
 use super::assets::icon;
 use super::dialog::{self, Key, Kind};
-use super::host_settings::CredentialsMenu;
+use super::host_settings::{CredentialsMenu, Picker};
 use super::hosts::host_tile;
 use super::pointer::PointerFeedback;
 use super::text_input::{self, Mode};
@@ -30,9 +30,20 @@ pub enum Field {
     Port,
     Username,
     Password,
+    StartupCommand,
     /// A row of «Environment Variables».
     EnvName(usize),
     EnvValue(usize),
+}
+
+impl Field {
+    fn mode(self) -> Mode {
+        match self {
+            Self::StartupCommand => Mode::Multiline,
+            Self::Password => Mode::Secret,
+            _ => Mode::Line,
+        }
+    }
 }
 
 pub struct HostEditor {
@@ -46,6 +57,8 @@ pub struct HostEditor {
     tag: String,
     port: String,
     groups_open: bool,
+    vaults_open: bool,
+    move_host: Option<MoveHost>,
     pub(super) credentials_menu: Option<CredentialsMenu>,
     menu_open: bool,
     /// "Remove a host" is showing.
@@ -53,9 +66,14 @@ pub struct HostEditor {
     /// «Do you want to discard changes?» is showing.
     confirm_discard: bool,
     /// The open menu of a setting row (Backspace, Agent Forwarding, ...).
-    pub(super) picker: Option<super::host_settings::Picker>,
+    pub(super) picker: Option<Picker>,
     /// The «Environment Variables» or «Select Color Theme» panel over the form.
     pub(super) panel: Option<super::host_settings::Panel>,
+}
+
+struct MoveHost {
+    destination: uuid::Uuid,
+    error: Option<String>,
 }
 
 /// Right-click menu of a host card.
@@ -180,6 +198,8 @@ impl Shell {
             tag: String::new(),
             port,
             groups_open: false,
+            vaults_open: false,
+            move_host: None,
             credentials_menu: None,
             menu_open: false,
             confirm_remove: false,
@@ -260,6 +280,21 @@ impl Shell {
 
     fn on_editor_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = &mut self.host_editor else { return };
+        if editor.move_host.is_some() {
+            match event.keystroke.key.as_str() {
+                "escape" => self.cancel_move_host(cx),
+                "enter" => self.move_edited_host(window, cx),
+                _ => {}
+            }
+            cx.stop_propagation();
+            return;
+        }
+        if editor.vaults_open && event.keystroke.key == "escape" {
+            editor.vaults_open = false;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if editor.confirm_discard {
             if event.keystroke.key == "escape" {
                 editor.confirm_discard = false;
@@ -275,6 +310,12 @@ impl Shell {
             return;
         }
         let stroke = &event.keystroke;
+        if editor.picker == Some(Picker::Startup) && stroke.key == "escape" {
+            editor.picker = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if editor.credentials_menu.is_some() {
             match stroke.key.as_str() {
                 "escape" => {
@@ -296,13 +337,14 @@ impl Shell {
         }
         let mods = stroke.modifiers;
         if stroke.key == "tab" && !mods.control && !mods.alt && !mods.platform {
-            const ORDER: [Field; 6] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password];
-            let order = if editor.host.identity.and_then(|id| self.vault.identity(id)).is_some() { &ORDER[..4] } else { &ORDER[..] };
-            let next = order.iter().position(|f| *f == editor.field)
+            const ORDER: [Field; 7] = [Field::Address, Field::Label, Field::Tags, Field::Port, Field::Username, Field::Password, Field::StartupCommand];
+            let using_identity = editor.host.identity.and_then(|id| self.vault.identity(id)).is_some();
+            let order = ORDER.into_iter().filter(|field| !using_identity || !matches!(field, Field::Username | Field::Password));
+            let next = order.clone().position(|f| f == editor.field)
                 .and_then(|at| if mods.shift { at.checked_sub(1) } else { Some(at + 1) })
-                .and_then(|at| order.get(at));
+                .and_then(|at| order.clone().nth(at));
             if let Some(next) = next {
-                editor.field = *next;
+                editor.field = next;
                 cx.stop_propagation();
                 cx.notify();
             } else {
@@ -310,6 +352,7 @@ impl Shell {
             }
             return;
         }
+        let mut startup = String::new();
         let value = match editor.field {
             Field::Address => &mut editor.host.address,
             Field::Label => &mut editor.host.label,
@@ -317,6 +360,10 @@ impl Shell {
             Field::Port => &mut editor.port,
             Field::Username => editor.host.username.get_or_insert_with(String::new),
             Field::Password => editor.host.password.get_or_insert_with(String::new),
+            Field::StartupCommand => {
+                startup.push_str(editor.host.settings.startup_text(&self.vault));
+                &mut startup
+            }
             Field::EnvName(i) | Field::EnvValue(i) => {
                 let env = &mut editor.host.settings.env;
                 if i >= env.len() {
@@ -325,8 +372,8 @@ impl Shell {
                 if matches!(editor.field, Field::EnvName(_)) { &mut env[i].name } else { &mut env[i].value }
             }
         };
-        let before = value.clone();
-        let key = text_input::edit(("host", editor.field), Some(value), &event.keystroke, if editor.field == Field::Password { Mode::Secret } else { Mode::Line }, cx);
+        let before = (editor.field == Field::Port).then(|| value.clone());
+        let key = text_input::edit(("host", editor.field), Some(value), stroke, editor.field.mode(), cx);
         if editor.field == Field::Port {
             editor.port.retain(|c| c.is_ascii_digit());
             editor.port.truncate(5);
@@ -342,7 +389,12 @@ impl Shell {
             Key::Edited => {
                 let changed = match editor.field {
                     Field::Tags => false,
-                    Field::Port => editor.port != before,
+                    Field::Port => before.as_ref() != Some(&editor.port),
+                    Field::StartupCommand => {
+                        editor.host.settings.set_startup_command(startup);
+                        editor.picker = None;
+                        true
+                    }
                     _ => true,
                 };
                 if changed {
@@ -359,7 +411,7 @@ impl Shell {
                 }
                 // Enter in the connection fields connects, as in the legacy form.
                 Field::Address | Field::Port | Field::Username | Field::Password => self.connect_from_editor(window, cx),
-                Field::Label | Field::EnvName(_) | Field::EnvValue(_) => {}
+                Field::Label | Field::StartupCommand | Field::EnvName(_) | Field::EnvValue(_) => {}
             },
             // Escape leaves a sub-panel first, then the form.
             Key::Escape if editor.panel.is_some() => editor.panel = None,
@@ -377,24 +429,118 @@ impl Shell {
         cx.notify();
     }
 
-    pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, masked: bool, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
+    pub(super) fn input(&self, field: Field, placeholder: &str, value: &str, window: &Window, cx: &mut Context<Self>) -> Stateful<Div> {
         let Some(editor) = &self.host_editor else { return div().id("none") };
         let focused = editor.field == field && self.editor_focus.is_focused(window);
-        let mode = if masked { Mode::Secret } else { Mode::Line };
+        let mode = field.mode();
         let key = ("host", field);
         let input = field_box(focused)
             .id(SharedString::from(format!("editor-{placeholder}")))
+            .when(matches!(mode, Mode::Multiline), |d| d.h_auto().min_h(px(64.)).max_h(px(144.)).flex_col().items_start().py_2().overflow_y_scroll())
             .child(text_input::text(key, value, placeholder, focused, mode, cx));
         text_input::field(input, key, mode, move |shell, window, _| {
             if let Some(editor) = &mut shell.host_editor {
                 editor.field = field;
                 editor.groups_open = false;
+                if editor.picker == Some(Picker::Startup) {
+                    editor.picker = None;
+                }
             }
             window.focus(&shell.editor_focus);
         }, cx)
     }
 
     /// The slider over the right side of the Hosts screen.
+    fn cancel_move_host(&mut self, cx: &mut Context<Self>) {
+        if let Some(editor) = &mut self.host_editor {
+            editor.move_host = None;
+        }
+        cx.notify();
+    }
+
+    fn move_edited_host(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self.log_sync_busy();
+        let Some(editor) = &mut self.host_editor else { return };
+        let Some(choice) = &mut editor.move_host else { return };
+        let result = if busy {
+            Err(tr("Wait for synchronization to finish before moving the host.").into())
+        } else {
+            self.vaults.move_host(&mut self.vault, editor.host.clone(), choice.destination)
+        };
+        match result {
+            Ok(()) => {
+                self.host_editor = None;
+                self.host_menu = None;
+                text_input::reset(cx);
+                window.focus(&self.root_focus);
+            }
+            Err(error) => choice.error = Some(error),
+        }
+        cx.notify();
+    }
+
+    fn host_vault_field(&self, editor: &HostEditor, cx: &mut Context<Self>) -> Div {
+        let current = self.vaults.selected();
+        let enabled = !editor.is_new && !editor.host.address.trim().is_empty() && self.vaults.entries().len() > 1;
+        let field = field_box(editor.vaults_open)
+            .id("editor-vault")
+            .child(svg().path(icon("vaults")).size(px(14.)).text_color(rgb(theme::TEXT_MUTED)))
+            .child(div().text_color(rgb(theme::TEXT_MUTED)).child(tr("Vault")))
+            .child(div().flex_1().min_w_0().truncate().text_color(rgb(theme::TEXT)).child(self.vaults.selected_name().to_owned()))
+            .when(enabled, |d| d.surface_feedback(theme::INPUT)
+                .child(svg().path(icon("caret_down")).size(px(10.)).text_color(rgb(theme::TEXT_MUTED)))
+                .on_click(cx.listener(|shell, _, _, cx| {
+                    if let Some(editor) = &mut shell.host_editor {
+                        editor.vaults_open = !editor.vaults_open;
+                        editor.groups_open = false;
+                    }
+                    cx.notify();
+                })));
+        let choices = (enabled && editor.vaults_open).then(|| {
+            let rows = self.vaults.entries().iter().map(|entry| {
+                let destination = entry.id;
+                let active = destination == current;
+                div().id(SharedString::from(format!("editor-vault-{destination}")))
+                    .h(px(32.)).px_3().flex().items_center().gap_2().rounded_sm()
+                    .menu_feedback(false)
+                    .child(div().flex_1().min_w_0().truncate().text_sm().text_color(rgb(theme::TEXT)).child(entry.name().to_owned()))
+                    .when(active, |d| d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::ACCENT))))
+                    .on_click(cx.listener(move |shell, _, window, cx| {
+                        if let Some(editor) = &mut shell.host_editor {
+                            editor.vaults_open = false;
+                            if !active {
+                                editor.move_host = Some(MoveHost { destination, error: None });
+                                window.focus(&shell.editor_focus);
+                            }
+                        }
+                        cx.notify();
+                    }))
+            });
+            let list = div().id("editor-vault-list").occlude().max_h(px(220.)).overflow_y_scroll()
+                .p_1().rounded_md().bg(rgb(theme::INPUT)).shadow_lg().children(rows);
+            gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list))
+        });
+        div().relative().child(field).children(choices)
+    }
+
+    fn confirm_host_move(&self, editor: &HostEditor, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
+        let choice = editor.move_host.as_ref()?;
+        let destination = self.vaults.entries().iter().find(|entry| entry.id == choice.destination)?;
+        let question = tr("Move this host to {vault}?").replace("{vault}", destination.name());
+        let body = div().flex().flex_col().gap_2()
+            .child(question)
+            .child(tr("The host moves to the top level of the destination Vault. Saved credentials and the startup command are copied if needed. Logs and host trust stay in the source Vault. Rules, snippet targets, and workspace panes in that Vault will no longer use this host."))
+            .children(choice.error.as_ref().map(|error| div().text_sm().text_color(rgb(theme::ERROR)).child(error.clone())));
+        let close = dialog::close_button("move-host-close").on_click(cx.listener(|shell, _, _, cx| shell.cancel_move_host(cx)));
+        let cancel = dialog::button("move-host-cancel", tr("Cancel"), Kind::Text, false)
+            .on_click(cx.listener(|shell, _, _, cx| shell.cancel_move_host(cx)));
+        let submit = dialog::button("move-host-confirm", tr("Move host"), Kind::Accent, false)
+            .on_click(cx.listener(|shell, _, window, cx| shell.move_edited_host(window, cx)));
+        Some(dialog::backdrop(dialog::card(
+            tr("Move host"), false, close, body, vec![cancel.into_any_element(), submit.into_any_element()],
+        )))
+    }
+
     pub fn render_host_editor(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let editor = self.host_editor.as_ref()?;
         let host = &editor.host;
@@ -408,8 +554,7 @@ impl Shell {
             .gap_2()
             .border_b_1()
             .border_color(rgb(theme::TITLE_BAR))
-            // Legacy shows the vault under the title; this client has only the personal one.
-            .child(div().flex_1().flex().flex_col().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title)).child(div().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(tr("Personal vault"))))
+            .child(div().flex_1().min_w_0().flex().flex_col().child(div().text_lg().font_weight(FontWeight::SEMIBOLD).text_color(rgb(theme::TEXT)).child(title)).child(div().truncate().text_sm().text_color(rgb(theme::TEXT_MUTED)).child(self.vaults.selected_name().to_owned())))
             .when(!editor.is_new, |d| {
                 d.child(svg().path(icon("check")).size(px(12.)).text_color(rgb(theme::TEXT)))
             })
@@ -438,7 +583,7 @@ impl Shell {
                 .items_center()
                 .gap_3()
                 .child(host_tile(host).size(px(36.)).rounded_lg())
-                .child(self.input(Field::Address, tr("IP or Hostname"), &host.address, false, window, cx).flex_1()),
+                .child(self.input(Field::Address, tr("IP or Hostname"), &host.address, window, cx).flex_1()),
         );
 
         let group_label = host.group.and_then(|g| self.vault.group(g)).map(|g| g.label.clone());
@@ -451,6 +596,7 @@ impl Shell {
             .on_click(cx.listener(|shell, _, _, cx| {
                 if let Some(editor) = &mut shell.host_editor {
                     editor.groups_open = !editor.groups_open;
+                    editor.vaults_open = false;
                 }
                 cx.notify();
             }));
@@ -547,7 +693,8 @@ impl Shell {
         });
 
         let general = card(tr("General"))
-            .child(self.input(Field::Label, tr("Label"), &host.label, false, window, cx))
+            .child(self.input(Field::Label, tr("Label"), &host.label, window, cx))
+            .child(self.host_vault_field(editor, cx))
             // Lists open over the form, like the legacy autocomplete menus.
             .child(div().relative().child(group_picker).children(groups.map(|list| gpui::deferred(div().absolute().top_full().left_0().right_0().mt_1().child(list)))))
             .child(div().relative().child(tags).children(suggestions.map(gpui::deferred)))
@@ -571,14 +718,14 @@ impl Shell {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(rgb(theme::TEXT))
                     .child(tr("SSH on"))
-                    .child(self.input(Field::Port, "22", &editor.port, false, window, cx).w(px(90.)))
+                    .child(self.input(Field::Port, "22", &editor.port, window, cx).w(px(90.)))
                     .child("port"),
             )
             .child(divider())
             .child(div().font_weight(FontWeight::MEDIUM).text_color(rgb(theme::TEXT)).child(tr("Credentials")))
             .children(self.render_credentials(window, cx))
             .child(divider())
-            .children(self.render_ssh_settings(cx));
+            .children(self.render_ssh_settings(window, cx));
 
         let can_connect = !editor.is_new && !host.address.trim().is_empty();
         let footer = div().flex_none().p(px(15.)).border_t_1().border_color(rgb(theme::TITLE_BAR)).child(
@@ -645,6 +792,7 @@ impl Shell {
             })
         });
 
+        let confirm = confirm.or_else(|| self.confirm_host_move(editor, cx));
         Some(
             div()
                 .id("host-editor")
