@@ -211,7 +211,6 @@ pub fn times_label(connected: i64, disconnected: i64) -> String {
     if days == 0 { range } else { format!("{range} (+{days}d)") }
 }
 
-/// This computer's name, shown under "No account" in Logs.
 pub fn device_name() -> String {
     #[cfg(unix)]
     {

@@ -1,16 +1,24 @@
 # Termian
 
-SSH/SFTP-клиент на Rust для macOS, Windows и Android. Подключения и ключи хранятся в локальном Vault. Для синхронизации можно [запустить свой сервер](cloud-sync-server/README.md).
+Termian is a Rust client for SSH sessions and SFTP transfers on macOS, Windows, and Android.
 
-## Установка
+## Overview
 
-В [GitHub Releases](https://github.com/hahatulk/termian/releases/latest) скачайте `.dmg` для macOS Apple Silicon, `-setup.exe` для Windows x64 или `.apk` для Android 8+. На панели задач Windows окна Termian используют значок из EXE.
+- Split terminal tabs, saved snippets, and per-host startup commands.
+- Local, remote, and dynamic port forwarding.
+- Encrypted Vaults for hosts and credentials, encrypted session logs with bookmarks, and optional [self-hosted sync](cloud-sync-server/README.md).
 
-Новые версии сначала публикуются как "Pre-release". В "Latest" они попадают после ручного перевода.
+## Installation
 
-## Запуск из исходников
+Download a package from [GitHub Releases](https://github.com/hahatulk/termian/releases):
 
-Нужен Rust stable. На macOS установите Xcode Command Line Tools и задайте `export MACOSX_DEPLOYMENT_TARGET=11.0`. На Windows установите MSVC и Windows SDK.
+- macOS Apple Silicon: `.dmg`.
+- Windows x64: `-setup.exe` or the portable `.exe`.
+- Android 8 or later: `.apk`.
+
+### Desktop from source
+
+Install stable Rust. On macOS, install the Xcode Command Line Tools and run `export MACOSX_DEPLOYMENT_TARGET=11.0`. On Windows, install MSVC and the Windows SDK.
 
 ```bash
 git clone https://github.com/hahatulk/termian.git
@@ -18,51 +26,48 @@ cd termian
 cargo run --locked --bin termian-native
 ```
 
-[Сборка Android](spec.md#92-android)
+### Android from source
 
-## Первое подключение
+On macOS or x86_64 Linux, install JDK 21, Python 3, `zip`, the Android SDK command-line tools, and stable Rust through `rustup`. Set `ANDROID_SDK_ROOT` to your SDK directory, then run from the repository root:
 
-В Vaults → Hosts нажмите "NEW HOST", укажите адрес, имя пользователя и пароль или SSH-ключ. Нажмите на сохранённый хост один раз, чтобы подключиться. В настольном терминале выделение мышью автоматически копирует текст и показывает "Copied!". Чтобы выделить текст через несколько экранов, держите левую кнопку и ведите курсор к верхнему или нижнему краю текста. Можно прокручивать колесом или трекпадом, не отпуская кнопку. Чтобы выбрать дальнюю границу без перетаскивания, щёлкните в начале диапазона, прокрутите историю и щёлкните по концу с `Shift`.
+```bash
+sdkmanager --install 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;28.2.13676358'
+rustup target add aarch64-linux-android x86_64-linux-android
+./scripts/build-android.sh
+```
 
-На компьютере и на Android откройте настройки хоста и в разделе SSH введите команду в поле "Startup Command". Можно ввести несколько строк. Кнопка "Use snippet" копирует текст сохранённого сниппета в поле. Команда запускается один раз после входа в новый SSH-терминал. Чтобы отключить запуск, очистите поле.
+The debug APK is `dist/android/termian-debug.apk`.
 
-При подключении к SSH в настольном терминале кольцо движется по трём точкам: начало подключения, проверка ключа и вход. После входа полоса становится зелёной, затем открывается терминал.
+## Usage
 
-В `htop`, `tmux` и других программах с включённым управлением мышью клики и прокрутка идут в программу. Удерживайте Shift, чтобы выделить текст или прокрутить историю терминала на компьютере. На Android касание ячейки передаёт клик, свайп передаёт прокрутку.
+In Vaults, open Hosts and add a host. Enter an SSH server address, a username, and a password or key. On Android, tap "Save". Select the host to connect, then run `pwd` in the terminal.
 
-Когда терминал в фокусе, `Ctrl+C`, `Ctrl+V`, `Ctrl+Tab` и `F1`–`F12` передаются программе в сеансе. Для буфера обмена откройте меню вкладки правым кликом. На macOS в схеме "Mac hotkeys" доступны `Cmd+C` и `Cmd+V`, на Android вставка есть в меню клавиш терминала.
+To run `pwd` after login, enter it in the host's "Startup Command" field under SSH. Middle-click a desktop terminal tab to close it and disconnect its sessions.
 
-Если macOS не подключается к локальному SSH-хосту, проверьте доступ Termian в Системных настройках → Конфиденциальность и безопасность → Локальная сеть.
+## Configuration
 
-Нажмите имя Vault в боковой панели, чтобы открыть список и выбрать хранилище. На компьютере новый Vault создаётся через "New Vault". Существующие данные открываются в "Personal". Для всех Vault укажите один сервер, токен и пароль шифрования в Settings → Account. После обычной синхронизации список Vault и их данные доступны на других устройствах с теми же настройками.
+Set the server address, access token, and encryption password in Settings → Account to sync your Vaults through a [server you host](cloud-sync-server/README.md). From Settings → Terminal, choose the theme and text size. Those preferences apply to all Vaults on the device.
 
-Настройки приложения общие для всех Vault на устройстве. Если сменить тему, шрифт или вид списка в одном Vault, другой откроется с теми же настройками. Для хоста можно оставить собственную тему. Хосты, идентификаторы, ключи и журналы каждого Vault хранятся отдельно.
-
-Чтобы переместить сохранённый хост, откройте "Host Details" → "General" → "Vault" и выберите другое хранилище. На Android после выбора нажмите "Save". Подтвердите перемещение: хост появится в корне выбранного Vault. Группу можно назначить там. Журналы и доверенные ключи сервера остаются в исходном Vault.
-
-В настольном SFTP включите "Show Hidden Files" в меню действий. Имена скрытых файлов и папок серее, на папках есть значок перечёркнутого глаза. На Android нажмите на текстовый файл в SFTP, чтобы читать его страницами без сохранения копии.
-
-На Android откройте Settings в левом меню. Разделы идут в том же порядке, что на компьютере. В Terminal → Terminal theme и в редакторе хоста тема выбирается из списка с превью.
-
-На Android при запуске и после команды "Lock" подтвердите доступ отпечатком или паролем, PIN-кодом либо графическим ключом экрана блокировки. Если экран блокировки не настроен, откройте настройки безопасности Android с экрана входа. На Android 8 используется системный экран блокировки; встроенный запрос биометрии доступен с Android 9.
-
-Язык интерфейса: Settings → Language. По умолчанию выбран English.
-
-## Скриншоты
+## Screenshots
 
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e"><img src="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e" alt="Терминал" width="400"></a><br>Терминал</td>
-    <td align="center"><a href="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117"><img src="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117" alt="Vault и редактор хоста" width="400"></a><br>Vault и редактор хоста</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e"><img src="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e" alt="Terminal" width="400"></a><br>Terminal</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117"><img src="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117" alt="Vault and host editor" width="400"></a><br>Vault and host editor</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c"><img src="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c" alt="Настройки синхронизации" width="400"></a><br>Настройки синхронизации</td>
-    <td align="center"><a href="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9"><img src="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9" alt="Панель сервера" width="300"></a><br>Панель сервера</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c"><img src="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c" alt="Sync settings" width="400"></a><br>Sync settings</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9"><img src="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9" alt="Server panel" width="300"></a><br>Server panel</td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><a href="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f"><img src="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f" alt="Каналы обновлений" width="400"></a><br>Каналы обновлений</td>
-    <td></td>
+    <td align="center" colspan="2"><a href="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f"><img src="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f" alt="Update channels" width="400"></a><br>Update channels</td>
   </tr>
 </table>
 
-[Автообновление](spec.md#46-автообновление) · [Спецификация](spec.md) · [Сообщить об ошибке](https://github.com/hahatulk/termian/issues)
+## Contributing
+
+Report bugs in [GitHub Issues](https://github.com/hahatulk/termian/issues) or submit a pull request. Run `cargo test --locked` from the repository root before submitting code changes.
+
+## License
+
+[MIT](LICENSE)

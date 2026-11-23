@@ -404,6 +404,11 @@ impl Shell {
             .when(matches!(tab.kind, TabKind::Session { .. }), |d| {
                 d.on_drag(ui::workspace::TabDrag { tab: id, title: tab.title().to_owned() }, |drag, _, _, cx| cx.new(|_| drag.clone()))
                     .on_hover(|hovered, window, _| ui::workspace::set_window_movable(window, !*hovered))
+                    .on_mouse_down(gpui::MouseButton::Middle, cx.listener(move |shell, _, _, cx| {
+                        cx.stop_propagation();
+                        shell.close_terminal_tab(id);
+                        cx.notify();
+                    }))
                     .on_mouse_down(gpui::MouseButton::Right, cx.listener(move |shell, event: &gpui::MouseDownEvent, _, cx| {
                     shell.tab_menu = Some((id, event.position));
                     cx.notify();

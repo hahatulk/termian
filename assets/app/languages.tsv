@@ -355,8 +355,6 @@ Local changes are ready to send	Есть новые локальные изме�
 Local forwarding lets you access a remote server's listening port as though it were local.	Локальный проброс открывает доступ к порту удалённого сервера с этого устройства.
 Local port number *	Локальный порт *
 Local user	Локальный пользователь
-Location	Расположение
-Location unavailable	Расположение недоступно
 Location – $1 *	Расположение ($1) *
 Lock	Заблокировать
 Lock Termian	Заблокировать Termian
@@ -398,7 +396,6 @@ New password saved for subsequent uploads.	Новый пароль сохран�
 New snippet package	Новый пакет сниппетов
 New version	Новая версия
 Newest to oldest	Сначала новые
-No account	Нет учётной записи
 No file type associations yet	Нет привязок типов файлов
 No group	Без группы
 No hosts found	Хосты не найдены
@@ -540,6 +537,7 @@ Save targets	Сохранить цели
 Save template	Сохранить шаблон
 Save the address, token and password in your cloud settings first.	Сначала сохраните адрес сервера, токен и пароль в настройках своего облака.
 Save workspace	Сохранить рабочее пространство
+Saved	Закладки
 Script *	Скрипт *
 Search	Поиск
 Search hosts or tabs	Поиск хостов или вкладок
