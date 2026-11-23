@@ -320,13 +320,16 @@ pub fn import(vault: &mut Vault, snapshot: &Value, matched: &Ids) -> Result<Valu
             hidden.insert(token(&raw["local_id"]), raw.clone());
             continue;
         }
+        let password = optional(raw, "password");
+        let ssh_key = find(&ids, "sshKeys", raw, "ssh_key");
         identities.push(Identity {
             id,
             label: text(raw, "label"),
             username: text(raw, "username"),
-            password: optional(raw, "password"),
-            key: find(&ids, "sshKeys", raw, "ssh_key"),
-            ..Identity::default()
+            has_password: password.is_some(),
+            has_key: ssh_key.is_some(),
+            password,
+            key: ssh_key,
         });
         portable.insert(key("identities", id), raw.clone());
     }
@@ -643,6 +646,7 @@ mod tests {
         assert!(snapshot["identities"].as_array().unwrap().iter().any(|i| i["password"] == "pw"));
         loaded.remove_key(key_id);
         assert!(loaded.identities[0].key.is_none());
+        assert_eq!(loaded.identities[0].subtitle(), "Auth password");
         loaded.remove_identity(identity);
         assert!(!loaded.portable.contains_key(&key("sshKeys", key_id)));
         assert!(!loaded.portable.contains_key(&key("identities", identity)));
@@ -662,6 +666,28 @@ mod tests {
         assert_eq!(copy.history.len(), 1, "device-local history stays");
         assert_eq!(pairs["hosts"].as_array().unwrap().len(), 2);
         assert!(!copy.secrets_missing);
+    }
+
+    #[test]
+    fn synced_identity_keeps_its_credentials_in_the_keychain_and_login_picker() {
+        let source = sample();
+        let snapshot = crate::sync::to_sync_form(&export(&source, NOW), &mut Ids::new());
+        let mut vault = Vault::default();
+        import(&mut vault, &validate_snapshot(&snapshot).unwrap(), &Ids::new()).unwrap();
+        let host = vault.hosts.iter().find(|h| h.identity.is_some()).unwrap();
+        let (_, password, key) = vault.credentials(host);
+        assert!(password == source.identities[0].password);
+        assert!(key.unwrap().private_key == source.keys[0].private_key);
+        assert_eq!(vault.identities[0].subtitle(), "Auth password and key");
+        assert_eq!(crate::login::IdentityChoice::all(&vault)[0].subtitle, "Auth password and key");
+
+        vault.identities[0].has_password = false;
+        vault.identities[0].has_key = false;
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::store::Store::new(dir.path().join("vault.bin"), [7; 32]);
+        store.save(&vault).unwrap();
+        let reopened = store.load().unwrap().unwrap();
+        assert_eq!(reopened.identities[0].subtitle(), "Auth password and key");
     }
 
     #[test]

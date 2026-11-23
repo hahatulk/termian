@@ -213,6 +213,20 @@ const STRUCTURE: [(&str, &str, &str); 14] = [
     ("proxies", "identity", "identities"), ("snippets", "package", "snippetPackages"),
 ];
 
+fn credential_fingerprint(kind: &str, record: &Value, local_ids: Option<&Ids>) -> Option<String> {
+    if kind == "identities" && record["is_visible"] == false {
+        return None;
+    }
+    let mut fields = canonical(record, Some(kind));
+    fields.as_object_mut()?.remove("local_id");
+    if kind == "identities" {
+        if let (Some(id), Some(ids)) = (ref_id(&record["ssh_key"]), local_ids) {
+            fields["ssh_key"] = json!({"local_id": ids.get("sshKeys")?.get(&token(id))?});
+        }
+    }
+    Some(sha(&fields))
+}
+
 fn records<'a>(snapshot: &'a Value, kind: &str) -> impl Iterator<Item = &'a Value> {
     snapshot.get(kind).and_then(Value::as_array).into_iter().flatten()
 }
@@ -257,6 +271,8 @@ pub fn match_ids(local: &Value, remote: Option<&Value>, ids: &mut Ids) {
                 let config = ref_id(&record["ssh_config"]).and_then(|id| configs.get(&token(id)).copied()).unwrap_or(&Value::Null);
                 let identity = ref_id(&config["identity"]).and_then(|id| identities.get(&token(id)).copied()).unwrap_or(&Value::Null);
                 json!([label, record["address"].as_str().unwrap_or_default().to_ascii_lowercase(), config["port"].as_u64().unwrap_or(22), identity["username"].as_str().unwrap_or_default()]).to_string()
+            } else if kind == "identities" {
+                json!([label, record["username"].as_str().unwrap_or_default(), record["is_visible"] != false]).to_string()
             } else { label };
             if names.insert(name.clone(), record).is_some() { duplicates.insert(name); }
         }
@@ -289,6 +305,26 @@ pub fn match_ids(local: &Value, remote: Option<&Value>, ids: &mut Ids) {
         }
         if !changed {
             break;
+        }
+    }
+    for kind in ["sshKeys", "identities"] {
+        let mut candidates: HashMap<String, Vec<&Value>> = HashMap::new();
+        for record in records(local, kind) {
+            let Some(id) = ref_id(record) else { continue };
+            if !ids.get(kind).is_some_and(|m| m.contains_key(&token(id))) {
+                if let Some(digest) = credential_fingerprint(kind, record, Some(ids)) {
+                    candidates.entry(digest).or_default().push(id);
+                }
+            }
+        }
+        if candidates.is_empty() { continue; }
+        for record in records(remote, kind) {
+            let Some(digest) = credential_fingerprint(kind, record, None) else { continue };
+            if let Some(matches) = candidates.get_mut(&digest) {
+                if bind(ids, kind, matches.last().copied(), ref_id(record)) {
+                    matches.pop();
+                }
+            }
         }
     }
 }
@@ -429,6 +465,8 @@ pub enum ConflictPolicy {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ConflictInfo {
+    #[serde(skip)]
+    pub credentials_conflict: bool,
     pub kind: String,
     pub label: String,
     pub detail: String,
@@ -480,6 +518,21 @@ fn same_digests(a: &BTreeMap<String, Record>, b: &BTreeMap<String, Record>) -> b
     a.len() == b.len() && a.iter().all(|(key, r)| b.get(key).is_some_and(|o| o.digest == r.digest))
 }
 
+pub const CREDENTIAL_CONFLICT: &str = "Sync cannot merge these SSH credentials. Compare the conflicting records on your devices.";
+
+fn credentials_conflict(kind: &str, local: Option<&Record>, remote: Option<&Record>) -> bool {
+    let (Some(l), Some(r)) = (local, remote) else { return matches!(kind, "identities" | "sshKeys") };
+    let (l, r) = (&l.value, &r.value);
+    let changed = |field: &str| l[field].as_str().unwrap_or_default() != r[field].as_str().unwrap_or_default();
+    match kind {
+        "identities" => changed("username") || changed("password") || ref_id(&l["ssh_key"]) != ref_id(&r["ssh_key"])
+            || (l["is_visible"] == false) != (r["is_visible"] == false),
+        "sshKeys" => ["private_key", "public_key", "passphrase"].into_iter().any(changed)
+            || l["certificates"].as_array().into_iter().flatten().ne(r["certificates"].as_array().into_iter().flatten()),
+        _ => false,
+    }
+}
+
 pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base>, policy: ConflictPolicy, now: &str) -> Merged {
     let l_records = records_of(Some(local));
     let r_records = records_of(remote);
@@ -513,6 +566,7 @@ pub fn merge_snapshots(local: &Value, remote: Option<&Value>, base: Option<&Base
                         "изменено на обеих сторонах"
                     };
                     conflicts.push(ConflictInfo {
+                        credentials_conflict: credentials_conflict(&item.kind, l, r),
                         kind: item.kind.clone(),
                         text: format!("Конфликт: {} «{label}»", kind_label(&item.kind)),
                         label,
@@ -641,6 +695,9 @@ pub fn sync_once(saved: Option<State>, server_id: &str, device: &mut dyn Device,
     match_ids(&exported, remote.as_ref(), &mut ids);
     let local = to_sync_form(&exported, &mut ids);
     let merged = merge_snapshots(&local, remote.as_ref(), base.as_ref(), ConflictPolicy::Automatic, now);
+    if merged.conflicts.iter().any(|conflict| conflict.credentials_conflict) {
+        return Err(crate::language::text(CREDENTIAL_CONFLICT).into());
+    }
     let outgoing = if merged.upload_needed {
         let condition = match (&fetched, &remote) {
             (Some(Remote { revision: Some(revision), .. }), Some(_)) => Condition::Revision(revision.clone()),
@@ -1175,6 +1232,60 @@ mod tests {
             sync(&mut b, &cloud);
             assert_eq!(b.labels("hosts").len(), local_count + remote_count);
         }
+    }
+
+    #[test]
+    fn retrying_a_first_sync_does_not_add_copies_of_the_same_identities() {
+        let cloud = TestServer::default();
+        let device = |name, start, accounts: &[&str]| {
+            let mut device = TestDevice::new(name, start);
+            for account in accounts {
+                let key = device.id();
+                device.data["sshKeys"].as_array_mut().unwrap().push(json!({
+                    "local_id": key, "label": "Fixture key", "private_key": format!("fixture-{account}")
+                }));
+                let id = device.id();
+                device.data["identities"].as_array_mut().unwrap().push(json!({
+                    "local_id": id, "label": "Operations", "username": "service",
+                    "is_visible": true, "ssh_key": {"local_id": key}
+                }));
+            }
+            device
+        };
+        let mut a = device("A", 1, &["first", "second"]);
+        sync(&mut a, &cloud);
+        let mut counts = Vec::new();
+        for _ in 0..3 {
+            let mut b = device("B", 100, &["second", "first", "third"]);
+            sync(&mut b, &cloud);
+            counts.push(b.labels("identities").len());
+            let again = sync(&mut b, &cloud);
+            assert!(!again.imported && !again.uploaded);
+        }
+        assert_eq!(counts, [3, 3, 3]);
+        sync(&mut a, &cloud);
+        let keys: HashSet<_> = records(&a.data, "identities").map(|i| token(&i["ssh_key"]["local_id"])).collect();
+        assert_eq!(keys.len(), 3);
+    }
+
+    #[test]
+    fn a_conflicting_empty_identity_cannot_replace_saved_credentials() {
+        let cloud = TestServer::default();
+        let mut a = TestDevice::new("A", 1);
+        let mut b = TestDevice::new("B", 100);
+        let identity = json!({"local_id": 1, "label": "Operations", "username": "service", "password": null});
+        a.data["identities"] = json!([identity]);
+        b.data["identities"] = a.data["identities"].clone();
+        b.data["identities"][0]["local_id"] = json!(7);
+        b.data["identities"][0]["password"] = json!("local fixture");
+        sync(&mut a, &cloud);
+        let before = b.data.clone();
+        let revision = *cloud.revision.borrow();
+        let error = sync_once(None, "server", &mut b, &cloud, NOW).unwrap_err();
+        assert_eq!(error, crate::language::text(CREDENTIAL_CONFLICT));
+        assert_eq!(b.backups, 0);
+        assert!(b.data == before);
+        assert_eq!(*cloud.revision.borrow(), revision);
     }
 
     #[test]

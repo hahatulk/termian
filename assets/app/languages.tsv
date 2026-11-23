@@ -613,6 +613,7 @@ Switch SFTP host?	Сменить SFTP-хост?
 Switch Vault	Выбрать Vault
 Sync	Синхронизация
 Sync automatically every hour (merge device and cloud data)	Синхронизировать автоматически каждый час (изменения устройства и облака объединяются)
+Sync cannot merge these SSH credentials. Compare the conflicting records on your devices.	Синхронизация не может объединить эти учётные данные SSH. Сверьте конфликтующие записи на устройствах.
 Sync complete	Синхронизировано
 Sync in progress…	Выполняется синхронизация…
 Sync merges new, changed and deleted records in both directions. Termian makes an encrypted backup before applying cloud changes.	Изменения устройства и облака будут объединены: новые, изменённые и удалённые записи переносятся в обе стороны. Перед применением изменений из облака создаётся зашифрованная резервная копия.

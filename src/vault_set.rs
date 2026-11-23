@@ -931,6 +931,24 @@ mod tests {
         let (_, mut work) = set.select(&personal, Destination::New("Work")).unwrap();
         let work_id = set.selected();
         work.hosts = one_host("Work host").hosts;
+        let key = work.next_id();
+        work.save_key(crate::vault::SshKey {
+            id: key,
+            label: "Fixture key".into(),
+            private_key: Some("fixture private material".into()),
+            public_key: Some("ssh-ed25519 fixture".into()),
+            ..Default::default()
+        });
+        let identity = work.next_id();
+        work.save_identity(crate::vault::Identity {
+            id: identity,
+            label: "Deployment".into(),
+            username: "service".into(),
+            password: Some("fixture password".into()),
+            key: Some(key),
+            ..Default::default()
+        });
+        work.hosts[0].identity = Some(identity);
         let (_, mut personal) = set
             .select(&work, Destination::Existing(Uuid::nil()))
             .unwrap();
@@ -952,9 +970,23 @@ mod tests {
             ["Personal host"]
         );
         let ticket = self_cloud::checked_preview(&personal).unwrap().1.unwrap();
-        let (_, mut work) = other
+        let (work_store, mut work) = other
             .select(&personal, Destination::Existing(work_id))
             .unwrap();
+        let identity = work.hosts[0].identity.unwrap();
+        for _ in 0..3 {
+            other.sync_all(&mut work, &HashSet::new()).unwrap();
+            assert_eq!(self_cloud::checked_preview(&work).unwrap().0, self_cloud::Preview::Synced);
+            work_store.save(&work).unwrap();
+            work = load_saved(&work_store).unwrap();
+            other.attach_cloud(work_id, &mut work);
+            assert_eq!((work.identities.len(), work.keys.len()), (1, 1));
+            assert_eq!(work.hosts[0].identity, Some(identity));
+            let (username, password, key) = work.credentials(&work.hosts[0]);
+            assert_eq!(username.as_deref(), Some("service"));
+            assert!(password.as_deref() == Some("fixture password"));
+            assert!(key.unwrap().private_key.as_deref() == Some("fixture private material"));
+        }
         assert_eq!(
             work.hosts
                 .iter()

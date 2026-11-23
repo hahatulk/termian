@@ -597,12 +597,93 @@ mod tests {
         let (url, _) = crate::cloud::tests::server();
         let backups = tempfile::tempdir().unwrap();
         let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &["db"]));
-        assert_eq!(sync(&mut a, &test_backups(backups.path())).unwrap(), "Синхронизировано: отправлено изменений: 2");
-        assert!(sync(&mut b, &test_backups(backups.path())).unwrap().contains("получено изменений: 2"));
+        for device in [&mut a, &mut b] {
+            device.hosts[0].username = Some("service".into());
+            device.hosts[0].password = Some("host fixture".into());
+        }
+        assert_eq!(sync(&mut a, &test_backups(backups.path())).unwrap(), "Синхронизировано: отправлено изменений: 3");
+        assert!(sync(&mut b, &test_backups(backups.path())).unwrap().contains("получено изменений: 3"));
         assert_eq!(labels(&b), ["db", "web"]);
+        assert!(b.hosts.iter().all(|host| host.identity.is_none() && host.password.as_deref() == Some("host fixture")));
         assert_eq!(std::fs::read_dir(backups.path().join("self-cloud-backups/device")).unwrap().count(), 1, "a backup before the import");
         sync(&mut a, &test_backups(backups.path())).unwrap();
         assert_eq!(sync(&mut a, &test_backups(backups.path())).unwrap(), "Данные уже синхронизированы");
+    }
+
+    #[test]
+    fn a_one_sided_identity_password_change_or_removal_reaches_the_other_device() {
+        let (url, _) = crate::cloud::tests::server();
+        let dir = tempfile::tempdir().unwrap();
+        let backups = test_backups(dir.path());
+        let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &[]));
+        let id = a.next_id();
+        a.save_identity(crate::vault::Identity {
+            id, label: "Service".into(), username: "service".into(), password: Some("first fixture".into()), ..Default::default()
+        });
+        a.hosts[0].identity = Some(id);
+        sync(&mut a, &backups).unwrap();
+        sync(&mut b, &backups).unwrap();
+
+        let identity = b.identities[0].clone();
+        b.save_identity(crate::vault::Identity { password: Some("second fixture".into()), ..identity });
+        sync(&mut b, &backups).unwrap();
+        sync(&mut a, &backups).unwrap();
+        assert!(a.credentials(&a.hosts[0]).1.as_deref() == Some("second fixture"));
+        assert_eq!(a.hosts[0].identity, Some(id));
+
+        let identity = a.identities[0].clone();
+        a.save_identity(crate::vault::Identity { password: None, ..identity });
+        sync(&mut a, &backups).unwrap();
+        sync(&mut b, &backups).unwrap();
+        assert_eq!(b.identities.len(), 1);
+        assert_eq!(b.hosts[0].identity, Some(b.identities[0].id));
+        assert!(b.credentials(&b.hosts[0]).1.is_none());
+        assert_eq!(b.identities[0].subtitle(), "No credentials");
+        assert_eq!(preview(&b).unwrap(), Preview::Synced);
+    }
+
+    #[test]
+    fn first_sync_cannot_turn_a_keychain_identity_into_a_host_login() {
+        let (url, _) = crate::cloud::tests::server();
+        let dir = tempfile::tempdir().unwrap();
+        let backups = test_backups(dir.path());
+        let (mut a, mut b) = (vault(&url, &["web"]), vault(&url, &["web"]));
+        a.hosts[0].username = Some("service".into());
+        a.hosts[0].password = Some("host fixture".into());
+        let id = b.next_id();
+        b.save_identity(crate::vault::Identity {
+            id, label: "Service".into(), username: "service".into(), password: a.hosts[0].password.clone(), ..Default::default()
+        });
+        b.hosts[0].identity = Some(id);
+        sync(&mut a, &backups).unwrap();
+        let result = sync(&mut b, &backups);
+        assert_eq!(b.identities.len(), 1);
+        assert_eq!(result.unwrap_err(), crate::language::text(sync::CREDENTIAL_CONFLICT));
+        assert_eq!(b.hosts[0].identity, Some(id));
+    }
+
+    #[test]
+    fn concurrent_private_key_edits_leave_both_versions_intact() {
+        let (url, stored) = crate::cloud::tests::server();
+        let dir = tempfile::tempdir().unwrap();
+        let backups = test_backups(dir.path());
+        let (mut a, mut b) = (vault(&url, &[]), vault(&url, &[]));
+        a.save_key(crate::vault::SshKey {
+            id: a.next_id(), label: "Fixture key".into(), private_key: Some("initial fixture".into()), ..Default::default()
+        });
+        sync(&mut a, &backups).unwrap();
+        sync(&mut b, &backups).unwrap();
+        a.keys[0].private_key = Some("first device fixture".into());
+        b.keys[0].private_key = Some("second device fixture".into());
+        sync(&mut a, &backups).unwrap();
+        let remote = stored.lock().unwrap().clone();
+        let local = b.clone();
+        let Preview::Conflicts(conflicts) = preview(&b).unwrap() else { panic!("expected a key conflict") };
+        assert_eq!(conflicts.len(), 1);
+        assert!(conflicts[0].credentials_conflict);
+        assert_eq!(sync(&mut b, &backups).unwrap_err(), crate::language::text(sync::CREDENTIAL_CONFLICT));
+        assert!(b == local);
+        assert!(*stored.lock().unwrap() == remote);
     }
 
     #[test]
@@ -681,7 +762,7 @@ mod tests {
         assert_eq!(overview(&groups), "4 записи · 2 группы");
         assert_eq!(count_label(11), "11 записей");
         assert_eq!(count_label(21), "21 запись");
-        let conflict = ConflictInfo { kind: "hosts".into(), label: "web".into(), detail: "(адрес)".into(), text: String::new() };
+        let conflict = ConflictInfo { credentials_conflict: false, kind: "hosts".into(), label: "web".into(), detail: "(адрес)".into(), text: String::new() };
         let groups = group_conflicts(&[conflict]);
         assert_eq!((groups[0].direction, groups[0].action, groups[0].categories[0].records[0].1.as_str()), ("Обе стороны", "Конфликт", "адрес"));
     }

@@ -852,7 +852,12 @@ impl Vault {
     pub fn remove_key(&mut self, id: u64) {
         self.keys.retain(|k| k.id != id);
         self.portable.remove(&format!("sshKeys|{id}"));
-        for identity in &mut self.identities { if identity.key == Some(id) { identity.key = None; } }
+        for identity in &mut self.identities {
+            if identity.key == Some(id) {
+                identity.key = None;
+                identity.has_key = false;
+            }
+        }
         for host in &mut self.hosts {
             if host.key == Some(id) {
                 host.key = None;

@@ -266,6 +266,7 @@ impl TerminalView {
         let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
             if keyboard_focus.is_focused(window)
                 && event.context_stack.iter().any(|context| context.contains("Terminal"))
+                && !is_terminal_shortcut(&cx.key_bindings().borrow(), event)
             {
                 let _ = view.update(cx, |view, cx| view.input_key(&event.keystroke, cx));
             }
@@ -1436,6 +1437,14 @@ impl Render for TerminalView {
     }
 }
 
+fn is_terminal_shortcut(keymap: &gpui::Keymap, event: &gpui::KeystrokeEvent) -> bool {
+    let (bindings, _) = keymap.bindings_for_input(std::slice::from_ref(&event.keystroke), &event.context_stack);
+    bindings.first().is_some_and(|binding| {
+        let action = binding.action().as_any();
+        event.keystroke.modifiers.platform || action.is::<CopyFromTerminal>() || action.is::<PasteToTerminal>() || action.is::<SelectAllInTerminal>()
+    })
+}
+
 fn terminal_key_parts<'a>(
     key: &'a gpui::Keystroke,
     option_is_meta: bool,
@@ -1471,6 +1480,34 @@ fn terminal_button(button: MouseButton) -> Option<TerminalButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_shortcuts_follow_the_active_keymap() {
+        use gpui::{KeyBinding, KeyContext, Keymap, Keystroke, KeystrokeEvent};
+
+        let mut keymap = Keymap::new(vec![
+            KeyBinding::new("cmd-v", PasteToTerminal, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-c", CopyFromTerminal, Some("Terminal")),
+            KeyBinding::new("ctrl-shift-a", SelectAllInTerminal, Some("Terminal")),
+            KeyBinding::new("ctrl-v", PasteToTerminal, Some("Terminal")),
+            KeyBinding::new("cmd-f", OpenTerminalSearch, Some("Terminal")),
+            KeyBinding::new("ctrl-l", super::super::shortcut_actions::OpenLocalTerminal, None),
+        ]);
+        let shortcut = |keymap: &Keymap, key, context| is_terminal_shortcut(keymap, &KeystrokeEvent {
+            keystroke: Keystroke::parse(key).unwrap(),
+            action: None,
+            context_stack: vec![KeyContext::parse(context).unwrap()],
+        });
+        for key in ["cmd-v", "ctrl-shift-c", "ctrl-shift-a", "ctrl-v", "cmd-f"] {
+            assert!(shortcut(&keymap, key, "Terminal"), "{key}");
+        }
+        for key in ["ctrl-c", "ctrl-x", "ctrl-a", "ctrl-l", "cmd-b"] {
+            assert!(!shortcut(&keymap, key, "Terminal"), "{key}");
+        }
+        assert!(!shortcut(&keymap, "cmd-v", "Field"));
+        keymap.clear();
+        assert!(!shortcut(&keymap, "ctrl-v", "Terminal"));
+    }
 
     #[test]
     fn desktop_keystrokes_encode_control_and_meta_for_the_pty() {
