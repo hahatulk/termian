@@ -92,24 +92,16 @@ fn tab_binding(keys: &str, number: usize) -> KeyBinding {
 /// Replaces the key bindings with the app keys and the current scheme's.
 pub fn bind(settings: &ShortcutSettings, cx: &mut App) {
     cx.clear_key_bindings();
-    cx.bind_keys([
-        KeyBinding::new("ctrl-tab", NextTab, None),
-        KeyBinding::new("ctrl-shift-tab", PreviousTab, None),
-        KeyBinding::new("f6", FocusWindowControls, None),
-    ]);
+    cx.bind_keys(bindings(settings));
+}
+
+fn bindings(settings: &ShortcutSettings) -> Vec<KeyBinding> {
+    let mut bindings = vec![KeyBinding::new("f6", FocusWindowControls, Some("MainWindow && !Terminal"))];
     #[cfg(target_os = "macos")]
-    cx.bind_keys([KeyBinding::new("cmd-,", OpenSettings, None), KeyBinding::new("cmd-q", Quit, None)]);
+    bindings.extend([KeyBinding::new("cmd-,", OpenSettings, None), KeyBinding::new("cmd-q", Quit, None)]);
     #[cfg(not(target_os = "macos"))]
-    cx.bind_keys([KeyBinding::new("ctrl-,", OpenSettings, None)]);
-    let Some((_, scheme)) = settings.current_scheme() else { return };
-    let mut bindings: Vec<KeyBinding> = scheme
-        .shortcuts
-        .iter()
-        .filter_map(|b| {
-            let keys = shortcuts::keystroke(b.shortcut.as_deref()?)?;
-            binding(&b.kind, &keys)
-        })
-        .collect();
+    bindings.push(KeyBinding::new("ctrl-,", OpenSettings, Some("!Terminal")));
+    let Some((_, scheme)) = settings.current_scheme() else { return bindings };
     let tab_mod = shortcuts::modifier_keystroke(&scheme.tab_mod);
     if !tab_mod.is_empty() {
         bindings.extend((1..=9).map(|n| tab_binding(&format!("{tab_mod}-{n}"), n)));
@@ -122,7 +114,11 @@ pub fn bind(settings: &ShortcutSettings, cx: &mut App) {
         bindings.push(KeyBinding::new(&format!("{pane_mod}-left"), FocusPaneLeft, Some("Terminal")));
         bindings.push(KeyBinding::new(&format!("{pane_mod}-right"), FocusPaneRight, Some("Terminal")));
     }
-    cx.bind_keys(bindings);
+    bindings.extend(scheme.shortcuts.iter().filter_map(|b| {
+        let keys = shortcuts::keystroke(b.shortcut.as_deref()?)?;
+        binding(&b.kind, &keys)
+    }));
+    bindings
 }
 
 impl Shell {
@@ -210,5 +206,45 @@ impl Shell {
             .on_action(cx.listener(|shell, _: &SwitchToTab7, window, cx| shell.switch_tab(7, window, cx)))
             .on_action(cx.listener(|shell, _: &SwitchToTab8, window, cx| shell.switch_tab(8, window, cx)))
             .on_action(cx.listener(|shell, _: &SwitchToTab9, window, cx| shell.switch_tab(9, window, cx)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{KeyContext, Keymap, Keystroke};
+    use std::any::TypeId;
+
+    #[test]
+    fn explicit_shortcuts_override_the_preset_and_pane_or_tab_modifiers() {
+        let contexts = [KeyContext::parse("MainWindow").unwrap(), KeyContext::parse("Terminal").unwrap()];
+        let action = |map: &Keymap, stroke, context: &[KeyContext]| {
+            map.bindings_for_input(&[Keystroke::parse(stroke).unwrap()], context).0
+                .first().map(|binding| binding.action().as_any().type_id())
+        };
+        let mut settings = ShortcutSettings::default();
+        settings.select(Some(shortcuts::PC_PRESET));
+        let pc = Keymap::new(bindings(&settings));
+        assert_eq!(action(&pc, "ctrl-shift-v", &contexts), Some(TypeId::of::<PasteToTerminal>()));
+
+        settings.set_shortcut("pasteToTerminal", Some("ctrl+v".into()));
+        settings.set_shortcut("openTerminalSearch", Some("ctrl+1".into()));
+        settings.set_shortcut("bottom", Some("ctrl+alt+→".into()));
+        settings.set_shortcut("copyFromTerminal", None);
+        let custom = Keymap::new(bindings(&settings));
+        assert_eq!(action(&custom, "ctrl-v", &contexts), Some(TypeId::of::<PasteToTerminal>()));
+        assert_eq!(action(&custom, "ctrl-1", &contexts), Some(TypeId::of::<OpenTerminalSearch>()));
+        assert_eq!(action(&custom, "ctrl-alt-right", &contexts), Some(TypeId::of::<NextTab>()));
+        assert_eq!(action(&custom, "ctrl-v", &contexts[..1]), None);
+        for key in ["ctrl-shift-c", "ctrl-shift-v", "ctrl-tab", "f6"] {
+            assert_eq!(action(&custom, key, &contexts), None, "{key}");
+        }
+        assert_eq!(action(&custom, "f6", &contexts[..1]), Some(TypeId::of::<FocusWindowControls>()));
+
+        settings.select(None);
+        let disabled = Keymap::new(bindings(&settings));
+        for key in ["ctrl-v", "ctrl-1", "ctrl-alt-right", "ctrl-shift-v", "ctrl-tab"] {
+            assert_eq!(action(&disabled, key, &contexts), None, "{key}");
+        }
     }
 }

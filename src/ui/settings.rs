@@ -124,6 +124,13 @@ impl Shell {
                         let focus = cx.focus_handle();
                         window.focus(&focus);
                         let observe = cx.observe(&shell, |_, _, cx| cx.notify());
+                        cx.observe_window_activation(window, |settings: &mut SettingsWindow, window, cx| {
+                            if !window.is_window_active() && settings.recording.is_some() {
+                                settings.submit_recording(cx);
+                                cx.notify();
+                            }
+                        }).detach();
+                        cx.on_release(SettingsWindow::submit_recording).detach();
                         SettingsWindow {
                             shell,
                             main,
@@ -226,6 +233,7 @@ impl Shell {
                     .justify_center().rounded_md().icon_feedback()
                     .tooltip(|_, cx| cx.new(|_| super::cloud::Tooltip(tr("Application menu").into())).into())
                     .child(svg().path(super::assets::icon("dots")).w(px(16.)).h(px(4.)).text_color(rgb(theme::TEXT)))
+                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |shell, _, window, cx| {
                         if let Some(at) = click_anchor.get() {
                             shell.app_menu = Some(AppMenu { at, opener: window.focused(cx) });
@@ -364,10 +372,6 @@ impl SettingsWindow {
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.recording.is_some() {
-            self.record_key(event, cx);
-            return;
-        }
         if super::keyboard::tab(event, window, cx, None) {
             self.commit_edit(cx);
             return;
