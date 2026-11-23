@@ -840,8 +840,13 @@ impl Shell {
             .text_xs()
             .text_color(rgb(theme::TEXT))
             .child(div().text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(rgb(tone)).child(headline));
-        if run.operation == Operation::Sync && matches!(status, Status::Checked(Preview::Conflicts(_))) {
-            panel = panel.child(muted(tr("Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия.")));
+        if let (Operation::Sync, Status::Checked(Preview::Conflicts(conflicts))) = (run.operation, status) {
+            let message = if conflicts.iter().any(|conflict| conflict.credentials_conflict) {
+                termian_native::sync::CREDENTIAL_CONFLICT
+            } else {
+                "Синхронизация разрешит конфликты автоматически. Если запись изменена на обеих сторонах, сохранится версия из облака. Если запись изменена на одной стороне и удалена на другой, сохранится изменённая версия."
+            };
+            panel = panel.child(muted(tr(message)));
         }
         if let Status::Error { message, credentials } = status {
             panel = panel.child(muted(tr(message).to_owned()));

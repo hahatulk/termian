@@ -280,6 +280,10 @@ impl Store {
         let plain = self.decrypt(bytes)?;
         let mut vault = serde_json::from_slice(&plain).map_err(|e| format!("vault file is damaged: {e}"))?;
         crate::portable::scrub_cached_secrets(&mut vault);
+        for identity in &mut vault.identities {
+            identity.has_password |= identity.password.is_some();
+            identity.has_key |= identity.key.is_some();
+        }
         Ok(vault)
     }
 
