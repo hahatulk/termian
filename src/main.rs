@@ -678,6 +678,7 @@ impl Render for Shell {
             .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| {
                 d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))
             })
+            .key_context("MainWindow")
             .track_focus(&self.root_focus)
             .tab_group()
             .on_key_down(cx.listener(|shell, event, window, cx| {

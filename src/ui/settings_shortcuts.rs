@@ -5,7 +5,7 @@
 //! pane rows take modifiers only. Editing a preset makes «<name> copy».
 
 use termian_native::language::text as tr;
-use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Context, Div, FontWeight, KeyDownEvent, ModifiersChangedEvent, SharedString, Window};
+use gpui::{div, prelude::*, px, rgb, rgba, AnyElement, Context, Div, FontWeight, Keystroke, ModifiersChangedEvent, SharedString, Window};
 use termian_native::shortcuts::{self, ShortcutSettings, ACTIONS};
 use termian_native::theme;
 
@@ -17,8 +17,8 @@ const TAB_MOD: &str = "mod";
 const PANE_MOD: &str = "paneMod";
 
 /// A row being given a new combination.
-#[derive(Clone, Debug, PartialEq)]
 pub struct Recording {
+    _keys: gpui::Subscription,
     kind: String,
     old: Option<String>,
     new: Option<String>,
@@ -57,7 +57,7 @@ impl SettingsWindow {
         self.shell.read(cx).vault.shortcuts.clone()
     }
 
-    fn change_shortcuts(&self, cx: &mut Context<Self>, change: impl FnOnce(&mut ShortcutSettings) + 'static) {
+    fn change_shortcuts(&self, cx: &mut gpui::App, change: impl FnOnce(&mut ShortcutSettings) + 'static) {
         self.shell.update(cx, |shell, cx| shell.update_shortcuts(change, cx));
     }
 
@@ -73,13 +73,20 @@ impl SettingsWindow {
         }
         self.submit_recording(cx);
         self.commit_edit(cx);
-        self.recording = Some(Recording { kind: kind.into(), old: old.clone(), new: old });
+        let owner = window.window_handle();
+        let settings = cx.weak_entity();
+        let keys = cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() == owner {
+                let _ = settings.update(cx, |settings, cx| settings.record_key(&event.keystroke, cx));
+            }
+        });
+        self.recording = Some(Recording { _keys: keys, kind: kind.into(), old: old.clone(), new: old });
         window.focus(&self.focus);
         cx.notify();
     }
 
     /// Keeps the recorded combination (legacy `onSubmitBinding`).
-    pub(super) fn submit_recording(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn submit_recording(&mut self, cx: &mut gpui::App) {
         let Some(recording) = self.recording.take() else { return };
         if recording.new == recording.old {
             return;
@@ -94,12 +101,10 @@ impl SettingsWindow {
                 self.change_shortcuts(cx, move |s| s.set_shortcut(&kind, new));
             }
         }
-        cx.notify();
     }
 
-    pub(super) fn record_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn record_key(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some(recording) = self.recording.as_mut() else { return };
-        let keystroke = &event.keystroke;
         let m = keystroke.modifiers;
         let plain = !(m.platform || m.control || m.alt || m.shift);
         match keystroke.key.as_str() {
