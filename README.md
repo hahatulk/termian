@@ -42,7 +42,7 @@ The debug APK is `dist/android/termian-debug.apk`.
 
 In Vaults, open Hosts and add a host. Enter an SSH server address, a username, and a password or key. On Android, tap "Save". Select the host to connect, then run `pwd` in the terminal.
 
-To run `pwd` after login, enter it in the host's "Startup Command" field under SSH. Middle-click a desktop terminal tab to close it and disconnect its sessions.
+To run `pwd` after login, enter it in the host's "Startup Command" field under SSH. Middle-click a desktop terminal tab to close it and disconnect its sessions. Release the mouse button to copy selected terminal text. The desktop client shows "Copied!" in the upper-right corner.
 
 ## Configuration
 

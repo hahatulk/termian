@@ -215,6 +215,18 @@ impl Shell {
                     }
                 }
                 TerminalEvent::Input(bytes) => shell.broadcast_input(tab, pane, bytes, cx),
+                TerminalEvent::Copied => {
+                    shell.copied = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor().timer(std::time::Duration::from_millis(1100)).await;
+                        let _ = this.update(cx, |shell, cx| {
+                            if let Some(task) = shell.copied.take() {
+                                task.detach();
+                            }
+                            cx.notify();
+                        });
+                    }));
+                    cx.notify();
+                }
                 TerminalEvent::Command(command) => {
                     let host = shell.workspaces.get(&tab).and_then(|w| w.panes.get(&pane)).and_then(|p| match p.origin {
                         Origin::Host(host) => Some(host),

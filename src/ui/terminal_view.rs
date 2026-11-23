@@ -52,6 +52,7 @@ pub enum TerminalEvent {
     SerialConnected(String),
     /// Bytes the user typed or pasted (for Broadcast input).
     Input(Vec<u8>),
+    Copied,
     /// Shell integration saw a command finish.
     Command(String),
     /// Existing shell history extracted outside the terminal stream.
@@ -172,7 +173,6 @@ pub struct TerminalView {
     selection_drag: Option<SelectionDrag>,
     mouse_scroll: Point<f32>,
     local_scroll: f32,
-    copied: Option<gpui::Task<()>>,
     /// SSH tabs show the connection screen until the shell is ready.
     connection: Option<Connection>,
     login: Option<LoginState>,
@@ -274,7 +274,6 @@ impl TerminalView {
             selection_drag: None,
             mouse_scroll: point(0., 0.),
             local_scroll: 0.,
-            copied: None,
             login: connection.as_ref().map(|_| LoginState::default()),
             connected: None,
             ctrl_h_backspace: false,
@@ -715,6 +714,7 @@ impl TerminalView {
     pub(super) fn copy_selection(&self, cx: &mut Context<Self>) {
         if let Some(text) = self.terminal.selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            cx.emit(TerminalEvent::Copied);
         }
     }
 
@@ -877,18 +877,7 @@ impl TerminalView {
             return;
         }
         self.extend_selection_at(event.position);
-        if let Some(text) = self.terminal.selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-            self.copied = Some(cx.spawn(async move |this, cx| {
-                cx.background_executor().timer(std::time::Duration::from_millis(1100)).await;
-                let _ = this.update(cx, |view, cx| {
-                    if let Some(task) = view.copied.take() {
-                        task.detach();
-                    }
-                    cx.notify();
-                });
-            }));
-        }
+        self.copy_selection(cx);
         cx.notify();
     }
 
@@ -1381,7 +1370,8 @@ impl Render for TerminalView {
             .id("terminal")
             .track_focus(&self.focus)
             .when(focused, |pane| {
-                pane.key_context("Terminal")
+                let context = if self.accepts_input() && !self.terminal.has_selection() { "Terminal raw_control" } else { "Terminal" };
+                pane.key_context(context)
                     .on_key_down(cx.listener(|view, event: &KeyDownEvent, _, cx| view.input_key(&event.keystroke, cx)))
             })
             .on_action(cx.listener(|view, _: &CopyFromTerminal, _, cx| view.copy_selection(cx)))
@@ -1414,12 +1404,6 @@ impl Render for TerminalView {
             .child(grid)
             .children(self.render_autocomplete(terminal_cursor.filter(|_| focused), cell_width, line_height, cx))
             .children(self.render_search(window, cx))
-            .when(self.copied.is_some(), |d| d.child(super::motion::toast(
-                div().absolute().right(px(12.)).bottom(px(12.)).px_3().py_1()
-                    .rounded_md().bg(rgb(termian_native::theme::SURFACE))
-                    .text_size(px(12.)).text_color(rgb(termian_native::theme::TEXT))
-                    .child(tr("Copied!")),
-            )))
             .children(self.connected.as_ref().and_then(|progress| {
                 let connection = self.connection.as_ref()?;
                 Some(login_view::render_connected(&connection.label, format!("SSH {}:{}", connection.target.host, connection.target.port), connection.os.as_deref(), progress, window))
