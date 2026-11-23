@@ -264,7 +264,7 @@ impl TerminalView {
         let keyboard_focus = focus.clone();
         let view = cx.weak_entity();
         let keyboard = cx.intercept_keystrokes(move |event, window, cx| {
-            if keyboard_focus.is_focused(window) && !event.keystroke.modifiers.platform
+            if keyboard_focus.is_focused(window)
                 && event.context_stack.iter().any(|context| context.contains("Terminal"))
             {
                 let _ = view.update(cx, |view, cx| view.input_key(&event.keystroke, cx));
@@ -615,7 +615,6 @@ impl TerminalView {
         cx.notify();
     }
 
-    /// Opens «Search terminal» (⌘F, or the side panel's search row).
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.search.get_or_insert_with(String::new);
         window.focus(&self.search_focus);
@@ -703,15 +702,8 @@ impl TerminalView {
             return;
         }
         cx.stop_propagation();
-        let mods = keystroke.modifiers;
-        let character = keystroke.key == "space" || keystroke.key.chars().count() == 1;
-        let alt = mods.alt && (!cfg!(target_os = "macos") || self.settings.option_is_meta || mods.control || !character);
-        let typed = if cfg!(target_os = "macos") && alt && character {
-            None
-        } else {
-            keystroke.key_char.as_deref()
-        };
-        let mods = Modifiers { control: mods.control, alt, shift: mods.shift };
+        let mut buffer = [0; 4];
+        let (mods, typed) = terminal_key_parts(keystroke, self.settings.option_is_meta, &mut buffer);
         if let Some(bytes) = self.terminal.key_input(&keystroke.key, typed, mods, self.ctrl_h_backspace) {
             self.selection_drag = None;
             self.terminal.scroll(i32::MIN / 2);
@@ -1399,7 +1391,7 @@ impl Render for TerminalView {
         div()
             .id("terminal")
             .track_focus(&self.focus)
-            .key_context("Terminal")
+            .when(focused, |pane| pane.key_context("Terminal"))
             .on_action(cx.listener(|view, _: &CopyFromTerminal, _, cx| view.copy_selection(cx)))
             .on_action(cx.listener(|view, _: &PasteToTerminal, _, cx| view.paste_clipboard(cx)))
             .on_action(cx.listener(|view, _: &SelectAllInTerminal, _, cx| {
@@ -1444,6 +1436,29 @@ impl Render for TerminalView {
     }
 }
 
+fn terminal_key_parts<'a>(
+    key: &'a gpui::Keystroke,
+    option_is_meta: bool,
+    buffer: &'a mut [u8; 4],
+) -> (Modifiers, Option<&'a str>) {
+    let mods = key.modifiers;
+    let mut chars = key.key.chars();
+    let single = chars.next().filter(|_| chars.next().is_none());
+    let character = single.is_some() || key.key == "space";
+    let option_text = cfg!(target_os = "macos") && !option_is_meta && !mods.control && character;
+    let meta = mods.platform || (mods.alt && !option_text);
+    let use_logical_key = (cfg!(target_os = "macos") && meta)
+        || ((meta || mods.function) && key.key_char.is_none());
+    let typed = match single {
+        Some(c) if use_logical_key => {
+            let c = if mods.shift { c.to_ascii_uppercase() } else { c };
+            Some(&*c.encode_utf8(buffer))
+        }
+        _ => key.key_char.as_deref(),
+    };
+    (Modifiers { control: mods.control, alt: meta, shift: mods.shift }, typed)
+}
+
 fn terminal_button(button: MouseButton) -> Option<TerminalButton> {
     match button {
         MouseButton::Left => Some(TerminalButton::Left),
@@ -1456,6 +1471,32 @@ fn terminal_button(button: MouseButton) -> Option<TerminalButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_keystrokes_encode_control_and_meta_for_the_pty() {
+        let terminal = Terminal::new(20, 2);
+        let cases: &[(&str, Option<&str>, &[u8])] = &[
+            ("ctrl-a", None, b"\x01"),
+            ("ctrl-c", None, b"\x03"),
+            ("ctrl-v", None, b"\x16"),
+            ("ctrl-x", None, b"\x18"),
+            ("ctrl-shift-v", None, b"\x16"),
+            ("cmd-b", None, b"\x1bb"),
+            ("win-b", Some("b"), b"\x1bb"),
+            ("cmd-shift-f", None, b"\x1bF"),
+            ("cmd-ctrl-x", None, b"\x1b\x18"),
+            ("cmd-left", None, b"\x1b[1;3D"),
+            ("fn-shift-b", None, b"B"),
+            ("x", Some("ч"), "ч".as_bytes()),
+        ];
+        for &(name, text, expected) in cases {
+            let mut key = gpui::Keystroke::parse(name).unwrap();
+            key.key_char = text.map(str::to_owned);
+            let mut buffer = [0; 4];
+            let (mods, typed) = terminal_key_parts(&key, true, &mut buffer);
+            assert_eq!(terminal.key_input(&key.key, typed, mods, false).as_deref(), Some(expected), "{name}");
+        }
+    }
 
     #[test]
     fn pointer_uses_painted_rows_and_cell_halves() {
