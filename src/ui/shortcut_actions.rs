@@ -64,7 +64,7 @@ fn binding(kind: &str, keys: &str) -> Option<KeyBinding> {
     let window = scheme_context(keys, false);
     Some(match kind {
         "copyFromTerminal" => KeyBinding::new(keys, CopyFromTerminal, terminal),
-        "pasteToTerminal" => KeyBinding::new(keys, PasteToTerminal, terminal),
+        "pasteToTerminal" => KeyBinding::new(keys, PasteToTerminal, Some("Terminal")),
         "selectAllInTerminal" => KeyBinding::new(keys, SelectAllInTerminal, terminal),
         "clearTerminalBuffer" => KeyBinding::new(keys, ClearTerminalBuffer, terminal),
         "openTerminalSearch" => KeyBinding::new(keys, OpenTerminalSearch, terminal),
@@ -252,19 +252,26 @@ mod tests {
         assert_eq!(action(&custom, "ctrl-v", &contexts[..1]), None);
         assert_eq!(action(&custom, "ctrl-2", &contexts[..1]), Some(TypeId::of::<SwitchToTab2>()));
         assert_eq!(action(&custom, "cmd-a", &unselected), Some(TypeId::of::<SelectAllInTerminal>()));
-        for key in ["ctrl-v", "ctrl-1", "ctrl-2", "ctrl-alt-right", "ctrl-alt-left"] {
+        assert_eq!(action(&custom, "ctrl-v", &unselected), Some(TypeId::of::<PasteToTerminal>()));
+        for key in ["ctrl-shift-v", "ctrl-1", "ctrl-2", "ctrl-alt-right", "ctrl-alt-left"] {
             assert_eq!(action(&custom, key, &unselected), None, "{key}");
         }
-        assert_eq!(action(&pc, "ctrl-shift-v", &unselected), None);
+        assert_eq!(action(&pc, "ctrl-shift-v", &unselected), Some(TypeId::of::<PasteToTerminal>()));
+        assert_eq!(action(&pc, "ctrl-v", &unselected), None);
         for key in ["ctrl-shift-c", "ctrl-shift-v", "ctrl-tab", "f6"] {
             assert_eq!(action(&custom, key, &contexts), None, "{key}");
         }
         assert_eq!(action(&custom, "f6", &contexts[..1]), Some(TypeId::of::<FocusWindowControls>()));
 
+        settings.set_shortcut("pasteToTerminal", None);
+        let unbound = Keymap::new(bindings(&settings));
+        assert_eq!(action(&unbound, "ctrl-v", &unselected), None);
+
         settings.select(None);
         let disabled = Keymap::new(bindings(&settings));
         for key in ["ctrl-v", "ctrl-1", "ctrl-alt-right", "ctrl-shift-v", "ctrl-tab"] {
             assert_eq!(action(&disabled, key, &contexts), None, "{key}");
+            assert_eq!(action(&disabled, key, &unselected), None, "{key}");
         }
     }
 }

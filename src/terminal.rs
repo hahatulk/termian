@@ -128,13 +128,20 @@ impl EventListener for Listener {
     }
 }
 
+#[derive(PartialEq, Eq)]
+enum PointerSelection {
+    None,
+    Active,
+    Copied,
+}
+
 pub struct Terminal {
     term: Term<Listener>,
     parser: Processor,
     listener: Listener,
     look: Look,
     mouse: mouse::State,
-    pointer_selection: bool,
+    pointer_selection: PointerSelection,
     /// «Search terminal»: the query's compiled search and the current match.
     search: Option<(String, RegexSearch)>,
     found: Option<Match>,
@@ -161,7 +168,7 @@ impl Terminal {
         let listener = Listener::default();
         let config = Config { scrolling_history: settings.scrollback_lines(), ..Config::default() };
         let size = Size { columns: columns.max(2), lines: lines.max(1) };
-        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings), mouse: mouse::State::default(), pointer_selection: false, search: None, found: None }
+        Self { term: Term::new(config, &size, listener.clone()), parser: Processor::new(), listener, look: Look::new(settings), mouse: mouse::State::default(), pointer_selection: PointerSelection::None, search: None, found: None }
     }
 
     /// New Settings → Terminal values for an open terminal.
@@ -180,7 +187,7 @@ impl Terminal {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        let selection = if self.pointer_selection {
+        let selection = if self.pointer_selection != PointerSelection::None {
             self.term.selection.clone().map(|selection| (selection, self.selection_space()))
         } else {
             None
@@ -254,16 +261,17 @@ impl Terminal {
         let (point, side) = self.selection_edge(row, column, side);
         let kind = if word { SelectionType::Semantic } else { SelectionType::Simple };
         self.term.selection = Some(Selection::new(kind, point, side));
-        self.pointer_selection = true;
+        self.pointer_selection = PointerSelection::Active;
     }
 
     pub fn extend_selection(&mut self, row: usize, column: usize, side: Side) -> bool {
-        if !self.pointer_selection {
+        if self.pointer_selection == PointerSelection::None {
             return false;
         }
         let (point, side) = self.selection_edge(row, column, side);
         let Some(selection) = self.term.selection.as_mut() else { return false };
         selection.update(point, side);
+        self.pointer_selection = PointerSelection::Active;
         true
     }
 
@@ -289,7 +297,7 @@ impl Terminal {
 
     /// «Select All in Terminal»: history and screen.
     pub fn select_all(&mut self) {
-        self.pointer_selection = false;
+        self.pointer_selection = PointerSelection::None;
         let start = Point::new(alacritty_terminal::index::Line(-(self.term.history_size() as i32)), Column(0));
         let end = Point::new(alacritty_terminal::index::Line(self.term.screen_lines() as i32 - 1), Column(self.term.columns() - 1));
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
@@ -345,7 +353,7 @@ impl Terminal {
     }
 
     fn select_found(&mut self) -> bool {
-        self.pointer_selection = false;
+        self.pointer_selection = PointerSelection::None;
         match self.found.clone() {
             Some(found) => {
                 let mut selection = Selection::new(SelectionType::Simple, *found.start(), Side::Left);
@@ -367,17 +375,30 @@ impl Terminal {
     }
 
     pub fn has_selection(&self) -> bool {
-        self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term)).is_some()
+        self.pointer_selection != PointerSelection::Copied && self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term)).is_some()
     }
 
     pub fn clear_selection(&mut self) {
-        self.pointer_selection = false;
+        self.pointer_selection = PointerSelection::None;
         self.term.selection = None;
     }
 
     /// Selected text; `None` when nothing (or only an empty cell range) is selected.
     pub fn selection_text(&self) -> Option<String> {
+        if self.pointer_selection == PointerSelection::Copied {
+            return None;
+        }
         self.term.selection_to_string().filter(|text| !text.is_empty())
+    }
+
+    pub fn take_selection_text(&mut self) -> Option<String> {
+        let text = self.selection_text()?;
+        if self.pointer_selection == PointerSelection::Active {
+            self.pointer_selection = PointerSelection::Copied;
+        } else {
+            self.clear_selection();
+        }
+        Some(text)
     }
 
     fn viewport_point(&self, row: usize, column: usize) -> Point {
@@ -388,7 +409,7 @@ impl Terminal {
 
     pub fn snapshot(&self) -> Snapshot {
         let content = self.term.renderable_content();
-        let selection = content.selection;
+        let selection = content.selection.filter(|_| self.pointer_selection != PointerSelection::Copied);
         let offset = content.display_offset as i32;
         let (columns, rows) = self.size();
         let look = &self.look;
@@ -606,8 +627,15 @@ mod tests {
         let highlighted = runs.iter().find(|r| r.bg == selection).unwrap();
         assert!(highlighted.text.starts_with("world"), "{highlighted:?}");
         assert!(runs[0].text.starts_with("hello") && runs[0].bg != selection);
-        t.clear_selection();
+        assert_eq!(t.take_selection_text().as_deref(), Some("world\nsecond"));
         assert!(!t.has_selection());
+        assert_eq!(t.take_selection_text(), None);
+        assert!(t.snapshot().lines.iter().flatten().all(|r| r.bg != selection));
+
+        assert!(t.extend_selection(0, 10, Side::Right));
+        assert_eq!(t.take_selection_text().as_deref(), Some("world"));
+        t.clear_selection();
+        assert!(!t.extend_selection(0, 10, Side::Right));
         assert_eq!(t.selection_text(), None);
     }
 
@@ -616,7 +644,9 @@ mod tests {
         let mut t = Terminal::new(10, 2);
         t.feed(b"one\r\ntwo\r\nthree\r\n$ ");
         t.select_all();
-        assert_eq!(t.selection_text().as_deref().map(str::trim_end), Some("one\ntwo\nthree\n$"));
+        assert_eq!(t.take_selection_text().as_deref().map(str::trim_end), Some("one\ntwo\nthree\n$"));
+        assert!(!t.has_selection());
+        assert!(!t.extend_selection(0, 1, Side::Right));
         t.clear_buffer();
         let s = t.snapshot();
         assert_eq!((s.line_text(0).trim_end(), s.line_text(1).trim_end()), ("$", ""));
@@ -704,7 +734,9 @@ mod tests {
         t.feed(history.join("\r\n").as_bytes());
         t.start_selection(3, 7, Side::Right, false);
         assert!(t.scroll_selection(8, 0, 0, Side::Left));
+        assert!(t.take_selection_text().is_some());
         t.feed(b"\x1b[4;1H\x1b[2Kline 299");
+        assert!(!t.has_selection());
         assert!(t.scroll_selection(288, 0, 0, Side::Left));
         assert_eq!(t.selection_text().as_deref(), Some(history.join("\n").as_str()));
 
