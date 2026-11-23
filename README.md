@@ -1,16 +1,24 @@
 # Termian
 
-SSH/SFTP-клиент на Rust для macOS, Windows и Android. Подключения и ключи хранятся в локальном Vault. Для синхронизации можно [запустить свой сервер](cloud-sync-server/README.md).
+Termian is a Rust client for SSH sessions and SFTP transfers on macOS, Windows, and Android.
 
-## Установка
+## Overview
 
-В [GitHub Releases](https://github.com/hahatulk/termian/releases/latest) скачайте `.dmg` для macOS Apple Silicon, `-setup.exe` для Windows x64 или `.apk` для Android 8+. На панели задач Windows окна Termian используют значок из EXE.
+- Split terminal tabs, saved snippets, and per-host startup commands.
+- Local, remote, and dynamic port forwarding.
+- Encrypted Vaults for hosts and credentials, encrypted session logs with bookmarks, and optional [self-hosted sync](cloud-sync-server/README.md).
 
-Новые версии сначала публикуются как "Pre-release". В "Latest" они попадают после ручного перевода.
+## Installation
 
-## Запуск из исходников
+Download a package from [GitHub Releases](https://github.com/hahatulk/termian/releases):
 
-Нужен Rust stable. На macOS установите Xcode Command Line Tools и задайте `export MACOSX_DEPLOYMENT_TARGET=11.0`. На Windows установите MSVC и Windows SDK.
+- macOS Apple Silicon: `.dmg`.
+- Windows x64: `-setup.exe` or the portable `.exe`.
+- Android 8 or later: `.apk`.
+
+### Desktop from source
+
+Install stable Rust. On macOS, install the Xcode Command Line Tools and run `export MACOSX_DEPLOYMENT_TARGET=11.0`. On Windows, install MSVC and the Windows SDK.
 
 ```bash
 git clone https://github.com/hahatulk/termian.git
@@ -18,23 +26,48 @@ cd termian
 cargo run --locked --bin termian-native
 ```
 
-[Сборка Android](spec.md#92-android)
+### Android from source
 
-## Скриншоты
+On macOS or x86_64 Linux, install JDK 21, Python 3, `zip`, the Android SDK command-line tools, and stable Rust through `rustup`. Set `ANDROID_SDK_ROOT` to your SDK directory, then run from the repository root:
+
+```bash
+sdkmanager --install 'platforms;android-37.0' 'build-tools;37.0.0' 'ndk;28.2.13676358'
+rustup target add aarch64-linux-android x86_64-linux-android
+./scripts/build-android.sh
+```
+
+The debug APK is `dist/android/termian-debug.apk`.
+
+## Usage
+
+In Vaults, open Hosts and add a host. Enter an SSH server address, a username, and a password or key. On Android, tap "Save". Select the host to connect, then run `pwd` in the terminal.
+
+To run `pwd` after login, enter it in the host's "Startup Command" field under SSH. Middle-click a desktop terminal tab to close it and disconnect its sessions.
+
+## Configuration
+
+Set the server address, access token, and encryption password in Settings → Account to sync your Vaults through a [server you host](cloud-sync-server/README.md). From Settings → Terminal, choose the theme and text size. Those preferences apply to all Vaults on the device.
+
+## Screenshots
 
 <table>
   <tr>
-    <td align="center"><a href="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e"><img src="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e" alt="Терминал" width="400"></a><br>Терминал</td>
-    <td align="center"><a href="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117"><img src="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117" alt="Vault и редактор хоста" width="400"></a><br>Vault и редактор хоста</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e"><img src="https://github.com/user-attachments/assets/4d2edd91-a4ea-47c8-a944-ab96992bca8e" alt="Terminal" width="400"></a><br>Terminal</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117"><img src="https://github.com/user-attachments/assets/bf0001af-9abf-4fce-95f3-3d3bd9c47117" alt="Vault and host editor" width="400"></a><br>Vault and host editor</td>
   </tr>
   <tr>
-    <td align="center"><a href="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c"><img src="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c" alt="Настройки синхронизации" width="400"></a><br>Настройки синхронизации</td>
-    <td align="center"><a href="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9"><img src="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9" alt="Панель сервера" width="300"></a><br>Панель сервера</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c"><img src="https://github.com/user-attachments/assets/c30cb794-2966-485e-a2a1-67dbfa10b30c" alt="Sync settings" width="400"></a><br>Sync settings</td>
+    <td align="center"><a href="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9"><img src="https://github.com/user-attachments/assets/835bfa61-1e41-4c76-b017-0724b1a12ee9" alt="Server panel" width="300"></a><br>Server panel</td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><a href="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f"><img src="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f" alt="Каналы обновлений" width="400"></a><br>Каналы обновлений</td>
-    <td></td>
+    <td align="center" colspan="2"><a href="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f"><img src="https://github.com/user-attachments/assets/de8ee1d1-95ec-4f90-a13a-d6150da6936f" alt="Update channels" width="400"></a><br>Update channels</td>
   </tr>
 </table>
 
-[Автообновление](spec.md#46-автообновление) · [Спецификация](spec.md) · [Сообщить об ошибке](https://github.com/hahatulk/termian/issues)
+## Contributing
+
+Report bugs in [GitHub Issues](https://github.com/hahatulk/termian/issues) or submit a pull request. Run `cargo test --locked` from the repository root before submitting code changes.
+
+## License
+
+[MIT](LICENSE)
