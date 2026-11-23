@@ -711,10 +711,12 @@ impl TerminalView {
         }
     }
 
-    pub(super) fn copy_selection(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.terminal.selection_text() {
+    pub(super) fn copy_selection(&mut self, cx: &mut Context<Self>) {
+        if let Some(text) = self.terminal.take_selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+            self.selection_drag = None;
             cx.emit(TerminalEvent::Copied);
+            cx.notify();
         }
     }
 
