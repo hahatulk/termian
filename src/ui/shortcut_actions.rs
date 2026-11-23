@@ -49,43 +49,54 @@ gpui::actions!(
     ]
 );
 
+fn scheme_context(keys: &str, terminal: bool) -> Option<&'static str> {
+    match (keys.split('-').any(|key| key == "ctrl"), terminal) {
+        (true, true) => Some("Terminal && !raw_control"),
+        (true, false) => Some("!raw_control"),
+        (false, true) => Some("Terminal"),
+        (false, false) => None,
+    }
+}
+
 /// The binding of one legacy action type: the action and its key context.
 fn binding(kind: &str, keys: &str) -> Option<KeyBinding> {
-    const TERMINAL: Option<&str> = Some("Terminal");
+    let terminal = scheme_context(keys, true);
+    let window = scheme_context(keys, false);
     Some(match kind {
-        "copyFromTerminal" => KeyBinding::new(keys, CopyFromTerminal, TERMINAL),
-        "pasteToTerminal" => KeyBinding::new(keys, PasteToTerminal, TERMINAL),
-        "selectAllInTerminal" => KeyBinding::new(keys, SelectAllInTerminal, TERMINAL),
-        "clearTerminalBuffer" => KeyBinding::new(keys, ClearTerminalBuffer, TERMINAL),
-        "openTerminalSearch" => KeyBinding::new(keys, OpenTerminalSearch, TERMINAL),
-        "toggleSidepanel" => KeyBinding::new(keys, ToggleSidepanel, TERMINAL),
-        "terminals" => KeyBinding::new(keys, OpenHostsPage, None),
-        "localTerminal" => KeyBinding::new(keys, OpenLocalTerminal, None),
-        "serialConnection" => KeyBinding::new(keys, OpenSerialConnection, None),
-        "close" => KeyBinding::new(keys, CloseTab, None),
-        "bottom" => KeyBinding::new(keys, NextTab, None),
-        "top" => KeyBinding::new(keys, PreviousTab, None),
-        "forwarding" => KeyBinding::new(keys, OpenPortForwarding, None),
-        "commandPalette" => KeyBinding::new(keys, OpenPalette, None),
-        "jumpTo" => KeyBinding::new(keys, JumpTo, None),
-        "newTab" => KeyBinding::new(keys, NewTab, None),
-        "toggleSplitViewBroadcastMode" => KeyBinding::new(keys, ToggleBroadcastMode, None),
-        "snippets" => KeyBinding::new(keys, OpenSnippets, None),
+        "copyFromTerminal" => KeyBinding::new(keys, CopyFromTerminal, terminal),
+        "pasteToTerminal" => KeyBinding::new(keys, PasteToTerminal, terminal),
+        "selectAllInTerminal" => KeyBinding::new(keys, SelectAllInTerminal, terminal),
+        "clearTerminalBuffer" => KeyBinding::new(keys, ClearTerminalBuffer, terminal),
+        "openTerminalSearch" => KeyBinding::new(keys, OpenTerminalSearch, terminal),
+        "toggleSidepanel" => KeyBinding::new(keys, ToggleSidepanel, terminal),
+        "terminals" => KeyBinding::new(keys, OpenHostsPage, window),
+        "localTerminal" => KeyBinding::new(keys, OpenLocalTerminal, window),
+        "serialConnection" => KeyBinding::new(keys, OpenSerialConnection, window),
+        "close" => KeyBinding::new(keys, CloseTab, window),
+        "bottom" => KeyBinding::new(keys, NextTab, window),
+        "top" => KeyBinding::new(keys, PreviousTab, window),
+        "forwarding" => KeyBinding::new(keys, OpenPortForwarding, window),
+        "commandPalette" => KeyBinding::new(keys, OpenPalette, window),
+        "jumpTo" => KeyBinding::new(keys, JumpTo, window),
+        "newTab" => KeyBinding::new(keys, NewTab, window),
+        "toggleSplitViewBroadcastMode" => KeyBinding::new(keys, ToggleBroadcastMode, window),
+        "snippets" => KeyBinding::new(keys, OpenSnippets, window),
         _ => return None,
     })
 }
 
 fn tab_binding(keys: &str, number: usize) -> KeyBinding {
+    let context = scheme_context(keys, false);
     match number {
-        1 => KeyBinding::new(keys, SwitchToTab1, None),
-        2 => KeyBinding::new(keys, SwitchToTab2, None),
-        3 => KeyBinding::new(keys, SwitchToTab3, None),
-        4 => KeyBinding::new(keys, SwitchToTab4, None),
-        5 => KeyBinding::new(keys, SwitchToTab5, None),
-        6 => KeyBinding::new(keys, SwitchToTab6, None),
-        7 => KeyBinding::new(keys, SwitchToTab7, None),
-        8 => KeyBinding::new(keys, SwitchToTab8, None),
-        _ => KeyBinding::new(keys, SwitchToTab9, None),
+        1 => KeyBinding::new(keys, SwitchToTab1, context),
+        2 => KeyBinding::new(keys, SwitchToTab2, context),
+        3 => KeyBinding::new(keys, SwitchToTab3, context),
+        4 => KeyBinding::new(keys, SwitchToTab4, context),
+        5 => KeyBinding::new(keys, SwitchToTab5, context),
+        6 => KeyBinding::new(keys, SwitchToTab6, context),
+        7 => KeyBinding::new(keys, SwitchToTab7, context),
+        8 => KeyBinding::new(keys, SwitchToTab8, context),
+        _ => KeyBinding::new(keys, SwitchToTab9, context),
     }
 }
 
@@ -109,10 +120,11 @@ fn bindings(settings: &ShortcutSettings) -> Vec<KeyBinding> {
     // «Move focus between Split View panes»: the modifier with the arrows.
     let pane_mod = shortcuts::modifier_keystroke(&scheme.pane_mod);
     if !pane_mod.is_empty() {
-        bindings.push(KeyBinding::new(&format!("{pane_mod}-up"), FocusPaneUp, Some("Terminal")));
-        bindings.push(KeyBinding::new(&format!("{pane_mod}-down"), FocusPaneDown, Some("Terminal")));
-        bindings.push(KeyBinding::new(&format!("{pane_mod}-left"), FocusPaneLeft, Some("Terminal")));
-        bindings.push(KeyBinding::new(&format!("{pane_mod}-right"), FocusPaneRight, Some("Terminal")));
+        let context = scheme_context(&pane_mod, true);
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-up"), FocusPaneUp, context));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-down"), FocusPaneDown, context));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-left"), FocusPaneLeft, context));
+        bindings.push(KeyBinding::new(&format!("{pane_mod}-right"), FocusPaneRight, context));
     }
     bindings.extend(scheme.shortcuts.iter().filter_map(|b| {
         let keys = shortcuts::keystroke(b.shortcut.as_deref()?)?;
@@ -218,6 +230,7 @@ mod tests {
     #[test]
     fn explicit_shortcuts_override_the_preset_and_pane_or_tab_modifiers() {
         let contexts = [KeyContext::parse("MainWindow").unwrap(), KeyContext::parse("Terminal").unwrap()];
+        let unselected = [contexts[0].clone(), KeyContext::parse("Terminal raw_control").unwrap()];
         let action = |map: &Keymap, stroke, context: &[KeyContext]| {
             map.bindings_for_input(&[Keystroke::parse(stroke).unwrap()], context).0
                 .first().map(|binding| binding.action().as_any().type_id())
@@ -231,11 +244,18 @@ mod tests {
         settings.set_shortcut("openTerminalSearch", Some("ctrl+1".into()));
         settings.set_shortcut("bottom", Some("ctrl+alt+→".into()));
         settings.set_shortcut("copyFromTerminal", None);
+        settings.set_shortcut("selectAllInTerminal", Some("meta+a".into()));
         let custom = Keymap::new(bindings(&settings));
         assert_eq!(action(&custom, "ctrl-v", &contexts), Some(TypeId::of::<PasteToTerminal>()));
         assert_eq!(action(&custom, "ctrl-1", &contexts), Some(TypeId::of::<OpenTerminalSearch>()));
         assert_eq!(action(&custom, "ctrl-alt-right", &contexts), Some(TypeId::of::<NextTab>()));
         assert_eq!(action(&custom, "ctrl-v", &contexts[..1]), None);
+        assert_eq!(action(&custom, "ctrl-2", &contexts[..1]), Some(TypeId::of::<SwitchToTab2>()));
+        assert_eq!(action(&custom, "cmd-a", &unselected), Some(TypeId::of::<SelectAllInTerminal>()));
+        for key in ["ctrl-v", "ctrl-1", "ctrl-2", "ctrl-alt-right", "ctrl-alt-left"] {
+            assert_eq!(action(&custom, key, &unselected), None, "{key}");
+        }
+        assert_eq!(action(&pc, "ctrl-shift-v", &unselected), None);
         for key in ["ctrl-shift-c", "ctrl-shift-v", "ctrl-tab", "f6"] {
             assert_eq!(action(&custom, key, &contexts), None, "{key}");
         }

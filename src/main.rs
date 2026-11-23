@@ -82,6 +82,7 @@ pub struct Shell {
     /// Each terminal tab's panes (one unless split).
     workspaces: HashMap<TabId, ui::workspace::Workspace>,
     next_pane: u64,
+    copied: Option<gpui::Task<()>>,
     /// The next terminal opened goes beside this pane instead of a new tab.
     split_into: Option<(TabId, u64)>,
     /// A terminal tab's right-click menu.
@@ -310,6 +311,7 @@ impl Shell {
             group: None,
             workspaces: HashMap::new(),
             next_pane: 0,
+            copied: None,
             split_into: None,
             tab_menu: None,
             pointer: Default::default(),
@@ -673,7 +675,13 @@ impl Render for Shell {
                     .when(matches!(self.tabs.active().kind, TabKind::Session { .. }), |d| d.child(self.render_side_panel_button(cx)))
                     .child(self.render_app_menu_button(cx)),
             )
-            .child(div().flex_1().min_h_0().child(content))
+            .child(div().id("main-content").flex_1().min_h_0().relative().child(content)
+                .when(self.copied.is_some(), |d| d.child(ui::motion::toast(
+                    div().absolute().right(px(12.)).top(px(12.)).px_3().py_1()
+                        .rounded_md().bg(rgb(theme::SURFACE))
+                        .text_size(px(12.)).text_color(rgb(theme::TEXT))
+                        .child("Copied!"),
+                ))))
             .when(matches!(self.tabs.active().kind, TabKind::Sftp), |d| d.children(self.render_sftp_overlay(window, cx)))
             .when(matches!(self.tabs.active().kind, TabKind::Vaults), |d| {
                 d.children(self.render_host_menu(window, cx)).children(self.render_group_menu(window, cx))

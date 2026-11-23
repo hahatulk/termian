@@ -366,6 +366,10 @@ impl Terminal {
         self.found = None;
     }
 
+    pub fn has_selection(&self) -> bool {
+        self.term.selection.as_ref().and_then(|selection| selection.to_range(&self.term)).is_some()
+    }
+
     pub fn clear_selection(&mut self) {
         self.pointer_selection = false;
         self.term.selection = None;
@@ -593,7 +597,9 @@ mod tests {
         let mut t = Terminal::new(20, 3);
         t.feed(b"hello world\r\nsecond line");
         t.start_selection(0, 6, Side::Left, false);
+        assert!(!t.has_selection());
         t.extend_selection(1, 5, Side::Right);
+        assert!(t.has_selection());
         assert_eq!(t.selection_text().as_deref(), Some("world\nsecond"));
         let runs = &t.snapshot().lines[0];
         let selection = Look::default().selection;
@@ -601,6 +607,7 @@ mod tests {
         assert!(highlighted.text.starts_with("world"), "{highlighted:?}");
         assert!(runs[0].text.starts_with("hello") && runs[0].bg != selection);
         t.clear_selection();
+        assert!(!t.has_selection());
         assert_eq!(t.selection_text(), None);
     }
 
